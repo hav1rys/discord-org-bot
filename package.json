@@ -1,0 +1,15 @@
+{
+  "name": "org-management-bot",
+  "version": "1.0.0",
+  "description": "Discord-бот для управления участниками организации",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "sqlite3": "^5.1.7",
+    "dotenv": "^16.4.5"
+  }
+}
