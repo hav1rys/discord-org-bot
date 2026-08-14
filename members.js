@@ -14,89 +14,100 @@ const FIELD_ID = '№. Упоминание | Тег | ID';
 const FIELD_NAME = 'Имя Фамилия';
 const FIELD_PASSPORT = '№ Паспорта';
 
-// Строит 3 инлайн-поля для одного участника: ID, Имя(-ена), Паспорт(-а).
-// Если паспортов несколько — каждая строка с "-", как в примере.
-async function buildParticipantFields(p, index) {
-  const passports = await getAllPassports(p.discord_id);
-  const multi = passports.length > 1;
+// Собирает плоский список "паспорт-записей" по всем участникам: каждая
+// запись — один конкретный паспорт (со своим рангом/отпуском/AFK), а не
+// весь аккаунт целиком. Один человек с паспортами на разных рангах
+// появится в нескольких разных группах ниже (п.7.1).
+async function getFlatPassportEntries() {
+  const participants = await all('SELECT * FROM participants ORDER BY name');
+  const entries = [];
+  for (const p of participants) {
+    const passports = await getAllPassports(p.discord_id);
+    for (const passport of passports) {
+      entries.push({ participant: p, passport });
+    }
+  }
+  return entries;
+}
 
-  const idValue = `${index}. <@${p.discord_id}> | ${p.discord_tag} | \`${p.discord_id}\``;
-  const nameValue = passports.map((pp) => (multi ? `- ${pp.name}` : pp.name)).join('\n') || p.name;
-  const passportValue = passports.map((pp) => (multi ? `- ${pp.static}` : pp.static)).join('\n') || p.static;
-
-  const statusLines = [];
-  if (p.vacation_until) statusLines.push(`🏖️ В отпуске до ${formatDateTime(new Date(p.vacation_until))}`);
-  if (p.afk_since) statusLines.push(`💤 AFK с ${p.afk_since}`);
+function buildEntryFields(entry, index) {
+  const { participant: p, passport } = entry;
+  const hasDiscord = !p.discord_id.startsWith('nodiscord-');
+  const idValue = hasDiscord
+    ? `${index}. <@${p.discord_id}> | ${p.discord_tag} | \`${p.discord_id}\``
+    : `${index}. ${p.discord_tag} | без Discord`;
 
   const fields = [
     { name: FIELD_ID, value: idValue.slice(0, 1024), inline: true },
-    { name: FIELD_NAME, value: nameValue.slice(0, 1024), inline: true },
-    { name: FIELD_PASSPORT, value: passportValue.slice(0, 1024), inline: true },
+    { name: FIELD_NAME, value: passport.name.slice(0, 1024), inline: true },
+    { name: FIELD_PASSPORT, value: passport.static.slice(0, 1024), inline: true },
   ];
+
+  const statusLines = [];
+  if (passport.vacation_until) statusLines.push(`🏖️ В отпуске до ${formatDateTime(new Date(passport.vacation_until))}`);
+  if (passport.afk_since) statusLines.push(`💤 AFK с ${passport.afk_since}`);
   if (statusLines.length > 0) {
     fields.push({ name: '\u200b', value: statusLines.join('\n').slice(0, 1024) });
   }
+
   return fields;
 }
 
-async function buildRoleEmbed(role, participants, startIndex) {
+async function buildRoleEmbed(role, entries, startIndex) {
   const embed = new EmbedBuilder()
     .setColor(0x2b2d31)
     .setTitle(role ? role.name : 'Без роли')
-    .setFooter({ text: `Участников: ${participants.length}` });
+    .setFooter({ text: `Паспортов на ранге: ${entries.length}` });
 
-  if (participants.length === 0) {
-    embed.addFields({ name: '\u200b', value: 'Нет участников с этой ролью' });
+  if (entries.length === 0) {
+    embed.addFields({ name: '\u200b', value: 'Нет паспортов с этим рангом' });
     return { embed, nextIndex: startIndex };
   }
 
   let idx = startIndex;
   let fieldCount = 0;
   const limited = [];
-  // Каждый участник занимает 3-4 поля; лимит embed'а — 25 полей.
-  for (const p of participants) {
-    const perParticipant = p.vacation_until || p.afk_since ? 4 : 3;
-    if (fieldCount + perParticipant > 25) break;
-    fieldCount += perParticipant;
-    limited.push(p);
+  for (const entry of entries) {
+    const perEntry = entry.passport.vacation_until || entry.passport.afk_since ? 4 : 3;
+    if (fieldCount + perEntry > 25) break;
+    fieldCount += perEntry;
+    limited.push(entry);
   }
 
-  for (const p of limited) {
-    const fields = await buildParticipantFields(p, idx);
-    embed.addFields(...fields);
+  for (const entry of limited) {
+    embed.addFields(...buildEntryFields(entry, idx));
     idx++;
   }
 
-  if (limited.length < participants.length) {
+  if (limited.length < entries.length) {
     embed.setFooter({
-      text: `Участников: ${participants.length}. Показаны первые ${limited.length} — используйте 🔍 «Найти» для остальных.`,
+      text: `Паспортов на ранге: ${entries.length}. Показаны первые ${limited.length} — используйте 🔍 «Найти» для остальных.`,
     });
-    idx = startIndex + limited.length;
   }
 
   return { embed, nextIndex: idx };
 }
 
 async function buildAllGroupEmbeds(guild) {
-  const participants = await all('SELECT * FROM participants ORDER BY name');
+  const flatEntries = await getFlatPassportEntries();
   const embeds = [];
   let counter = 1;
 
   for (const roleId of ROLE_IDS) {
-    const groupMembers = participants.filter((p) => p.role_id === roleId);
-    if (groupMembers.length === 0) continue;
+    const groupEntries = flatEntries.filter((e) => e.passport.role_id === roleId);
+    if (groupEntries.length === 0) continue;
     let role = null;
     try {
       role = await guild.roles.fetch(roleId);
     } catch (_) {
       // роль могла быть удалена с сервера
     }
-    const { embed, nextIndex } = await buildRoleEmbed(role, groupMembers, counter);
+    const { embed, nextIndex } = await buildRoleEmbed(role, groupEntries, counter);
     counter = nextIndex;
     embeds.push(embed);
   }
 
-  const unassigned = participants.filter((p) => !ROLE_IDS.includes(p.role_id));
+  const unassigned = flatEntries.filter((e) => !ROLE_IDS.includes(e.passport.role_id));
   if (unassigned.length > 0) {
     const { embed } = await buildRoleEmbed(null, unassigned, counter);
     embeds.push(embed);
@@ -135,7 +146,6 @@ function buildControlRows(page, totalPages) {
   return [row1, row2, row3];
 }
 
-// Отправляет или обновляет сообщение(я) со списком участников
 async function updateMembersList(guild) {
   const channel = await guild.channels.fetch(CHANNEL_MEMBERS);
   if (!channel) return;

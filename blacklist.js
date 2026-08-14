@@ -35,8 +35,11 @@ async function getGroupedEntries() {
 function buildGroupFields(group, index) {
   const first = group.entries[0];
   const multi = group.entries.length > 1;
+  const hasDiscord = !group.discordId.startsWith('nodiscord-');
 
-  const idValue = `${index}. <@${group.discordId}> | ${first.discord_tag} | \`${group.discordId}\``;
+  const idValue = hasDiscord
+    ? `${index}. <@${group.discordId}> | ${first.discord_tag} | \`${group.discordId}\``
+    : `${index}. ${first.discord_tag} | без Discord`;
   const passportValue = group.entries.map((e) => (multi ? `- ${e.static || '—'}` : (e.static || '—'))).join('\n');
   const reasonValue = group.entries
     .map((e) => (multi ? `- ${e.reason || 'без причины'} | ${formatDate(e.created_at)}` : `${e.reason || 'без причины'} | ${formatDate(e.created_at)}`))
@@ -49,6 +52,28 @@ function buildGroupFields(group, index) {
   ];
 }
 
+function buildEmbedsForGroups(groups, title, startIndex) {
+  const embeds = [];
+  let current = new EmbedBuilder().setColor(0xed4245).setTitle(title);
+  let fieldCount = 0;
+  let idx = startIndex;
+
+  for (const group of groups) {
+    if (fieldCount + 3 > 25) {
+      current.setFooter({ text: `Записей: ${groups.length}` });
+      embeds.push(current);
+      current = new EmbedBuilder().setColor(0xed4245).setTitle(`${title} (продолжение)`);
+      fieldCount = 0;
+    }
+    current.addFields(...buildGroupFields(group, idx));
+    fieldCount += 3;
+    idx++;
+  }
+  current.setFooter({ text: `Записей: ${groups.length}` });
+  embeds.push(current);
+  return { embeds, nextIndex: idx };
+}
+
 async function buildBlacklistEmbeds() {
   const groups = await getGroupedEntries();
 
@@ -56,25 +81,23 @@ async function buildBlacklistEmbeds() {
     return [new EmbedBuilder().setColor(0x2b2d31).setTitle('🤡 Чёрный список').setDescription('Список пуст.')];
   }
 
-  const embeds = [];
-  let current = new EmbedBuilder().setColor(0xed4245).setTitle('🤡 Чёрный список');
-  let fieldCount = 0;
-  let shown = 0;
+  const withDiscord = groups.filter((g) => !g.discordId.startsWith('nodiscord-'));
+  const withoutDiscord = groups.filter((g) => g.discordId.startsWith('nodiscord-'));
 
-  for (let i = 0; i < groups.length; i++) {
-    if (fieldCount + 3 > 25) {
-      current.setFooter({ text: `Записей: ${groups.length}` });
-      embeds.push(current);
-      current = new EmbedBuilder().setColor(0xed4245).setTitle('🤡 Чёрный список');
-      fieldCount = 0;
-    }
-    current.addFields(...buildGroupFields(groups[i], i + 1));
-    fieldCount += 3;
-    shown++;
+  let embeds = [];
+  let counter = 1;
+
+  if (withDiscord.length > 0) {
+    const built = buildEmbedsForGroups(withDiscord, '🤡 Чёрный список', counter);
+    embeds = embeds.concat(built.embeds);
+    counter = built.nextIndex;
   }
 
-  current.setFooter({ text: `Записей: ${groups.length}` });
-  embeds.push(current);
+  // Люди без Discord — отдельным эмбедом/секцией (п.1)
+  if (withoutDiscord.length > 0) {
+    const built = buildEmbedsForGroups(withoutDiscord, '🤡 Чёрный список (без Discord)', counter);
+    embeds = embeds.concat(built.embeds);
+  }
 
   return embeds;
 }
@@ -82,9 +105,15 @@ async function buildBlacklistEmbeds() {
 function buildControlRow(page, totalPages) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('blacklist_add').setLabel('🚫 Внести в ЧС').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('blacklist_add_nodiscord').setLabel('🚫 Внести (без Discord)').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('blacklist_remove').setLabel('✅ Убрать из ЧС').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('blacklist_search').setLabel('🔍 Найти').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('blacklist_prev').setLabel('◀ Назад').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
+  );
+}
+
+function buildControlRow2(page, totalPages) {
+  return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('blacklist_next').setLabel('Вперед ▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1),
   );
 }
@@ -100,7 +129,7 @@ async function updateBlacklist(guild) {
   if (page >= totalPages) page = totalPages - 1;
   if (page < 0) page = 0;
 
-  const components = [buildControlRow(page, totalPages)];
+  const components = [buildControlRow(page, totalPages), buildControlRow2(page, totalPages)];
   const messageId = await getSetting('blacklist_message_id');
   let message = null;
 

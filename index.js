@@ -1,4 +1,5 @@
 require('dotenv').config();
+const fs = require('fs');
 const {
   Client,
   GatewayIntentBits,
@@ -15,6 +16,8 @@ const {
   TextInputStyle,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
+  ChannelType,
+  PermissionFlagsBits,
 } = require('discord.js');
 
 const db = require('./db');
@@ -25,7 +28,17 @@ const { updateBlacklist, changeBlacklistPage } = require('./blacklist');
 const perms = require('./permissions');
 const passportsLib = require('./passports');
 const { parseDeadline, parseDateOnly, formatDateTime, formatDateOnly } = require('./dates');
-const { DEFAULT_RULES, DEFAULT_AGITATION } = require('./content');
+const { DEFAULT_RULES, DEFAULT_AGITATION, DEFAULT_HR_INFO } = require('./content');
+const contentVersions = require('./content_versions');
+const backup = require('./backup');
+const faq = require('./faq');
+const faqDisplay = require('./faq_display');
+const contracts = require('./contracts');
+const contractsDisplay = require('./contracts_display');
+const invitations = require('./invitations');
+const invitationsDisplay = require('./invitations_display');
+const acceptances = require('./acceptances');
+const applicationsDisplay = require('./applications_display');
 
 const client = new Client({
   intents: [
@@ -43,17 +56,20 @@ const client = new Client({
 const pendingUpdates = new Map(); // key: `${type}:${userId}` -> text
 // причина, указанная в форме "Убрать из ЧС", до подтверждения удаления
 const pendingBlacklistReasons = new Map(); // key: userId -> reason
+const pendingBroadcasts = new Map(); // key: userId -> { text, targetId? }
 
 // ---------- Утилиты ----------
 
 function txt(interaction, customId, label, opts = {}) {
-  return new TextInputBuilder()
+  const input = new TextInputBuilder()
     .setCustomId(customId)
     .setLabel(label)
     .setStyle(opts.paragraph ? TextInputStyle.Paragraph : TextInputStyle.Short)
     .setRequired(opts.required !== false)
     .setValue(opts.value || '')
     .setMaxLength(opts.maxLength || 200);
+  if (opts.placeholder) input.setPlaceholder(opts.placeholder);
+  return input;
 }
 
 function row(...components) {
@@ -77,7 +93,12 @@ async function resolveGuild(interaction) {
   return client.guilds.fetch(process.env.GUILD_ID);
 }
 
-const mentionOpts = { allowedMentions: { roles: config.ROLES_MEMBERS_LIST_ALLOWED } };
+const mentionOpts = { allowedMentions: { roles: config.ROLES_REVIEW_ALLOWED } };
+
+async function getCurrentText(key, fallback) {
+  const v = await contentVersions.getLatestVersion(key);
+  return v ? v.content : fallback;
+}
 
 // Обновление списков не должно "ронять" саму операцию (выдачу отпуска,
 // AFK и т.д.), если отрисовка embed'а вдруг упадёт — логируем и продолжаем.
@@ -97,12 +118,260 @@ async function safeUpdateBlacklist(guild) {
   }
 }
 
-async function syncNickname(guild, discordId, name, staticValue) {
+// Синхронизирует и ник, и реальную роль ранга на сервере с "эффективной
+// личностью", вычисленной из ВСЕХ паспортов аккаунта (см. passports.js).
+// Вызывать после любого изменения, которое может повлиять на паспорта:
+// добавление/удаление паспорта, изменение ранга конкретного паспорта,
+// увольнение одного из паспортов.
+const STATUS_LABELS = {
+  pending: '⏳ На рассмотрении',
+  accepted: '✅ Принято',
+  rejected: '❌ Отклонено',
+  confirmed: '✅ Подтверждено',
+  fulfilled: '✅ Выполнен',
+  unfulfilled: '❌ Не выполнен',
+  disqualified: '🚫 Дисквалифицировано',
+};
+function statusLabel(status) {
+  return STATUS_LABELS[status] || status;
+}
+
+// Имя Фамилия: "_" или несколько пробелов между словами становятся одним
+// пробелом. Если слово всего одно (без фамилии) — ничего страшного,
+// нормализация всё равно применяется, просто нечего схлопывать (п.1/2).
+function normalizeName(input) {
+  return (input || '')
+    .trim()
+    .replace(/_/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+// Показывает select-меню выбора нового ранга. scope — либо № конкретного
+// паспорта (тогда список рангов строится от ЕГО текущего ранга), либо
+// 'all' (тогда список — все ранги, доступные актёру, без привязки к
+// текущему рангу отдельных паспортов — проверка направления будет на
+// момент применения, для каждого паспорта отдельно).
+async function startRankSelection(interaction, guild, action, discordId, scope, participantName) {
+  const actorIndex = perms.getActorRankIndex(interaction.member);
+  const isPriv = interaction.member.id === config.OWNER_USER_ID || interaction.member.roles.cache.has(config.ROLE_ADMIN);
+
+  let eligibleIndexes;
+  if (scope === 'all') {
+    eligibleIndexes = config.ROLE_IDS.map((_, i) => i).filter((i) => isPriv || i > actorIndex);
+  } else {
+    const passports = await passportsLib.getAllPassports(discordId);
+    const passport = passports.find((p) => p.static === scope);
+    if (!passport) return safeReply(interaction, 'Паспорт не найден.');
+    if (!perms.canActOnRank(interaction.member, passport.role_id)) {
+      return safeReply(interaction, '⛔ У вас недостаточно прав для изменения роли этого паспорта.');
+    }
+    const currentIndex = getRoleIndex(passport.role_id);
+    if (currentIndex === -1) {
+      return safeReply(interaction, 'У паспорта не определён текущий ранг в иерархии — измените роль вручную на сервере.');
+    }
+    eligibleIndexes = config.ROLE_IDS
+      .map((_, i) => i)
+      .filter((i) => (action === 'promote' ? i < currentIndex : i > currentIndex))
+      .filter((i) => isPriv || i > actorIndex);
+  }
+
+  if (eligibleIndexes.length === 0) {
+    return safeReply(interaction, 'Невозможно изменить ранг дальше (достигнута граница иерархии или недостаточно прав).');
+  }
+
+  const options = [];
+  for (const i of eligibleIndexes) {
+    const roleId = config.ROLE_IDS[i];
+    let roleName = roleId;
+    try {
+      const role = await guild.roles.fetch(roleId);
+      if (role) roleName = role.name;
+    } catch (_) {}
+    options.push(new StringSelectMenuOptionBuilder().setLabel(roleName).setValue(roleId));
+  }
+
+  const rankSelect = new StringSelectMenuBuilder()
+    .setCustomId(`select_rank:${action}:${discordId}:${scope}`)
+    .setPlaceholder('Выберите новый ранг')
+    .addOptions(options);
+
+  return safeReply(interaction, {
+    content: `Выберите новый ранг для **${participantName}**${scope !== 'all' ? ` (паспорт № ${scope})` : ' (все паспорта)'}:`,
+    components: [row(rankSelect)],
+  });
+}
+
+// Роли "Отпуск"/"AFK" на сервере — общие на весь аккаунт (Discord-роль не
+// может быть "частичной"). Выставляем/снимаем их по правилу: есть хотя бы
+// один паспорт со статусом → роль есть; ни одного → роли нет.
+async function syncStatusRoles(guild, discordId) {
+  const passports = await passportsLib.getAllPassports(discordId);
+  const hasVacation = passports.some((p) => p.vacation_until);
+  const hasAfk = passports.some((p) => p.afk_since);
+
   try {
     const member = await guild.members.fetch(discordId);
-    await member.setNickname(`${name} | ${staticValue}`);
+    if (hasVacation) await member.roles.add(config.ROLE_VACATION).catch(() => {});
+    else await member.roles.remove(config.ROLE_VACATION).catch(() => {});
+    if (hasAfk) await member.roles.add(config.ROLE_AFK).catch(() => {});
+    else await member.roles.remove(config.ROLE_AFK).catch(() => {});
+  } catch (_) {
+    // участника нет на сервере
+  }
+}
+
+function getDirSize(dirPath) {
+  let total = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch (_) {
+    return 0;
+  }
+  for (const entry of entries) {
+    const fullPath = `${dirPath}/${entry.name}`;
+    if (entry.isDirectory()) {
+      total += getDirSize(fullPath);
+    } else {
+      try {
+        total += fs.statSync(fullPath).size;
+      } catch (_) {}
+    }
+  }
+  return total;
+}
+
+async function syncEffectiveIdentity(guild, discordId) {
+  const identity = await passportsLib.computeEffectiveIdentity(discordId);
+  if (!identity) return;
+
+  try {
+    const member = await guild.members.fetch(discordId);
+    await member.setNickname(`${identity.name} | ${identity.static}`);
   } catch (err) {
     console.error(`Не удалось изменить ник для ${discordId}:`, err.message);
+  }
+
+  if (identity.roleId) {
+    try {
+      const member = await guild.members.fetch(discordId);
+      const rolesToRemove = config.ROLE_IDS.filter((r) => r !== identity.roleId);
+      await member.roles.remove(rolesToRemove).catch(() => {});
+      await member.roles.add(identity.roleId);
+    } catch (err) {
+      console.error(`Не удалось синхронизировать роль ранга для ${discordId}:`, err.message);
+    }
+  }
+}
+
+// Создаёт приватный пост-ветку в форуме контрактов для нового участника.
+// Видна только ему самому + руководству (ROLES_MEMBERS_LIST_ALLOWED) + владельцу.
+// Создаёт приватный ТЕКСТОВЫЙ канал-профиль (не пост в форуме — Discord не
+// поддерживает индивидуальные права доступа для отдельных тредов/постов,
+// только обычные каналы умеют permissionOverwrites). Виден только самому
+// участнику + руководству (ROLES_REVIEW_ALLOWED) + владельцу.
+function buildProfileChannelName(discordTag, name, staticValue) {
+  return `${discordTag}-${name}-${staticValue}`
+    .toLowerCase()
+    .replace(/[^a-zа-яё0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 90);
+}
+
+// Переименовывает профиль-канал под текущую "эффективную личность" (тег +
+// имя + паспорт по правилам 7.2) — вызывать после любого изменения
+// паспортов/рангов, которое может сдвинуть эффективную личность.
+async function syncProfileChannelName(guild, discordId) {
+  try {
+    const row = await db.get('SELECT profile_thread_id, discord_tag FROM participants WHERE discord_id = ?', [discordId]);
+    if (!row || !row.profile_thread_id) return;
+    const identity = await passportsLib.computeEffectiveIdentity(discordId);
+    if (!identity) return;
+    const channel = await guild.channels.fetch(row.profile_thread_id);
+    const newName = buildProfileChannelName(row.discord_tag, identity.name, identity.static) || channel.name;
+    if (channel.name !== newName) await channel.setName(newName);
+  } catch (err) {
+    console.error(`Не удалось переименовать профиль-канал для ${discordId}:`, err.message);
+  }
+}
+
+async function createProfileThread(guild, discordId, name, staticValue) {
+  try {
+    const existing = await db.get('SELECT * FROM profile_channels WHERE discord_id = ?', [discordId]);
+
+    const overwrites = [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      {
+        id: discordId,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+        ],
+      },
+      { id: config.OWNER_USER_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ];
+    for (const roleId of config.ROLES_REVIEW_ALLOWED) {
+      overwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+    }
+
+    // Уже есть архивный канал с прошлого раза — восстанавливаем его вместо
+    // создания нового (п.1.4)
+    if (existing) {
+      try {
+        const channel = await guild.channels.fetch(existing.channel_id);
+        await channel.setParent(config.CHANNEL_PROFILES_ACTIVE_CATEGORY, { lockPermissions: false });
+        await channel.permissionOverwrites.edit(guild.roles.everyone.id, { ViewChannel: false });
+        await channel.permissionOverwrites.edit(discordId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true });
+        await channel.permissionOverwrites.edit(config.OWNER_USER_ID, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
+        for (const roleId of config.ROLES_REVIEW_ALLOWED) {
+          await channel.permissionOverwrites.edit(roleId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
+        }
+        await db.run('UPDATE profile_channels SET status = ?, updated_at = ? WHERE discord_id = ?', ['active', new Date().toISOString(), discordId]);
+        await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [channel.id, discordId]);
+        await channel.send(`📸 С возвращением, **${name}**! Профиль восстановлен.`);
+        return channel.url;
+      } catch (err) {
+        console.error(`Не удалось восстановить профиль-канал для ${discordId}, создаю новый:`, err.message);
+      }
+    }
+
+    let discordTag = discordId;
+    try {
+      const member = await guild.members.fetch(discordId);
+      discordTag = member.user.tag;
+    } catch (_) {}
+
+    const channelName = buildProfileChannelName(discordTag, name, staticValue) || `profile-${discordId}`;
+
+    const channel = await guild.channels.create({
+      name: channelName,
+      type: ChannelType.GuildText,
+      parent: config.CHANNEL_PROFILES_ACTIVE_CATEGORY,
+      permissionOverwrites: overwrites,
+      topic: `Профиль ${name} (№ ${staticValue}) — сюда присылаются скриншоты контрактов`,
+    });
+
+    await channel.send(
+      `📸 Профиль **${name}** (№ ${staticValue}).\n\n` +
+      `Сюда нужно присылать скриншоты **на весь экран** по каждому контракту — 2 штуки:\n` +
+      `1️⃣ когда вы **взяли** контракт\n` +
+      `2️⃣ когда контракт **выполнен или не выполнен**\n\n` +
+      `Можно прислать оба скриншота одним сообщением, можно — двумя сообщениями подряд (по одному). ` +
+      `После того как оба скриншота собраны, бот сам создаст карточку контракта на проверку руководству.`,
+    );
+
+    await db.run(
+      'INSERT INTO profile_channels (discord_id, channel_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      [discordId, channel.id, 'active', new Date().toISOString(), new Date().toISOString()],
+    );
+    await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [channel.id, discordId]);
+    return channel.url;
+  } catch (err) {
+    console.error(`Не удалось создать профиль-канал для ${discordId}:`, err.message);
+    return null;
   }
 }
 
@@ -114,27 +383,37 @@ function buildApplicationModal(customId, prefill = {}) {
     row(txt(null, 'name', 'Имя Фамилия', { value: prefill.name })),
     row(txt(null, 'static', '№ Паспорта', { value: prefill.static })),
     row(txt(null, 'lvl', 'LVL персонажа', { value: prefill.lvl ? String(prefill.lvl) : '' })),
-    row(txt(null, 'skills', 'Навыки (ссылка на скриншот)', { value: prefill.skills })),
-    row(txt(null, 'online', 'Онлайн в неделю (часов)', { value: prefill.online })),
+    row(txt(null, 'skills', 'Навыки/Профессии', { value: prefill.skills, placeholder: 'Ссылка на скриншот' })),
+    row(txt(null, 'invited_by', 'Кто вас пригласил', {
+      value: prefill.invited_by,
+      required: false,
+      paragraph: true,
+      placeholder: 'Имя Фамилия ИЛИ №Паспорта ИЛИ Дискорд тег/id человека который вас пригласил',
+    })),
   );
   return modal;
 }
 
-function buildKickApplicationModal(customId, prefill = {}) {
+function buildKickApplicationModal(customId, prefill = {}, includeStaticField = false) {
   const modal = new ModalBuilder().setCustomId(customId).setTitle('Заявка на увольнение');
-  modal.addComponents(
-    row(txt(null, 'name', 'Имя Фамилия участника', { value: prefill.name })),
-    row(txt(null, 'reason', 'Причина', { value: prefill.reason, required: false, paragraph: true })),
-  );
+  modal.addComponents(row(txt(null, 'name', 'Имя Фамилия участника', { value: prefill.name })));
+  if (includeStaticField) {
+    modal.addComponents(row(txt(null, 'target_static', '№ Паспорта (пусто = уволить все)', { value: prefill.target_static, required: false })));
+  }
+  modal.addComponents(row(txt(null, 'reason', 'Причина', { value: prefill.reason, required: false, paragraph: true })));
   return modal;
 }
 
-function buildMemberModal(customId, prefill = {}) {
+function buildMemberModal(customId, prefill = {}, ownerMode = false) {
   const modal = new ModalBuilder().setCustomId(customId).setTitle('Данные участника');
   modal.addComponents(
-    row(txt(null, 'name', 'Имя Фамилия', { value: prefill.name })),
-    row(txt(null, 'discord_id', 'Discord ID', { value: prefill.discord_id })),
-    row(txt(null, 'static', '№ Паспорта', { value: prefill.static })),
+    row(txt(null, 'name', 'Имя Фамилия', { value: prefill.name, required: !ownerMode })),
+    row(txt(null, 'discord_id', 'Discord ID', {
+      value: prefill.discord_id,
+      required: false,
+      placeholder: 'Оставьте пустым, если у человека нет Discord',
+    })),
+    row(txt(null, 'static', '№ Паспорта', { value: prefill.static, required: !ownerMode })),
     row(txt(null, 'lvl', 'LVL персонажа', { value: prefill.lvl ? String(prefill.lvl) : '', required: false })),
     row(txt(null, 'online', 'Онлайн в неделю (часов)', { value: prefill.online, required: false })),
   );
@@ -155,7 +434,122 @@ function buildSearchModal() {
 function buildPickSearchModal(action) {
   const modal = new ModalBuilder().setCustomId(`modal_pick_search:${action}`).setTitle('Выбор участника');
   modal.addComponents(
-    row(txt(null, 'query', 'Имя Фамилия или № Паспорта (необязательно)', { required: false })),
+    row(txt(null, 'query', 'Имя Фамилия, № Паспорта, тег или ID (необяз.)', { required: false })),
+  );
+  return modal;
+}
+
+function buildRejectReasonModal(customId) {
+  const modal = new ModalBuilder().setCustomId(customId).setTitle('Причина отказа');
+  modal.addComponents(row(txt(null, 'reason', 'Причина', { paragraph: true })));
+  return modal;
+}
+
+function buildDataChangeModal(customId, prefill = {}) {
+  const modal = new ModalBuilder().setCustomId(customId).setTitle('Изменить данные (Имя Фамилия)');
+  modal.addComponents(row(txt(null, 'new_name', 'Новое Имя Фамилия', { value: prefill.new_name })));
+  return modal;
+}
+
+function buildDataChangeEmbed(reqRow) {
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle(`Заявка на изменение данных #${reqRow.id}`)
+    .addFields(
+      { name: 'Заявитель', value: `<@${reqRow.discord_id}> (${reqRow.discord_tag})` },
+      { name: '№ Паспорта', value: reqRow.target_static || '—', inline: true },
+      { name: 'Было', value: reqRow.old_name || '—', inline: true },
+      { name: 'Станет', value: reqRow.new_name || '—', inline: true },
+      { name: 'Статус', value: statusLabel(reqRow.status) },
+    );
+  if (reqRow.reject_reason) embed.addFields({ name: 'Причина отказа', value: reqRow.reject_reason });
+  return embed;
+}
+
+function buildDataChangeComponents(reqRow) {
+  if (reqRow.status !== 'pending') return [];
+  return [row(
+    new ButtonBuilder().setCustomId(`data_change_accept:${reqRow.id}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`data_change_reject:${reqRow.id}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+  )];
+}
+
+function buildHrApplyModal() {
+  const modal = new ModalBuilder().setCustomId('modal_hr_apply').setTitle('Заявка на роль HR-Менеджера');
+  modal.addComponents(
+    row(txt(null, 'hours_per_week', 'Часов в неделю игре')),
+    row(txt(null, 'training_ready', 'Когда готовы пройти мини-обучение')),
+  );
+  return modal;
+}
+
+function buildHrApplyEmbed(reqRow) {
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle(`Заявка на роль HR-Менеджера #${reqRow.id}`)
+    .addFields(
+      { name: 'Заявитель', value: `<@${reqRow.discord_id}> (${reqRow.discord_tag})` },
+      { name: 'Часов в неделю', value: reqRow.hours_per_week || '—', inline: true },
+      { name: 'Готов к обучению', value: reqRow.training_ready || '—', inline: true },
+      { name: 'Статус', value: statusLabel(reqRow.status) },
+    );
+  if (reqRow.reject_reason) embed.addFields({ name: 'Причина отказа', value: reqRow.reject_reason });
+  return embed;
+}
+
+function buildHrApplyComponents(reqRow) {
+  if (reqRow.status !== 'pending') return [];
+  return [row(
+    new ButtonBuilder().setCustomId(`hr_apply_accept:${reqRow.id}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`hr_apply_reject:${reqRow.id}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+  )];
+}
+
+function buildPassportRequestModal(prefill = {}) {
+  const modal = new ModalBuilder().setCustomId('modal_passport_request').setTitle('Заявка на добавление паспорта');
+  modal.addComponents(
+    row(txt(null, 'name', 'Имя Фамилия', { value: prefill.name })),
+    row(txt(null, 'static', '№ Паспорта', { value: prefill.static })),
+  );
+  return modal;
+}
+
+function buildPassportRequestEmbed(reqRow) {
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle(`Заявка на добавление паспорта #${reqRow.id}`)
+    .addFields(
+      { name: 'Участник', value: `<@${reqRow.discord_id}> (${reqRow.discord_tag})` },
+      { name: 'Имя Фамилия', value: reqRow.name || '—', inline: true },
+      { name: '№ Паспорта', value: reqRow.static || '—', inline: true },
+      { name: 'Статус', value: statusLabel(reqRow.status) },
+    );
+  if (reqRow.reject_reason) embed.addFields({ name: 'Причина отказа', value: reqRow.reject_reason });
+  return embed;
+}
+
+function buildPassportRequestComponents(reqRow) {
+  if (reqRow.status !== 'pending') return [];
+  return [row(
+    new ButtonBuilder().setCustomId(`passport_request_accept:${reqRow.id}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`passport_request_reject:${reqRow.id}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+  )];
+}
+
+function buildFaqModal(customId, prefill = {}) {
+  const modal = new ModalBuilder().setCustomId(customId).setTitle('Гайд FAQ');
+  modal.addComponents(
+    row(txt(null, 'title', 'Заголовок', { value: prefill.title })),
+    row(txt(null, 'content', 'Текст гайда', { value: prefill.content, paragraph: true, maxLength: 4000 })),
+  );
+  return modal;
+}
+
+function buildManualContractModal(status, discordId) {
+  const modal = new ModalBuilder().setCustomId(`modal_contract_manual:${status}:${discordId}`).setTitle('Добавить контракт вручную');
+  modal.addComponents(
+    row(txt(null, 'link', 'Ссылка на скриншот')),
+    row(txt(null, 'date', 'Дата (ДД.ММ.ГГГГ), пусто = сегодня', { required: false })),
   );
   return modal;
 }
@@ -169,16 +563,18 @@ function buildVacationSelfModal() {
   return modal;
 }
 
-function buildVacationGrantModal(discordId) {
-  const modal = new ModalBuilder().setCustomId(`modal_vacation_grant:${discordId}`).setTitle('Выдать отпуск');
+function buildVacationGrantModal(discordId, staticsCsv) {
+  const customId = staticsCsv ? `modal_vacation_grant:${discordId}:${staticsCsv}` : `modal_vacation_grant:${discordId}`;
+  const modal = new ModalBuilder().setCustomId(customId).setTitle('Выдать отпуск');
   modal.addComponents(
     row(txt(null, 'deadline', 'Дата (ДД.ММ.ГГГГ) или срок (7d)')),
   );
   return modal;
 }
 
-function buildAfkModal(discordId) {
-  const modal = new ModalBuilder().setCustomId(`modal_afk_set:${discordId}`).setTitle('Указать AFK');
+function buildAfkModal(discordId, staticsCsv) {
+  const customId = staticsCsv ? `modal_afk_set:${discordId}:${staticsCsv}` : `modal_afk_set:${discordId}`;
+  const modal = new ModalBuilder().setCustomId(customId).setTitle('Указать AFK');
   modal.addComponents(
     row(txt(null, 'date', 'Дата с которой AFK (ДД.ММ.ГГГГ)')),
   );
@@ -199,6 +595,16 @@ function buildBlacklistAddModal() {
   modal.addComponents(
     row(txt(null, 'discord_id', 'Discord ID')),
     row(txt(null, 'static', '№ Паспорта', { required: false })),
+    row(txt(null, 'reason', 'Причина', { required: false, paragraph: true })),
+  );
+  return modal;
+}
+
+function buildBlacklistAddNoDiscordModal() {
+  const modal = new ModalBuilder().setCustomId('modal_blacklist_add_nodiscord').setTitle('Внести в ЧС (без Discord)');
+  modal.addComponents(
+    row(txt(null, 'name', 'Имя Фамилия', { required: false })),
+    row(txt(null, 'static', '№ Паспорта')),
     row(txt(null, 'reason', 'Причина', { required: false, paragraph: true })),
   );
   return modal;
@@ -226,11 +632,29 @@ const commands = [
     .setName('rules_update')
     .setDescription('Обновить свод правил'),
   new SlashCommandBuilder()
+    .setName('rules_broadcast')
+    .setDescription('Разослать свод правил в ЛС — всем в организации или одному человеку')
+    .addStringOption((opt) =>
+      opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false),
+    ),
+  new SlashCommandBuilder()
+    .setName('broadcast_message')
+    .setDescription('Отправить произвольное сообщение в ЛС от имени бота — всем или одному человеку'),
+  new SlashCommandBuilder()
     .setName('agitation')
     .setDescription('Отправить текущую агитацию в канал агитации'),
   new SlashCommandBuilder()
     .setName('agitation_update')
     .setDescription('Обновить текст агитации'),
+  new SlashCommandBuilder()
+    .setName('hr_info')
+    .setDescription('Отправить текущее описание вакансии HR-Менеджера в канал'),
+  new SlashCommandBuilder()
+    .setName('hr_info_update')
+    .setDescription('Обновить описание вакансии HR-Менеджера'),
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Проверить скорость отклика бота (Discord, база данных)'),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -249,6 +673,31 @@ async function registerCommands() {
   } else {
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
   }
+}
+
+async function sendFaqManagePanel(guild) {
+  const channel = await guild.channels.fetch(config.CHANNEL_FAQ_MANAGE);
+  if (!channel) return;
+
+  const messageId = await db.getSetting('faq_manage_message_id');
+  if (messageId) {
+    try {
+      await channel.messages.fetch(messageId);
+      return; // панель уже есть, повторно не отправляем
+    } catch (_) {
+      // сообщение удалили — отправим новое
+    }
+  }
+
+  const sent = await channel.send({
+    embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('⚙️ Управление гайдами FAQ').setDescription('Добавление/изменение/удаление гайдов для каналов FAQ участников и HR-Менеджеров.')],
+    components: [row(
+      new ButtonBuilder().setCustomId('faq_add').setLabel('➕ Добавить гайд').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('faq_edit').setLabel('✏️ Изменить гайд').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('faq_delete').setLabel('➖ Удалить гайд').setStyle(ButtonStyle.Danger),
+    )],
+  });
+  await db.setSetting('faq_manage_message_id', sent.id);
 }
 
 async function initMenus(guild) {
@@ -270,14 +719,41 @@ async function initMenus(guild) {
     components: [row(new ButtonBuilder().setCustomId('vacation_apply').setLabel('🏖️ Подать заявку на отпуск').setStyle(ButtonStyle.Primary))],
   });
 
+  const dataChangeChannel = await guild.channels.fetch(config.CHANNEL_DATA_CHANGE_MENU);
+  const dataChangeMenuId = await db.getSetting('data_change_menu_message_id');
+  if (!dataChangeMenuId) {
+    const sentDc = await dataChangeChannel.send({
+      embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Изменение данных').setDescription('Нажмите кнопку ниже, чтобы подать заявку на изменение Имени Фамилии по одному из ваших паспортов.')],
+      components: [row(new ButtonBuilder().setCustomId('data_change_apply').setLabel('✏️ Изменить данные').setStyle(ButtonStyle.Primary))],
+    });
+    await db.setSetting('data_change_menu_message_id', sentDc.id);
+  }
+
+  const hrApplyChannel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
+  const hrInfoMessageId = await db.getSetting('hr_apply_menu_message_id');
+  if (!hrInfoMessageId) {
+    const hrText = await getCurrentText('hr_info', DEFAULT_HR_INFO);
+    const sentHr = await hrApplyChannel.send({
+      embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(hrText)],
+      components: [row(new ButtonBuilder().setCustomId('hr_apply_submit').setLabel('📝 Подать заявку на HR').setStyle(ButtonStyle.Success))],
+    });
+    await db.setSetting('hr_apply_menu_message_id', sentHr.id);
+  }
+
   await safeUpdateMembersList(guild);
   await safeUpdateBlacklist(guild);
+  await contractsDisplay.safeUpdateContractsStats(guild);
+  await invitationsDisplay.safeUpdateInvitations(guild);
+  await applicationsDisplay.safeUpdateApplicationsStats(guild);
+  await faqDisplay.safeUpdateFaqChannel(guild, 'member');
+  await faqDisplay.safeUpdateFaqChannel(guild, 'hr');
+  await sendFaqManagePanel(guild);
 }
 
 // ---------- Обработка заявок на вступление ----------
 
 function applicationReviewEmbed(app) {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(0xfee75c)
     .setTitle(`Заявка на вступление #${app.id}`)
     .addFields(
@@ -285,10 +761,12 @@ function applicationReviewEmbed(app) {
       { name: 'Имя Фамилия', value: app.name || '—', inline: true },
       { name: '№ Паспорта', value: app.static || '—', inline: true },
       { name: 'LVL', value: String(app.lvl || '—'), inline: true },
-      { name: 'Онлайн/нед.', value: app.online || '—', inline: true },
+      { name: 'Кто пригласил', value: app.invited_by || '—', inline: true },
       { name: 'Навыки', value: app.skills || '—' },
-      { name: 'Статус', value: app.status },
+      { name: 'Статус', value: statusLabel(app.status) },
     );
+  if (app.reject_reason) embed.addFields({ name: 'Причина отказа', value: app.reject_reason });
+  return embed;
 }
 
 function applicationReviewComponents(app) {
@@ -303,15 +781,18 @@ function applicationReviewComponents(app) {
 }
 
 function kickReviewEmbed(k) {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(0xfee75c)
     .setTitle(`Заявка на увольнение #${k.id}`)
     .addFields(
       { name: 'Заявитель', value: `<@${k.discord_id}> (${k.discord_tag})` },
       { name: 'Имя Фамилия участника', value: k.name || '—' },
+      { name: 'Паспорт', value: !k.target_static || k.target_static === 'all' ? 'Все паспорта' : `№ ${k.target_static}` },
       { name: 'Причина', value: k.reason || '—' },
-      { name: 'Статус', value: k.status },
+      { name: 'Статус', value: statusLabel(k.status) },
     );
+  if (k.reject_reason) embed.addFields({ name: 'Причина отказа', value: k.reject_reason });
+  return embed;
 }
 
 function kickReviewComponents(k) {
@@ -326,15 +807,17 @@ function kickReviewComponents(k) {
 }
 
 function vacationReviewEmbed(v) {
-  return new EmbedBuilder()
+  const embed = new EmbedBuilder()
     .setColor(0xfee75c)
     .setTitle(`Заявка на отпуск #${v.id}`)
     .addFields(
       { name: 'Заявитель', value: `<@${v.discord_id}> (${v.discord_tag})` },
       { name: 'До какого числа', value: formatDateTime(new Date(v.until)) },
       { name: 'Причина', value: v.reason || '—' },
-      { name: 'Статус', value: v.status },
+      { name: 'Статус', value: statusLabel(v.status) },
     );
+  if (v.reject_reason) embed.addFields({ name: 'Причина отказа', value: v.reject_reason });
+  return embed;
 }
 
 function vacationReviewComponents(v) {
@@ -347,13 +830,19 @@ function vacationReviewComponents(v) {
   ];
 }
 
-async function refreshReviewMessage(channel, messageId, embed, components) {
+async function refreshReviewMessage(channel, messageId, embed, components, content) {
   try {
     const msg = await channel.messages.fetch(messageId);
-    await msg.edit({ embeds: [embed], components });
+    const payload = { embeds: [embed], components };
+    if (content !== undefined) payload.content = content;
+    await msg.edit(payload);
   } catch (err) {
     console.error('Не удалось обновить сообщение рассмотрения:', err);
   }
+}
+
+function actionSummary(actorId, label, extra) {
+  return `${label} — <@${actorId}>${extra ? `: ${extra}` : ''}`;
 }
 
 async function dmUser(guild, discordId, content) {
@@ -376,8 +865,45 @@ async function removeParticipant(guild, participant, reason) {
     // участник уже мог покинуть сервер
   }
 
+  if (participant.profile_thread_id) {
+    try {
+      const channel = await guild.channels.fetch(participant.profile_thread_id);
+      await channel.permissionOverwrites.edit(participant.discord_id, { ViewChannel: false, SendMessages: false });
+      await channel.setParent(config.CHANNEL_PROFILES_ARCHIVE_CATEGORY, { lockPermissions: false });
+      await db.run('UPDATE profile_channels SET status = ?, updated_at = ? WHERE discord_id = ?', ['archived', new Date().toISOString(), participant.discord_id]);
+    } catch (_) {
+      // канал уже мог быть удалён вручную
+    }
+  }
+
+  await invitations.resolveOnLeave(participant.discord_id);
+  await invitationsDisplay.safeUpdateInvitations(guild);
+  await acceptances.resolveOnLeave(participant.discord_id);
+  await applicationsDisplay.safeUpdateApplicationsStats(guild);
+
   await dmUser(guild, participant.discord_id, `🚫 Вы были исключены из организации.${reason ? ` Причина: ${reason}` : ''}`);
   await safeUpdateMembersList(guild);
+}
+
+// targetStatic: конкретный № паспорта или 'all'. Если это последний паспорт
+// участника — всё равно полностью увольняем (п.6.2), иначе снимается
+// только один паспорт (п.6/6.1), а роли/аккаунт остаются (п.6.3 через
+// syncEffectiveIdentity/syncStatusRoles).
+async function kickPassportOrFull(guild, participant, targetStatic, reason) {
+  const passports = await passportsLib.getAllPassports(participant.discord_id);
+
+  if (targetStatic === 'all' || passports.length <= 1) {
+    await removeParticipant(guild, participant, reason);
+    return { fullyRemoved: true };
+  }
+
+  await passportsLib.removePassportKeepAccount(participant.discord_id, targetStatic);
+  await syncEffectiveIdentity(guild, participant.discord_id);
+  await syncProfileChannelName(guild, participant.discord_id);
+  await syncStatusRoles(guild, participant.discord_id);
+  await safeUpdateMembersList(guild);
+  await dmUser(guild, participant.discord_id, `🚫 У вас снят паспорт № ${targetStatic}.${reason ? ` Причина: ${reason}` : ''}`);
+  return { fullyRemoved: false };
 }
 
 // ---------- interactionCreate ----------
@@ -389,6 +915,38 @@ client.on('interactionCreate', async (interaction) => {
     // ----- Слэш-команды -----
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
+
+      if (cmd === 'ping') {
+        if (!perms.hasBotAccess(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const dbStart = Date.now();
+        await db.get('SELECT 1');
+        const dbLatency = Date.now() - dbStart;
+
+        const wsLatency = client.ws.ping;
+        const roundTripLatency = Date.now() - interaction.createdTimestamp;
+        const usedBytes = getDirSize(db.dataDir);
+        const usedMb = (usedBytes / 1024 / 1024).toFixed(1);
+        const quotaMb = 5000; // 5 ГБ — типовая квота диска на Bothost Basic
+        const percent = ((usedBytes / (quotaMb * 1024 * 1024)) * 100).toFixed(1);
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🏓 Пинг')
+          .addFields(
+            { name: 'WebSocket (Discord Gateway)', value: wsLatency >= 0 ? `${wsLatency} мс` : 'считается…', inline: true },
+            { name: 'Отклик Discord (round-trip)', value: `${roundTripLatency} мс`, inline: true },
+            { name: 'База данных (SQLite)', value: `${dbLatency} мс`, inline: true },
+            { name: 'Занято на диске', value: `${usedMb} МБ из ${quotaMb / 1000} ГБ (${percent}%)`, inline: true },
+          );
+
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
 
       if (cmd === 'init_menus') {
         if (!perms.hasBotAccess(interaction.member)) {
@@ -405,24 +963,98 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
         }
         if (cmd === 'rules') {
-          const text = (await db.getSetting('rules_text')) || DEFAULT_RULES;
+          const text = await getCurrentText('rules', DEFAULT_RULES);
           const channel = await guild.channels.fetch(config.CHANNEL_RULES);
           await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил').setDescription(text)] });
           return interaction.reply({ content: 'Правила отправлены в канал.', ephemeral: true });
         }
-        const text = (await db.getSetting('agitation_text')) || DEFAULT_AGITATION;
+        const text = await getCurrentText('agitation', DEFAULT_AGITATION);
         const channel = await guild.channels.fetch(config.CHANNEL_AGITATION);
         await channel.send({ content: text, embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription('```\n' + text + '\n```')] });
         return interaction.reply({ content: 'Агитация отправлена в канал.', ephemeral: true });
       }
 
-      if (cmd === 'rules_update' || cmd === 'agitation_update') {
+      if (cmd === 'hr_info') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
         }
-        const type = cmd === 'rules_update' ? 'rules' : 'agitation';
-        const defaultText = type === 'rules' ? DEFAULT_RULES : DEFAULT_AGITATION;
-        const current = (await db.getSetting(`${type}_text`)) || defaultText;
+        const text = await getCurrentText('hr_info', DEFAULT_HR_INFO);
+        const channel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
+        await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(text)] });
+        return interaction.reply({ content: 'Описание вакансии HR отправлено в канал.', ephemeral: true });
+      }
+
+      if (cmd === 'rules_broadcast') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const rulesText = await getCurrentText('rules', DEFAULT_RULES);
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(rulesText.slice(0, 4000));
+
+        const query = interaction.options.getString('человек');
+        let targets;
+        if (query) {
+          const target = await invitations.resolveInviter(query); // тот же поиск по имени/паспорту/тегу/id
+          if (!target) {
+            await interaction.editReply('⛔ Человек не найден в списке участников.');
+            return;
+          }
+          targets = [target];
+        } else {
+          targets = await db.all('SELECT * FROM participants');
+        }
+
+        let sent = 0;
+        for (const t of targets) {
+          try {
+            const member = await guild.members.fetch(t.discord_id);
+            await member.send({ embeds: [embed] });
+            sent++;
+          } catch (_) {
+            // закрытые ЛС и т.п.
+          }
+        }
+
+        await logAudit(guild, interaction.user, 'Рассылка правил', query ? `Одному: ${targets[0].name}` : `Всем участникам (${sent}/${targets.length})`);
+        await interaction.editReply(query ? `Правила отправлены ${targets[0].name}.` : `Правила отправлены ${sent} из ${targets.length} участников.`);
+        return;
+      }
+
+      if (cmd === 'broadcast_message') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.reply({ content: 'Отправьте текст сообщения следующим сообщением в этом канале (10 минут на ответ).', ephemeral: true });
+
+        const filter = (m) => m.author.id === interaction.user.id;
+        let collected;
+        try {
+          collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 600000, errors: ['time'] });
+        } catch (_) {
+          await interaction.followUp({ content: 'Время ожидания истекло, рассылка отменена.', ephemeral: true });
+          return;
+        }
+        const text = collected.first().content;
+        pendingBroadcasts.set(interaction.user.id, { text });
+
+        await interaction.channel.send({
+          content: `Кому отправить это сообщение от <@${interaction.user.id}>?\n\n> ${text.slice(0, 300)}`,
+          components: [row(
+            new ButtonBuilder().setCustomId(`broadcast_target:all:${interaction.user.id}`).setLabel('Всем в организации').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`broadcast_target:one:${interaction.user.id}`).setLabel('Определённому человеку').setStyle(ButtonStyle.Secondary),
+          )],
+        });
+        return;
+      }
+
+      if (cmd === 'rules_update' || cmd === 'agitation_update' || cmd === 'hr_info_update') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        const type = cmd === 'rules_update' ? 'rules' : cmd === 'agitation_update' ? 'agitation' : 'hr_info';
+        const defaultText = type === 'rules' ? DEFAULT_RULES : type === 'agitation' ? DEFAULT_AGITATION : DEFAULT_HR_INFO;
+        const current = await getCurrentText(type, defaultText);
 
         await interaction.reply({
           embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Текущий текст (копируемая версия — следующим сообщением)').setDescription(current.slice(0, 4000))],
@@ -445,8 +1077,9 @@ client.on('interactionCreate', async (interaction) => {
         const newText = collected.first().content;
         pendingUpdates.set(`${type}:${interaction.user.id}`, newText);
 
+        const typeLabels = { rules: 'правила', agitation: 'агитация', hr_info: 'вакансия HR' };
         await interaction.channel.send({
-          content: `Предпросмотр нового текста (${type === 'rules' ? 'правила' : 'агитация'}) от <@${interaction.user.id}>:`,
+          content: `Предпросмотр нового текста (${typeLabels[type]}) от <@${interaction.user.id}>:`,
           embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription(newText.slice(0, 4000))],
           components: [row(
             new ButtonBuilder().setCustomId(`${type}_save:${interaction.user.id}`).setLabel('💾 Сохранить').setStyle(ButtonStyle.Success),
@@ -462,12 +1095,256 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       const id = interaction.customId;
 
+      if (id.startsWith('contract_fulfilled:') || id.startsWith('contract_unfulfilled:') || id.startsWith('contract_rejected:')) {
+        if (!perms.canReview(interaction.member)) {
+          return safeReply(interaction, '⛔ У вас нет прав проверять контракты.');
+        }
+        const [prefix, contractId] = id.split(':');
+        const status = prefix.replace('contract_', ''); // fulfilled | unfulfilled | rejected
+        const contract = await contracts.getContractById(contractId);
+        if (!contract) return safeReply(interaction, 'Запись не найдена.');
+        if (contract.status !== 'pending') return safeReply(interaction, 'Этот скриншот уже проверен.');
+
+        await contracts.reviewContract(contractId, status, interaction.user.id);
+
+        const labels = {
+          fulfilled: '✅ Контракт выполнен',
+          unfulfilled: '❌ Контракт не выполнен',
+          rejected: '🚫 Это не контракт — не засчитано',
+        };
+        const label = labels[status];
+        try {
+          await interaction.update({ content: `${label} — проверил <@${interaction.user.id}>`, components: [] });
+        } catch (_) {
+          await safeReply(interaction, `${label}.`);
+        }
+
+        await contractsDisplay.safeUpdateContractsStats(guild);
+        await logAudit(
+          guild,
+          interaction.user,
+          `Контракт: ${label}`,
+          `<@${contract.discord_id}>: ${contract.message_url}`,
+        );
+        return;
+      }
+
+      if (id === 'contracts_prev_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return contractsDisplay.changeContractsWeek(guild, 1);
+      }
+
+      if (id === 'contracts_next_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return contractsDisplay.changeContractsWeek(guild, -1);
+      }
+
+      if (id === 'contracts_this_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return contractsDisplay.jumpToCurrentWeek(guild);
+      }
+
+      if (id === 'contracts_add') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        return interaction.showModal(buildPickSearchModal('contract_add'));
+      }
+
+      if (id === 'contracts_remove') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        return interaction.showModal(buildPickSearchModal('contract_remove'));
+      }
+
+      if (id === 'contracts_search') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        return interaction.showModal(buildPickSearchModal('contract_view'));
+      }
+
+      if (id.startsWith('contract_manual_status:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const [, status, discordId] = id.split(':');
+        return interaction.showModal(buildManualContractModal(status, discordId));
+      }
+
+      if (id === 'faq_add') {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        return safeReply(interaction, {
+          content: 'Для какого канала добавить гайд?',
+          components: [row(
+            new ButtonBuilder().setCustomId('faq_add_category:member').setLabel('Участники').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('faq_add_category:hr').setLabel('HR-Менеджеры').setStyle(ButtonStyle.Primary),
+          )],
+        });
+      }
+
+      if (id.startsWith('faq_add_category:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const category = id.split(':')[1];
+        return interaction.showModal(buildFaqModal(`modal_faq_add:${category}`));
+      }
+
+      if (id === 'faq_edit' || id === 'faq_delete') {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const action = id.split('_')[1]; // edit | delete
+        return safeReply(interaction, {
+          content: 'Из какого канала гайд?',
+          components: [row(
+            new ButtonBuilder().setCustomId(`faq_${action}_category:member`).setLabel('Участники').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId(`faq_${action}_category:hr`).setLabel('HR-Менеджеры').setStyle(ButtonStyle.Primary),
+          )],
+        });
+      }
+
+      if (id.startsWith('faq_edit_category:') || id.startsWith('faq_delete_category:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const action = id.split('_')[1]; // edit | delete
+        const category = id.split(':')[1];
+        const entries = await faq.listEntries(category);
+        if (entries.length === 0) return safeReply(interaction, 'В этом разделе пока нет гайдов.');
+        const select = new StringSelectMenuBuilder()
+          .setCustomId(`select_faq_${action}:${category}`)
+          .setPlaceholder('Выберите гайд')
+          .addOptions(entries.map((e) => new StringSelectMenuOptionBuilder().setLabel(e.title.slice(0, 100)).setValue(String(e.id))));
+        return safeReply(interaction, { components: [row(select)] });
+      }
+
+      if (id.startsWith('faq_delete_confirm:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const [, entryId, category] = id.split(':');
+        const entry = await faq.getEntry(entryId);
+        await faq.deleteEntry(entryId);
+        await faqDisplay.safeUpdateFaqChannel(guild, category);
+        await logAudit(guild, interaction.user, 'Гайд FAQ удалён', `[${category}] «${entry ? entry.title : entryId}»`);
+        await interaction.update({ content: '✅ Гайд удалён.', components: [] });
+        return;
+      }
+
+      if (id === 'faq_delete_cancel') {
+        await interaction.update({ content: '❌ Отменено.', components: [] });
+        return;
+      }
+
+      if (id.startsWith('broadcast_target:')) {
+        const [, scope, userId] = id.split(':');
+        if (interaction.user.id !== userId) return safeReply(interaction, '⛔ Эта рассылка не ваша.');
+        const pending = pendingBroadcasts.get(userId);
+        if (!pending) return safeReply(interaction, '⛔ Время ожидания истекло, начните заново командой /broadcast_message.');
+
+        if (scope === 'all') {
+          try {
+            await interaction.update({
+              content: `Отправить всем в организации это сообщение?\n\n> ${pending.text.slice(0, 300)}`,
+              components: [row(
+                new ButtonBuilder().setCustomId(`broadcast_confirm:all:${userId}`).setLabel('✅ Отправить').setStyle(ButtonStyle.Success),
+                new ButtonBuilder().setCustomId(`broadcast_cancel:${userId}`).setLabel('❌ Не отправлять').setStyle(ButtonStyle.Danger),
+              )],
+            });
+          } catch (_) {}
+          return;
+        }
+
+        const modal = new ModalBuilder().setCustomId(`modal_broadcast_target:${userId}`).setTitle('Кому отправить');
+        modal.addComponents(row(txt(null, 'query', 'Имя Фамилия / № Паспорта / тег / ID')));
+        return interaction.showModal(modal);
+      }
+
+      if (id.startsWith('broadcast_confirm:')) {
+        const [, scope, userId] = id.split(':');
+        if (interaction.user.id !== userId) return safeReply(interaction, '⛔ Эта рассылка не ваша.');
+        const pending = pendingBroadcasts.get(userId);
+        if (!pending) return safeReply(interaction, '⛔ Время ожидания истекло.');
+        pendingBroadcasts.delete(userId);
+
+        const targets = scope === 'all' ? await db.all('SELECT * FROM participants') : [await db.get('SELECT * FROM participants WHERE discord_id = ?', [pending.targetId])];
+        let sent = 0;
+        for (const t of targets) {
+          if (!t) continue;
+          try {
+            const member = await guild.members.fetch(t.discord_id);
+            await member.send(pending.text);
+            sent++;
+          } catch (_) {}
+        }
+
+        await logAudit(guild, interaction.user, 'Рассылка сообщения', `${scope === 'all' ? `Всем (${sent}/${targets.length})` : `Одному: <@${pending.targetId}>`}\n> ${pending.text.slice(0, 300)}`);
+        try {
+          await interaction.update({ content: `✅ Отправлено (${sent}/${targets.length}).`, components: [] });
+        } catch (_) {}
+        return;
+      }
+
+      if (id.startsWith('broadcast_cancel:')) {
+        const userId = id.split(':')[1];
+        pendingBroadcasts.delete(userId);
+        try {
+          await interaction.update({ content: '❌ Рассылка отменена.', components: [] });
+        } catch (_) {}
+        return;
+      }
+
+      if (id === 'invitations_prev_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return invitationsDisplay.changeInvitationsWeek(guild, 1);
+      }
+
+      if (id === 'applications_prev_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return applicationsDisplay.changeApplicationsWeek(guild, 1);
+      }
+
+      if (id === 'applications_next_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return applicationsDisplay.changeApplicationsWeek(guild, -1);
+      }
+
+      if (id === 'applications_this_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return applicationsDisplay.jumpToCurrentWeek(guild);
+      }
+
+      if (id === 'invitations_next_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return invitationsDisplay.changeInvitationsWeek(guild, -1);
+      }
+
+      if (id === 'invitations_this_week') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        await interaction.deferUpdate();
+        return invitationsDisplay.jumpToCurrentWeek(guild);
+      }
+
+      if (id === 'invitations_add') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        return interaction.showModal(buildPickSearchModal('invitation_add_inviter'));
+      }
+
+      if (id === 'invitations_remove') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        return interaction.showModal(buildPickSearchModal('invitation_remove'));
+      }
+
+      if (id === 'invitations_search') {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        return interaction.showModal(buildPickSearchModal('invitation_view'));
+      }
+
       if (id === 'apply_submit') {
+        const existing = await db.get('SELECT id FROM participants WHERE discord_id = ?', [interaction.user.id]);
+        if (existing) {
+          return interaction.showModal(buildPassportRequestModal());
+        }
         return interaction.showModal(buildApplicationModal('modal_apply'));
       }
 
       if (id === 'kick_submit') {
-        return interaction.showModal(buildKickApplicationModal('modal_kick'));
+        return interaction.showModal(buildKickApplicationModal('modal_kick', {}, true));
       }
 
       if (id === 'vacation_apply') {
@@ -479,11 +1356,11 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.user.id !== discordId) {
           return safeReply(interaction, '⛔ Это не ваш отпуск.');
         }
-        try {
-          const member = await guild.members.fetch(discordId);
-          await member.roles.remove(config.ROLE_VACATION).catch(() => {});
-        } catch (_) {}
-        await db.run('UPDATE participants SET vacation_until = NULL WHERE discord_id = ?', [discordId]);
+        const identity = await passportsLib.computeEffectiveIdentity(discordId);
+        if (identity) {
+          await passportsLib.updatePassportFields(discordId, identity.static, { vacation_until: null });
+        }
+        await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Отпуск отменён участником', `<@${discordId}>`);
         try {
@@ -495,21 +1372,20 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('vacation_accept:')) {
-        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const vId = id.split(':')[1];
         const v = await db.get('SELECT * FROM vacations WHERE id = ?', [vId]);
         if (!v || v.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
         const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [v.discord_id]);
         if (!participant) return safeReply(interaction, 'Этот пользователь не найден в списке участников.');
 
-        try {
-          const member = await guild.members.fetch(v.discord_id);
-          await member.roles.add(config.ROLE_VACATION);
-        } catch (_) {}
-
-        await db.run('UPDATE participants SET vacation_until = ? WHERE discord_id = ?', [v.until, v.discord_id]);
+        const identity = await passportsLib.computeEffectiveIdentity(v.discord_id);
+        if (identity) {
+          await passportsLib.updatePassportFields(v.discord_id, identity.static, { vacation_until: v.until });
+        }
+        await syncStatusRoles(guild, v.discord_id);
         await db.run('UPDATE vacations SET status = ? WHERE id = ?', ['accepted', vId]);
-        await refreshReviewMessage(interaction.channel, v.message_id, vacationReviewEmbed({ ...v, status: 'accepted' }), []);
+        await refreshReviewMessage(interaction.channel, v.message_id, vacationReviewEmbed({ ...v, status: 'accepted' }), [], actionSummary(interaction.user.id, '✅ Одобрено'));
         await safeUpdateMembersList(guild);
         await dmUser(guild, v.discord_id, {
           content: `🏖️ Ваш отпуск одобрен до **${formatDateTime(new Date(v.until))}**.`,
@@ -520,15 +1396,11 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('vacation_reject:')) {
-        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const vId = id.split(':')[1];
         const v = await db.get('SELECT * FROM vacations WHERE id = ?', [vId]);
         if (!v || v.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
-        await db.run('UPDATE vacations SET status = ? WHERE id = ?', ['rejected', vId]);
-        await refreshReviewMessage(interaction.channel, v.message_id, vacationReviewEmbed({ ...v, status: 'rejected' }), []);
-        await dmUser(guild, v.discord_id, '❌ Ваша заявка на отпуск отклонена.');
-        await logAudit(guild, interaction.user, 'Отпуск отклонён', `Заявка #${vId} от <@${v.discord_id}>`);
-        return safeReply(interaction, 'Заявка отклонена.');
+        return interaction.showModal(buildRejectReasonModal(`modal_vacation_reject:${vId}`));
       }
 
       if (id.startsWith('apply_edit:')) {
@@ -545,22 +1417,143 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.showModal(buildApplicationModal(`modal_apply_accept:${appId}`, app));
       }
 
+      if (id === 'data_change_apply') {
+        const passports = await passportsLib.getAllPassports(interaction.user.id);
+        if (passports.length === 0) return safeReply(interaction, '⛔ Вы не состоите в организации.');
+        if (passports.length === 1) {
+          return interaction.showModal(buildDataChangeModal(`modal_data_change:${passports[0].static}`, { new_name: passports[0].name }));
+        }
+        const select = new StringSelectMenuBuilder()
+          .setCustomId('select_data_change_passport')
+          .setPlaceholder('Выберите паспорт, у которого изменить Имя Фамилию')
+          .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+        return safeReply(interaction, { components: [row(select)] });
+      }
+
+      if (id.startsWith('data_change_accept:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM data_change_requests WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+
+        await passportsLib.updatePassportFields(reqRow.discord_id, reqRow.target_static, { name: reqRow.new_name });
+        await syncEffectiveIdentity(guild, reqRow.discord_id);
+        await syncProfileChannelName(guild, reqRow.discord_id);
+        await safeUpdateMembersList(guild);
+        await db.run('UPDATE data_change_requests SET status = ? WHERE id = ?', ['accepted', reqId]);
+
+        await refreshReviewMessage(
+          interaction.channel,
+          reqRow.message_id,
+          buildDataChangeEmbed({ ...reqRow, status: 'accepted' }),
+          [],
+          actionSummary(interaction.user.id, '✅ Принято'),
+        );
+        await dmUser(guild, reqRow.discord_id, `✅ Ваша заявка на изменение данных (№ ${reqRow.target_static}) принята: теперь «${reqRow.new_name}».`);
+        await logAudit(guild, interaction.user, 'Данные изменены по заявке', `Заявка #${reqId}: <@${reqRow.discord_id}> — № ${reqRow.target_static}: «${reqRow.old_name}» → «${reqRow.new_name}»`);
+        return safeReply(interaction, 'Данные изменены.');
+      }
+
+      if (id.startsWith('data_change_reject:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM data_change_requests WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        return interaction.showModal(buildRejectReasonModal(`modal_data_change_reject:${reqId}`));
+      }
+
+      if (id === 'hr_apply_submit') {
+        const participant = await db.get('SELECT id FROM participants WHERE discord_id = ?', [interaction.user.id]);
+        if (!participant) return safeReply(interaction, '⛔ Подать заявку могут только участники организации.');
+        if (interaction.member.roles.cache.has(config.ROLE_HR)) return safeReply(interaction, '⛔ У вас уже есть роль HR-Менеджера.');
+        return interaction.showModal(buildHrApplyModal());
+      }
+
+      if (id.startsWith('hr_apply_accept:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ Принимать заявки на HR может только Владелец/Зам. Владелец.');
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM hr_applications WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+
+        try {
+          const member = await guild.members.fetch(reqRow.discord_id);
+          await member.roles.add(config.ROLE_HR);
+        } catch (err) {
+          return safeReply(interaction, '⛔ Не удалось выдать роль (проверьте права бота).');
+        }
+        await db.run('UPDATE hr_applications SET status = ? WHERE id = ?', ['accepted', reqId]);
+
+        await refreshReviewMessage(
+          interaction.channel,
+          reqRow.message_id,
+          buildHrApplyEmbed({ ...reqRow, status: 'accepted' }),
+          [],
+          actionSummary(interaction.user.id, '✅ Принято'),
+        );
+        await dmUser(guild, reqRow.discord_id, '✅ Ваша заявка на роль HR-Менеджера принята!');
+        await logAudit(guild, interaction.user, 'Заявка на HR принята', `Заявка #${reqId}: <@${reqRow.discord_id}> получил(а) роль HR-Менеджера`);
+        return safeReply(interaction, 'Заявка принята, роль выдана.');
+      }
+
+      if (id.startsWith('hr_apply_reject:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ Отклонять заявки на HR может только Владелец/Зам. Владелец.');
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM hr_applications WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        return interaction.showModal(buildRejectReasonModal(`modal_hr_apply_reject:${reqId}`));
+      }
+
+      if (id.startsWith('passport_request_accept:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM passport_requests WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        if (await passportsLib.isStaticTaken(reqRow.static)) {
+          return safeReply(interaction, '⛔ Такой № Паспорта уже занят — принять нельзя.');
+        }
+
+        try {
+          await passportsLib.addExtraPassport(reqRow.discord_id, reqRow.name, reqRow.static, interaction.user.id);
+        } catch (err) {
+          return safeReply(interaction, `⛔ ${err.message}`);
+        }
+        await db.run('UPDATE passport_requests SET status = ?, accepted_by = ? WHERE id = ?', ['accepted', interaction.user.id, reqId]);
+        await syncEffectiveIdentity(guild, reqRow.discord_id);
+        await syncProfileChannelName(guild, reqRow.discord_id);
+        await safeUpdateMembersList(guild);
+
+        await refreshReviewMessage(
+          interaction.channel,
+          reqRow.message_id,
+          buildPassportRequestEmbed({ ...reqRow, status: 'accepted' }),
+          [],
+          actionSummary(interaction.user.id, '✅ Принято'),
+        );
+        await dmUser(guild, reqRow.discord_id, `✅ Ваша заявка на добавление паспорта (${reqRow.name}, № ${reqRow.static}) принята.`);
+        await logAudit(guild, interaction.user, 'Паспорт добавлен по заявке', `Заявка #${reqId}: <@${reqRow.discord_id}> — ${reqRow.name}, № ${reqRow.static}`);
+        return safeReply(interaction, 'Паспорт добавлен.');
+      }
+
+      if (id.startsWith('passport_request_reject:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM passport_requests WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        return interaction.showModal(buildRejectReasonModal(`modal_passport_request_reject:${reqId}`));
+      }
+
       if (id.startsWith('apply_reject:')) {
         const appId = id.split(':')[1];
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
         if (!app) return safeReply(interaction, 'Заявка не найдена.');
-        await db.run('UPDATE applications SET status = ? WHERE id = ?', ['rejected', appId]);
-        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed({ ...app, status: 'rejected' }), []);
-        await dmUser(guild, app.discord_id, `❌ Ваша заявка на вступление была отклонена.`);
-        await logAudit(guild, interaction.user, 'Заявка отклонена', `Заявка #${appId} от <@${app.discord_id}>`);
-        return safeReply(interaction, 'Заявка отклонена.');
+        return interaction.showModal(buildRejectReasonModal(`modal_apply_reject:${appId}`));
       }
 
       if (id.startsWith('kick_edit:')) {
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k) return safeReply(interaction, 'Заявка не найдена.');
-        return interaction.showModal(buildKickApplicationModal(`modal_kick_edit:${kickId}`, k));
+        return interaction.showModal(buildKickApplicationModal(`modal_kick_edit:${kickId}`, k, true));
       }
 
       if (id.startsWith('kick_confirm:')) {
@@ -574,11 +1567,7 @@ client.on('interactionCreate', async (interaction) => {
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k) return safeReply(interaction, 'Заявка не найдена.');
-        await db.run('UPDATE kicks SET status = ? WHERE id = ?', ['rejected', kickId]);
-        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed({ ...k, status: 'rejected' }), []);
-        await dmUser(guild, k.discord_id, `❌ Ваша заявка на увольнение была отклонена.`);
-        await logAudit(guild, interaction.user, 'Заявка на увольнение отклонена', `Заявка #${kickId} от <@${k.discord_id}>`);
-        return safeReply(interaction, 'Заявка отклонена.');
+        return interaction.showModal(buildRejectReasonModal(`modal_kick_reject:${kickId}`));
       }
 
       if (id.startsWith('members_pick:')) {
@@ -587,7 +1576,7 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
         }
         if (action === 'add') {
-          return interaction.showModal(buildMemberModal('modal_members_add'));
+          return interaction.showModal(buildMemberModal('modal_members_add', {}, interaction.user.id === config.OWNER_USER_ID));
         }
         return interaction.showModal(buildPickSearchModal(action));
       }
@@ -642,6 +1631,11 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.showModal(buildBlacklistAddModal());
       }
 
+      if (id === 'blacklist_add_nodiscord') {
+        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
+        return interaction.showModal(buildBlacklistAddNoDiscordModal());
+      }
+
       if (id === 'blacklist_remove') {
         if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
         return interaction.showModal(buildBlacklistRemoveModal());
@@ -687,31 +1681,36 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (id.startsWith('rules_save:') || id.startsWith('agitation_save:')) {
-        const [prefix, userId] = id.split(':');
-        const type = prefix.split('_')[0];
+      if (id.startsWith('rules_save:') || id.startsWith('agitation_save:') || id.startsWith('hr_info_save:')) {
+        const type = id.startsWith('rules_save:') ? 'rules' : id.startsWith('agitation_save:') ? 'agitation' : 'hr_info';
+        const userId = id.split(':')[1];
         if (interaction.user.id !== userId) return safeReply(interaction, '⛔ Подтвердить может только тот, кто запустил обновление.');
         const text = pendingUpdates.get(`${type}:${userId}`);
         if (!text) return safeReply(interaction, '⛔ Время ожидания истекло, начните заново через команду.');
         pendingUpdates.delete(`${type}:${userId}`);
-        await db.setSetting(`${type}_text`, text);
+        await contentVersions.saveVersion(type, text, userId);
+
+        const typeLabels = { rules: 'Свод правил обновлён', agitation: 'Агитация обновлена', hr_info: 'Описание вакансии HR обновлено' };
 
         if (type === 'rules') {
           const channel = await guild.channels.fetch(config.CHANNEL_RULES);
           await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил').setDescription(text)] });
-        } else {
+        } else if (type === 'agitation') {
           const channel = await guild.channels.fetch(config.CHANNEL_AGITATION);
           await channel.send({ content: text, embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription('```\n' + text + '\n```')] });
+        } else {
+          const channel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
+          await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(text)] });
         }
 
-        await logAudit(guild, interaction.user, type === 'rules' ? 'Свод правил обновлён' : 'Агитация обновлена', 'Текст изменён и опубликован.');
+        await logAudit(guild, interaction.user, typeLabels[type], 'Текст изменён и опубликован.');
         await interaction.update({ content: '✅ Сохранено и опубликовано.', embeds: [], components: [] });
         return;
       }
 
-      if (id.startsWith('rules_cancel:') || id.startsWith('agitation_cancel:')) {
-        const [prefix, userId] = id.split(':');
-        const type = prefix.split('_')[0];
+      if (id.startsWith('rules_cancel:') || id.startsWith('agitation_cancel:') || id.startsWith('hr_info_cancel:')) {
+        const type = id.startsWith('rules_cancel:') ? 'rules' : id.startsWith('agitation_cancel:') ? 'agitation' : 'hr_info';
+        const userId = id.split(':')[1];
         if (interaction.user.id !== userId) return safeReply(interaction, '⛔ Отменить может только тот, кто запустил обновление.');
         pendingUpdates.delete(`${type}:${userId}`);
         await interaction.update({ content: '❌ Отменено.', embeds: [], components: [] });
@@ -745,50 +1744,193 @@ client.on('interactionCreate', async (interaction) => {
         const discordId = customId.split(':')[1];
         const staticValue = interaction.values[0];
         await passportsLib.removeExtraPassport(discordId, staticValue);
+        await syncEffectiveIdentity(guild, discordId);
+        await syncProfileChannelName(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Паспорт удалён', `<@${discordId}>: № ${staticValue}`);
         return safeReply(interaction, 'Паспорт удалён.');
       }
 
-      // Шаг 2 повышения/понижения: конкретный ранг уже выбран — применяем его
-      if (customId.startsWith('select_rank:')) {
+      if (customId.startsWith('select_contract_remove:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const discordId = customId.split(':')[1];
+        const contractId = interaction.values[0];
+        const contract = await contracts.getContractById(contractId);
+        if (!contract) return safeReply(interaction, 'Запись уже не существует.');
+        await contracts.deleteContract(contractId);
+        await contractsDisplay.safeUpdateContractsStats(guild);
+        await logAudit(guild, interaction.user, 'Контракт удалён вручную', `<@${discordId}>: ${contract.message_url} (было: ${contract.status})`);
+        return safeReply(interaction, 'Запись удалена.');
+      }
+
+      if (customId.startsWith('select_invitation_remove:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const inviterId = customId.split(':')[1];
+        const invitationId = interaction.values[0];
+        const invite = await invitations.getInvitationById(invitationId);
+        if (!invite) return safeReply(interaction, 'Запись уже не существует.');
+        await invitations.deleteInvitation(invitationId);
+        await invitationsDisplay.safeUpdateInvitations(guild);
+        await logAudit(guild, interaction.user, 'Приглашение удалено вручную', `<@${inviterId}> → <@${invite.invitee_discord_id}> (было: ${invite.status})`);
+        return safeReply(interaction, 'Запись удалена.');
+      }
+
+      if (customId.startsWith('select_vacation_grant_scope:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const discordId = customId.split(':')[1];
+        return interaction.showModal(buildVacationGrantModal(discordId, interaction.values.join(',')));
+      }
+
+      if (customId.startsWith('select_vacation_revoke_scope:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const discordId = customId.split(':')[1];
+        const removedNames = [];
+        for (const staticValue of interaction.values) {
+          const passport = (await passportsLib.getAllPassports(discordId)).find((p) => p.static === staticValue);
+          await passportsLib.updatePassportFields(discordId, staticValue, { vacation_until: null });
+          if (passport) removedNames.push(`${passport.name} (№ ${passport.static})`);
+        }
+        await syncStatusRoles(guild, discordId);
+        await safeUpdateMembersList(guild);
+        await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}>: ${removedNames.join(', ')}`);
+        await dmUser(guild, discordId, `📢 Ваш отпуск (${removedNames.join(', ')}) был досрочно завершён администрацией.`);
+        return safeReply(interaction, `Отпуск снят: ${removedNames.join(', ')}.`);
+      }
+
+      if (customId.startsWith('select_afk_set_scope:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const discordId = customId.split(':')[1];
+        return interaction.showModal(buildAfkModal(discordId, interaction.values.join(',')));
+      }
+
+      if (customId.startsWith('select_afk_revoke_scope:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const discordId = customId.split(':')[1];
+        const removedNames = [];
+        for (const staticValue of interaction.values) {
+          const passport = (await passportsLib.getAllPassports(discordId)).find((p) => p.static === staticValue);
+          await passportsLib.updatePassportFields(discordId, staticValue, { afk_since: null });
+          if (passport) removedNames.push(`${passport.name} (№ ${passport.static})`);
+        }
+        await syncStatusRoles(guild, discordId);
+        await safeUpdateMembersList(guild);
+        await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}>: ${removedNames.join(', ')}`);
+        return safeReply(interaction, `AFK снят: ${removedNames.join(', ')}.`);
+      }
+
+      if (customId.startsWith('select_faq_edit:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const entryId = interaction.values[0];
+        const entry = await faq.getEntry(entryId);
+        if (!entry) return safeReply(interaction, 'Гайд не найден.');
+        return interaction.showModal(buildFaqModal(`modal_faq_edit:${entryId}`, entry));
+      }
+
+      if (customId.startsWith('select_faq_delete:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const category = customId.split(':')[1];
+        const entryId = interaction.values[0];
+        const entry = await faq.getEntry(entryId);
+        if (!entry) return safeReply(interaction, 'Гайд не найден.');
+        return safeReply(interaction, {
+          content: `Удалить гайд «${entry.title}»?`,
+          components: [row(
+            new ButtonBuilder().setCustomId(`faq_delete_confirm:${entryId}:${category}`).setLabel('✅ Подтвердить').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('faq_delete_cancel').setLabel('❌ Отменить').setStyle(ButtonStyle.Secondary),
+          )],
+        });
+      }
+
+      if (customId === 'select_data_change_passport') {
+        const staticValue = interaction.values[0];
+        const passports = await passportsLib.getAllPassports(interaction.user.id);
+        const passport = passports.find((p) => p.static === staticValue);
+        if (!passport) return safeReply(interaction, 'Паспорт не найден.');
+        return interaction.showModal(buildDataChangeModal(`modal_data_change:${staticValue}`, { new_name: passport.name }));
+      }
+
+      if (customId.startsWith('select_kick_scope:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const discordId = customId.split(':')[1];
+        const scope = interaction.values[0];
+        const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
+        if (!participant) return safeReply(interaction, 'Участник не найден в базе.');
+        return interaction.showModal(buildKickApplicationModal(`modal_members_kick:${discordId}:${scope}`, { name: participant.name }));
+      }
+
+      if (customId.startsWith('select_promote_scope:')) {
         if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
         const [, action, discordId] = customId.split(':');
+        const scope = interaction.values[0];
+        const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
+        if (!participant) return safeReply(interaction, 'Участник не найден в базе.');
+        return startRankSelection(interaction, guild, action, discordId, scope, participant.name);
+      }
+
+      // Шаг 2/3 повышения/понижения: конкретный ранг уже выбран — применяем его
+      if (customId.startsWith('select_rank:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const [, action, discordId, scope] = customId.split(':');
         const newRoleId = interaction.values[0];
         const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
         if (!participant) return safeReply(interaction, 'Участник не найден в базе (возможно, был изменён список).');
         if (perms.isProtectedTarget(discordId, interaction.user.id)) {
           return safeReply(interaction, '⛔ Этому участнику нельзя менять роль.');
         }
-        if (!perms.canActOnRank(interaction.member, participant.role_id) || !perms.canActOnRank(interaction.member, newRoleId)) {
+        if (!perms.canActOnRank(interaction.member, newRoleId)) {
           return safeReply(interaction, '⛔ У вас недостаточно прав, чтобы назначить этот ранг.');
         }
 
-        const oldRoleId = participant.role_id;
+        const passports = await passportsLib.getAllPassports(discordId);
+        const targets = scope === 'all' ? passports : passports.filter((p) => p.static === scope);
+        if (targets.length === 0) return safeReply(interaction, 'Паспорт(а) не найдены.');
 
-        try {
-          const member = await guild.members.fetch(discordId);
-          if (oldRoleId) await member.roles.remove(oldRoleId).catch(() => {});
-          await member.roles.add(newRoleId);
-        } catch (err) {
-          return safeReply(interaction, 'Не удалось изменить роль участника на сервере (проверьте права бота).');
+        const updated = [];
+        const skipped = [];
+        for (const p of targets) {
+          if (!perms.canActOnRank(interaction.member, p.role_id)) {
+            skipped.push(`${p.name} (№ ${p.static}) — недостаточно прав`);
+            continue;
+          }
+          if (scope === 'all') {
+            const curIdx = getRoleIndex(p.role_id);
+            const newIdx = getRoleIndex(newRoleId);
+            const directionOk = curIdx === -1 || (action === 'promote' ? newIdx < curIdx : newIdx > curIdx);
+            if (!directionOk) {
+              skipped.push(`${p.name} (№ ${p.static}) — уже на этом ранге или в другом направлении`);
+              continue;
+            }
+          }
+          await passportsLib.updatePassportFields(discordId, p.static, { role_id: newRoleId });
+          updated.push(`${p.name} (№ ${p.static}): <@&${p.role_id}> → <@&${newRoleId}>`);
         }
 
-        await db.run('UPDATE participants SET role_id = ? WHERE discord_id = ?', [newRoleId, discordId]);
+        if (updated.length === 0) {
+          return safeReply(interaction, `Ничего не изменено.${skipped.length ? `\n${skipped.join('\n')}` : ''}`);
+        }
+
+        await syncEffectiveIdentity(guild, discordId);
+        await syncProfileChannelName(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(
           guild,
           interaction.user,
           action === 'promote' ? 'Повышение' : 'Понижение',
-          `<@${discordId}> (${participant.name}): <@&${oldRoleId}> → <@&${newRoleId}>`,
+          `<@${discordId}> (${participant.name}):\n${updated.join('\n')}`,
         );
-        return safeReply(interaction, `Ранг участника ${participant.name} обновлён.`);
+        return safeReply(
+          interaction,
+          `Ранг обновлён:\n${updated.join('\n')}${skipped.length ? `\n\nПропущено:\n${skipped.join('\n')}` : ''}`,
+        );
       }
 
       // Шаг после members_pick: конкретный участник выбран через поиск
       if (customId.startsWith('select_pick:')) {
-        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
-        const action = customId.split(':')[1];
+        const action = customId.slice('select_pick:'.length);
+        const isContractAction = action === 'contract_add' || action === 'contract_remove' || action === 'contract_view';
+        const isInvitationAction = action === 'invitation_add_inviter' || action.startsWith('invitation_add_invitee:') || action === 'invitation_remove' || action === 'invitation_view';
+        const allowed = (isContractAction || isInvitationAction) ? perms.canReview(interaction.member) : perms.canManageMembersList(interaction.member);
+        if (!allowed) return safeReply(interaction, '⛔ У вас нет прав для этого действия.');
         const discordId = interaction.values[0];
         const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
         if (!participant) return safeReply(interaction, 'Участник не найден в базе (возможно, был изменён список).');
@@ -797,7 +1939,18 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         if (action === 'kick') {
-          return interaction.showModal(buildKickApplicationModal(`modal_members_kick:${discordId}`, { name: participant.name }));
+          const passports = await passportsLib.getAllPassports(discordId);
+          if (passports.length <= 1) {
+            return interaction.showModal(buildKickApplicationModal(`modal_members_kick:${discordId}:all`, { name: participant.name }));
+          }
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_kick_scope:${discordId}`)
+            .setPlaceholder('Выберите паспорт или всех')
+            .addOptions([
+              new StringSelectMenuOptionBuilder().setLabel('Уволить всех (полностью)').setValue('all'),
+              ...passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)),
+            ]);
+          return safeReply(interaction, { content: `У **${participant.name}** несколько паспортов — кого уволить?`, components: [row(scopeSelect)] });
         }
 
         if (action === 'edit') {
@@ -814,81 +1967,194 @@ client.on('interactionCreate', async (interaction) => {
           });
         }
 
+        if (action === 'contract_add') {
+          return safeReply(interaction, {
+            content: `Добавить контракт для **${participant.name}** — выберите итог:`,
+            components: [row(
+              new ButtonBuilder().setCustomId(`contract_manual_status:fulfilled:${discordId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`contract_manual_status:unfulfilled:${discordId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
+            )],
+          });
+        }
+
+        if (action === 'contract_remove') {
+          const weeksAgo = await contractsDisplay.getCurrentWeeksAgo();
+          const range = contracts.getWeekRange(weeksAgo);
+          const list = await contracts.getUserContractsForWeek(discordId, range);
+          if (list.length === 0) {
+            return safeReply(interaction, `У ${participant.name} нет записей за отображаемую сейчас неделю (${contracts.formatWeekLabel(range)}).`);
+          }
+          const statusLabel = { fulfilled: '✅ Выполнен', unfulfilled: '❌ Невыполнен', rejected: '🚫 Не контракт' };
+          const removeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_contract_remove:${discordId}`)
+            .setPlaceholder('Выберите запись для удаления')
+            .addOptions(
+              list.map((c) =>
+                new StringSelectMenuOptionBuilder()
+                  .setLabel(`${contracts.formatDate(new Date(c.submitted_at))} — ${statusLabel[c.status] || c.status}`)
+                  .setValue(String(c.id)),
+              ),
+            );
+          return safeReply(interaction, { content: `Записи ${participant.name} за ${contracts.formatWeekLabel(range)}:`, components: [row(removeSelect)] });
+        }
+
+        if (action === 'contract_view') {
+          const weeksAgo = await contractsDisplay.getCurrentWeeksAgo();
+          const range = contracts.getWeekRange(weeksAgo);
+          const { fulfilled, unfulfilled } = await contracts.getUserWeekStats(discordId, range);
+          const fLines = fulfilled.map((c) => `[Скриншот](${c.message_url}) | ${contracts.formatDate(new Date(c.submitted_at))}`).join('\n') || '—';
+          const uLines = unfulfilled.map((c) => `[Скриншот](${c.message_url}) | ${contracts.formatDate(new Date(c.submitted_at))}`).join('\n') || '—';
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle(`Контракты ${participant.name} — за ${contracts.formatWeekLabel(range)}`)
+            .addFields(
+              { name: 'Выполненные', value: fLines.slice(0, 1024), inline: true },
+              { name: 'Не выполненные', value: uLines.slice(0, 1024), inline: true },
+            );
+          return safeReply(interaction, { embeds: [embed] });
+        }
+
+        // Шаг 1 ручного добавления приглашения: выбран пригласивший — теперь ищем приглашённого
+        if (action === 'invitation_add_inviter') {
+          return interaction.showModal(buildPickSearchModal(`invitation_add_invitee:${discordId}`));
+        }
+
+        // Шаг 2: пригласивший и приглашённый выбраны — сразу засчитываем (HR подтверждает по факту)
+        if (action.startsWith('invitation_add_invitee:')) {
+          const inviterId = action.split(':')[1];
+          if (inviterId === discordId) return safeReply(interaction, '⛔ Нельзя указать одного и того же человека пригласившим самого себя.');
+          try {
+            await invitations.addManualInvitation(inviterId, discordId, participant.name, participant.static, new Date().toISOString());
+          } catch (err) {
+            return safeReply(interaction, `⛔ ${err.message}`);
+          }
+          await invitationsDisplay.safeUpdateInvitations(guild);
+          await logAudit(guild, interaction.user, 'Приглашение добавлено вручную', `<@${inviterId}> пригласил(а) <@${discordId}>`);
+          return safeReply(interaction, `Приглашение добавлено: <@${inviterId}> → <@${discordId}>.`);
+        }
+
+        // Удаление: выбран пригласивший — показываем список его приглашений
+        if (action === 'invitation_remove') {
+          const list = await invitations.getInviterAllInvitations(discordId);
+          if (list.length === 0) return safeReply(interaction, `У ${participant.name} нет записей о приглашениях.`);
+          const statusLabel = { pending: '⏳ Ожидает', confirmed: '✅ Подтверждено', disqualified: '🚫 Дисквалифицировано' };
+          const removeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_invitation_remove:${discordId}`)
+            .setPlaceholder('Выберите приглашение для удаления')
+            .addOptions(
+              list.map((inv) =>
+                new StringSelectMenuOptionBuilder()
+                  .setLabel(`${inv.invitee_name} (№ ${inv.invitee_static}) — ${statusLabel[inv.status] || inv.status}`)
+                  .setValue(String(inv.id)),
+              ),
+            );
+          return safeReply(interaction, { content: `Приглашения от ${participant.name}:`, components: [row(removeSelect)] });
+        }
+
+        // Поиск: показать подтверждённые приглашения за отображаемую неделю
+        if (action === 'invitation_view') {
+          const weeksAgo = await invitationsDisplay.getCurrentWeeksAgo();
+          const range = contracts.getWeekRange(weeksAgo);
+          const list = await invitations.getInviterInviteesForWeek(discordId, range);
+          const lines = list.map((inv) => `<@${inv.invitee_discord_id}> | ${inv.invitee_name}, № ${inv.invitee_static}`).join('\n') || '—';
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle(`Приглашения ${participant.name} — за ${contracts.formatWeekLabel(range)}`)
+            .setDescription(lines.slice(0, 4000));
+          return safeReply(interaction, { embeds: [embed] });
+        }
+
         if (action === 'vacation_grant') {
-          return interaction.showModal(buildVacationGrantModal(discordId));
+          const passports = await passportsLib.getAllPassports(discordId);
+          if (passports.length <= 1) {
+            return interaction.showModal(buildVacationGrantModal(discordId));
+          }
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_vacation_grant_scope:${discordId}`)
+            .setPlaceholder('Выберите один, несколько или все паспорта')
+            .setMinValues(1)
+            .setMaxValues(passports.length)
+            .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `Кому из паспортов **${participant.name}** выдать отпуск?`, components: [row(scopeSelect)] });
         }
 
         if (action === 'vacation_revoke') {
-          if (!participant.vacation_until) return safeReply(interaction, 'У участника нет активного отпуска.');
-          try {
-            const member = await guild.members.fetch(discordId);
-            await member.roles.remove(config.ROLE_VACATION).catch(() => {});
-          } catch (_) {}
-          await db.run('UPDATE participants SET vacation_until = NULL WHERE discord_id = ?', [discordId]);
-          await safeUpdateMembersList(guild);
-          await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}> (${participant.name})`);
-          await dmUser(guild, discordId, '📢 Ваш отпуск был досрочно завершён администрацией.');
-          return safeReply(interaction, `Отпуск участника ${participant.name} снят.`);
+          const onVacation = (await passportsLib.getAllPassports(discordId)).filter((p) => p.vacation_until);
+          if (onVacation.length === 0) return safeReply(interaction, 'У участника нет активного отпуска.');
+
+          if (onVacation.length === 1) {
+            await passportsLib.updatePassportFields(discordId, onVacation[0].static, { vacation_until: null });
+            await syncStatusRoles(guild, discordId);
+            await safeUpdateMembersList(guild);
+            await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}> (${onVacation[0].name}, № ${onVacation[0].static})`);
+            await dmUser(guild, discordId, `📢 Ваш отпуск (${onVacation[0].name}) был досрочно завершён администрацией.`);
+            return safeReply(interaction, `Отпуск ${onVacation[0].name} снят.`);
+          }
+
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_vacation_revoke_scope:${discordId}`)
+            .setPlaceholder('Выберите, у кого снять отпуск')
+            .setMinValues(1)
+            .setMaxValues(onVacation.length)
+            .addOptions(onVacation.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `У кого из паспортов **${participant.name}** снять отпуск?`, components: [row(scopeSelect)] });
         }
 
         if (action === 'afk_set') {
-          return interaction.showModal(buildAfkModal(discordId));
+          const passports = await passportsLib.getAllPassports(discordId);
+          if (passports.length <= 1) {
+            return interaction.showModal(buildAfkModal(discordId));
+          }
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_afk_set_scope:${discordId}`)
+            .setPlaceholder('Выберите один, несколько или все паспорта')
+            .setMinValues(1)
+            .setMaxValues(passports.length)
+            .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `Кому из паспортов **${participant.name}** выставить AFK?`, components: [row(scopeSelect)] });
         }
 
         if (action === 'afk_revoke') {
-          if (!participant.afk_since) return safeReply(interaction, 'У участника не выставлен статус AFK.');
-          try {
-            const member = await guild.members.fetch(discordId);
-            await member.roles.remove(config.ROLE_AFK).catch(() => {});
-          } catch (_) {}
-          await db.run('UPDATE participants SET afk_since = NULL WHERE discord_id = ?', [discordId]);
-          await safeUpdateMembersList(guild);
-          await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}> (${participant.name})`);
-          return safeReply(interaction, `Статус AFK участника ${participant.name} снят.`);
+          const onAfk = (await passportsLib.getAllPassports(discordId)).filter((p) => p.afk_since);
+          if (onAfk.length === 0) return safeReply(interaction, 'У участника не выставлен статус AFK.');
+
+          if (onAfk.length === 1) {
+            await passportsLib.updatePassportFields(discordId, onAfk[0].static, { afk_since: null });
+            await syncStatusRoles(guild, discordId);
+            await safeUpdateMembersList(guild);
+            await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}> (${onAfk[0].name}, № ${onAfk[0].static})`);
+            return safeReply(interaction, `Статус AFK ${onAfk[0].name} снят.`);
+          }
+
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_afk_revoke_scope:${discordId}`)
+            .setPlaceholder('Выберите, у кого снять AFK')
+            .setMinValues(1)
+            .setMaxValues(onAfk.length)
+            .addOptions(onAfk.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `У кого из паспортов **${participant.name}** снять AFK?`, components: [row(scopeSelect)] });
         }
 
         // Шаг 1 повышения/понижения: участник выбран — показываем список
         // доступных рангов, чтобы выбрать любой, а не только соседний.
         if (action === 'promote' || action === 'demote') {
-          if (!perms.canActOnRank(interaction.member, participant.role_id)) {
-            return safeReply(interaction, '⛔ У вас недостаточно прав для изменения роли этого участника.');
+          const passports = await passportsLib.getAllPassports(discordId);
+
+          if (passports.length > 1) {
+            const scopeSelect = new StringSelectMenuBuilder()
+              .setCustomId(`select_promote_scope:${action}:${discordId}`)
+              .setPlaceholder('Выберите паспорт или всех')
+              .addOptions([
+                new StringSelectMenuOptionBuilder().setLabel('Все паспорта').setValue('all'),
+                ...passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)),
+              ]);
+            return safeReply(interaction, {
+              content: `У **${participant.name}** несколько паспортов — кого именно ${action === 'promote' ? 'повысить' : 'понизить'}?`,
+              components: [row(scopeSelect)],
+            });
           }
 
-          const currentIndex = getRoleIndex(participant.role_id);
-          if (currentIndex === -1) {
-            return safeReply(interaction, 'У участника не определён текущий ранг в иерархии — измените роль вручную на сервере.');
-          }
-
-          const actorIndex = perms.getActorRankIndex(interaction.member);
-          const eligibleIndexes = config.ROLE_IDS
-            .map((_, i) => i)
-            .filter((i) => (action === 'promote' ? i < currentIndex : i > currentIndex))
-            .filter((i) => interaction.member.id === config.OWNER_USER_ID || interaction.member.roles.cache.has(config.ROLE_ADMIN) || i > actorIndex);
-
-          if (eligibleIndexes.length === 0) {
-            return safeReply(interaction, 'Невозможно изменить ранг дальше (достигнута граница иерархии или недостаточно прав).');
-          }
-
-          const options = [];
-          for (const i of eligibleIndexes) {
-            const roleId = config.ROLE_IDS[i];
-            let roleName = roleId;
-            try {
-              const role = await guild.roles.fetch(roleId);
-              if (role) roleName = role.name;
-            } catch (_) {}
-            options.push(new StringSelectMenuOptionBuilder().setLabel(roleName).setValue(roleId));
-          }
-
-          const rankSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_rank:${action}:${discordId}`)
-            .setPlaceholder('Выберите новый ранг')
-            .addOptions(options);
-
-          return safeReply(interaction, {
-            content: `Выберите новый ранг для **${participant.name}**:`,
-            components: [row(rankSelect)],
-          });
+          return startRankSelection(interaction, guild, action, discordId, passports[0] ? passports[0].static : participant.static, participant.name);
         }
 
         return;
@@ -903,28 +2169,180 @@ client.on('interactionCreate', async (interaction) => {
       const get = (name) => interaction.fields.getTextInputValue(name);
 
       // Подача заявки на вступление
+      if (id.startsWith('modal_data_change:')) {
+        const targetStatic = id.split(':')[1];
+        const newName = normalizeName(get('new_name'));
+        const passports = await passportsLib.getAllPassports(interaction.user.id);
+        const passport = passports.find((p) => p.static === targetStatic);
+        if (!passport) return safeReply(interaction, 'Паспорт не найден — возможно, был удалён.');
+
+        const reqRow = {
+          discord_id: interaction.user.id,
+          discord_tag: interaction.user.tag,
+          target_static: targetStatic,
+          old_name: passport.name,
+          new_name: newName,
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        };
+        const result = await db.run(
+          'INSERT INTO data_change_requests (discord_id, discord_tag, target_static, old_name, new_name, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [reqRow.discord_id, reqRow.discord_tag, reqRow.target_static, reqRow.old_name, reqRow.new_name, reqRow.status, reqRow.created_at],
+        );
+        reqRow.id = result.lastID;
+
+        const reviewChannel = await guild.channels.fetch(config.CHANNEL_DATA_CHANGE_REVIEW);
+        const sent = await reviewChannel.send({
+          content: perms.mentionManagementRoles(),
+          embeds: [buildDataChangeEmbed(reqRow)],
+          components: buildDataChangeComponents(reqRow),
+          ...mentionOpts,
+        });
+        await db.run('UPDATE data_change_requests SET message_id = ? WHERE id = ?', [sent.id, reqRow.id]);
+
+        await logAudit(guild, interaction.user, 'Заявка на изменение данных', `Заявка #${reqRow.id} от <@${interaction.user.id}>: № ${targetStatic} «${passport.name}» → «${newName}»`);
+        return safeReply(interaction, 'Заявка на изменение данных отправлена на рассмотрение.');
+      }
+
+      if (id.startsWith('modal_data_change_reject:')) {
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM data_change_requests WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const reason = get('reason');
+        await db.run('UPDATE data_change_requests SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, reqId]);
+        await refreshReviewMessage(
+          interaction.channel,
+          reqRow.message_id,
+          buildDataChangeEmbed({ ...reqRow, status: 'rejected', reject_reason: reason }),
+          [],
+          actionSummary(interaction.user.id, '❌ Отклонено', reason),
+        );
+        await dmUser(guild, reqRow.discord_id, `❌ Ваша заявка на изменение данных отклонена. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на изменение данных отклонена', `Заявка #${reqId} от <@${reqRow.discord_id}>. Причина: ${reason}`);
+        return safeReply(interaction, 'Заявка отклонена.');
+      }
+
+      if (id === 'modal_hr_apply') {
+        const reqRow = {
+          discord_id: interaction.user.id,
+          discord_tag: interaction.user.tag,
+          hours_per_week: get('hours_per_week'),
+          training_ready: get('training_ready'),
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        };
+        const result = await db.run(
+          'INSERT INTO hr_applications (discord_id, discord_tag, hours_per_week, training_ready, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [reqRow.discord_id, reqRow.discord_tag, reqRow.hours_per_week, reqRow.training_ready, reqRow.status, reqRow.created_at],
+        );
+        reqRow.id = result.lastID;
+
+        const reviewChannel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_REVIEW);
+        const sent = await reviewChannel.send({
+          content: config.ROLES_MEMBERS_LIST_ALLOWED.map((r) => `<@&${r}>`).join(' '),
+          embeds: [buildHrApplyEmbed(reqRow)],
+          components: buildHrApplyComponents(reqRow),
+          allowedMentions: { roles: config.ROLES_MEMBERS_LIST_ALLOWED },
+        });
+        await db.run('UPDATE hr_applications SET message_id = ? WHERE id = ?', [sent.id, reqRow.id]);
+
+        await logAudit(guild, interaction.user, 'Новая заявка на роль HR', `Заявка #${reqRow.id} от <@${interaction.user.id}>`);
+        return safeReply(interaction, 'Заявка на роль HR-Менеджера отправлена на рассмотрение.');
+      }
+
+      if (id.startsWith('modal_hr_apply_reject:')) {
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM hr_applications WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const reason = get('reason');
+        await db.run('UPDATE hr_applications SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, reqId]);
+        await refreshReviewMessage(
+          interaction.channel,
+          reqRow.message_id,
+          buildHrApplyEmbed({ ...reqRow, status: 'rejected', reject_reason: reason }),
+          [],
+          actionSummary(interaction.user.id, '❌ Отклонено', reason),
+        );
+        await logAudit(guild, interaction.user, 'Заявка на HR отклонена', `Заявка #${reqId} от <@${reqRow.discord_id}>. Причина: ${reason}`);
+        return safeReply(interaction, 'Заявка отклонена.');
+      }
+
+      if (id === 'modal_passport_request') {
+        const name = normalizeName(get('name'));
+        const staticValue = get('static');
+        if (await passportsLib.isStaticTaken(staticValue)) {
+          return safeReply(interaction, 'Такой № Паспорта уже используется.');
+        }
+
+        const reqRow = {
+          discord_id: interaction.user.id,
+          discord_tag: interaction.user.tag,
+          name,
+          static: staticValue,
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        };
+        const result = await db.run(
+          'INSERT INTO passport_requests (discord_id, discord_tag, name, static, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [reqRow.discord_id, reqRow.discord_tag, reqRow.name, reqRow.static, reqRow.status, reqRow.created_at],
+        );
+        reqRow.id = result.lastID;
+
+        const reviewChannel = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW);
+        const sent = await reviewChannel.send({
+          content: perms.mentionManagementRoles(),
+          embeds: [buildPassportRequestEmbed(reqRow)],
+          components: buildPassportRequestComponents(reqRow),
+          ...mentionOpts,
+        });
+        await db.run('UPDATE passport_requests SET message_id = ? WHERE id = ?', [sent.id, reqRow.id]);
+
+        await logAudit(guild, interaction.user, 'Заявка на добавление паспорта', `Заявка #${reqRow.id} от <@${interaction.user.id}>: ${name} — № ${staticValue}`);
+        return safeReply(interaction, 'Заявка на добавление паспорта отправлена на рассмотрение.');
+      }
+
       if (id === 'modal_apply') {
         const app = {
           discord_id: interaction.user.id,
           discord_tag: interaction.user.tag,
-          name: get('name'),
+          name: normalizeName(get('name')),
           static: get('static'),
           lvl: parseInt(get('lvl'), 10) || 0,
           skills: get('skills'),
-          online: get('online'),
+          invited_by: get('invited_by') || '',
           status: 'pending',
           created_at: new Date().toISOString(),
         };
 
         const blacklisted = await db.get('SELECT * FROM blacklist WHERE discord_id = ? OR static = ?', [app.discord_id, app.static]);
         if (blacklisted) {
+          await logAudit(
+            guild,
+            interaction.user,
+            '⛔ Заблокированная попытка подать заявку',
+            `<@${app.discord_id}> — в чёрном списке (причина внесения: ${blacklisted.reason || '—'}). Заявка не создана.`,
+          );
           return safeReply(interaction, '⛔ Вы находитесь в чёрном списке организации и не можете подать заявку на вступление.');
         }
 
+        if (app.invited_by) {
+          const inviter = await invitations.resolveInviter(app.invited_by);
+          if (!inviter) {
+            return safeReply(
+              interaction,
+              '⛔ Не удалось найти пригласившего по указанным данным.\n\n**Возможные причины:**\n' +
+                '- Опечатка в имени, паспорте или теге\n' +
+                '- Этого человека сейчас нет в организации (или он уже вышел)\n' +
+                '- Указан неполный/неверный Discord тег — лучше указать Discord ID\n\n' +
+                'Проверьте данные и подайте заявку заново, либо оставьте поле пустым.',
+            );
+          }
+        }
+
         const result = await db.run(
-          `INSERT INTO applications (discord_id, discord_tag, name, static, lvl, skills, online, status, created_at)
+          `INSERT INTO applications (discord_id, discord_tag, name, static, lvl, skills, invited_by, status, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [app.discord_id, app.discord_tag, app.name, app.static, app.lvl, app.skills, app.online, app.status, app.created_at],
+          [app.discord_id, app.discord_tag, app.name, app.static, app.lvl, app.skills, app.invited_by, app.status, app.created_at],
         );
         app.id = result.lastID;
 
@@ -942,14 +2360,90 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       // Редактирование заявки на вступление
+      // Отказ в заявке на добавление паспорта — с причиной
+      if (id.startsWith('modal_passport_request_reject:')) {
+        const reqId = id.split(':')[1];
+        const reqRow = await db.get('SELECT * FROM passport_requests WHERE id = ?', [reqId]);
+        if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const reason = get('reason');
+        await db.run('UPDATE passport_requests SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, reqId]);
+        await refreshReviewMessage(
+          interaction.channel,
+          reqRow.message_id,
+          buildPassportRequestEmbed({ ...reqRow, status: 'rejected', reject_reason: reason }),
+          [],
+          actionSummary(interaction.user.id, '❌ Отклонено', reason),
+        );
+        await dmUser(guild, reqRow.discord_id, `❌ Ваша заявка на добавление паспорта отклонена. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на паспорт отклонена', `Заявка #${reqId} от <@${reqRow.discord_id}>. Причина: ${reason}`);
+        return safeReply(interaction, 'Заявка отклонена.');
+      }
+
+      // Отказ в заявке на вступление — с причиной
+      if (id.startsWith('modal_apply_reject:')) {
+        const appId = id.split(':')[1];
+        const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
+        if (!app || app.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const reason = get('reason');
+        await db.run('UPDATE applications SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, appId]);
+        await refreshReviewMessage(
+          interaction.channel,
+          app.message_id,
+          applicationReviewEmbed({ ...app, status: 'rejected', reject_reason: reason }),
+          [],
+          actionSummary(interaction.user.id, '❌ Отклонено', reason),
+        );
+        await dmUser(guild, app.discord_id, `❌ Ваша заявка на вступление была отклонена. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка отклонена', `Заявка #${appId} от <@${app.discord_id}>. Причина: ${reason}`);
+        return safeReply(interaction, 'Заявка отклонена.');
+      }
+
+      // Отказ в заявке на увольнение — с причиной
+      if (id.startsWith('modal_kick_reject:')) {
+        const kickId = id.split(':')[1];
+        const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
+        if (!k || k.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const reason = get('reason');
+        await db.run('UPDATE kicks SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, kickId]);
+        await refreshReviewMessage(
+          interaction.channel,
+          k.message_id,
+          kickReviewEmbed({ ...k, status: 'rejected', reject_reason: reason }),
+          [],
+          actionSummary(interaction.user.id, '❌ Отклонено', reason),
+        );
+        await dmUser(guild, k.discord_id, `❌ Ваша заявка на увольнение была отклонена. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на увольнение отклонена', `Заявка #${kickId} от <@${k.discord_id}>. Причина: ${reason}`);
+        return safeReply(interaction, 'Заявка отклонена.');
+      }
+
+      // Отказ в заявке на отпуск — с причиной
+      if (id.startsWith('modal_vacation_reject:')) {
+        const vId = id.split(':')[1];
+        const v = await db.get('SELECT * FROM vacations WHERE id = ?', [vId]);
+        if (!v || v.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const reason = get('reason');
+        await db.run('UPDATE vacations SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, vId]);
+        await refreshReviewMessage(
+          interaction.channel,
+          v.message_id,
+          vacationReviewEmbed({ ...v, status: 'rejected', reject_reason: reason }),
+          [],
+          actionSummary(interaction.user.id, '❌ Отклонено', reason),
+        );
+        await dmUser(guild, v.discord_id, `❌ Ваша заявка на отпуск отклонена. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Отпуск отклонён', `Заявка #${vId} от <@${v.discord_id}>. Причина: ${reason}`);
+        return safeReply(interaction, 'Заявка отклонена.');
+      }
+
       if (id.startsWith('modal_apply_edit:')) {
         const appId = id.split(':')[1];
-        const fields = { name: get('name'), static: get('static'), lvl: parseInt(get('lvl'), 10) || 0, skills: get('skills'), online: get('online') };
-        await db.run('UPDATE applications SET name = ?, static = ?, lvl = ?, skills = ?, online = ? WHERE id = ?', [
-          fields.name, fields.static, fields.lvl, fields.skills, fields.online, appId,
+        const fields = { name: normalizeName(get('name')), static: get('static'), lvl: parseInt(get('lvl'), 10) || 0, skills: get('skills'), invited_by: get('invited_by') || '' };
+        await db.run('UPDATE applications SET name = ?, static = ?, lvl = ?, skills = ?, invited_by = ? WHERE id = ?', [
+          fields.name, fields.static, fields.lvl, fields.skills, fields.invited_by, appId,
         ]);
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
-        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed(app), applicationReviewComponents(app));
+        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed(app), applicationReviewComponents(app), actionSummary(interaction.user.id, '✏️ Изменено'));
         await logAudit(guild, interaction.user, 'Заявка изменена', `Заявка #${appId} отредактирована`);
         return safeReply(interaction, 'Заявка обновлена.');
       }
@@ -960,10 +2454,16 @@ client.on('interactionCreate', async (interaction) => {
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
         if (!app || app.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
 
-        const fields = { name: get('name'), static: get('static'), lvl: parseInt(get('lvl'), 10) || 0, skills: get('skills'), online: get('online') };
+        const fields = { name: normalizeName(get('name')), static: get('static'), lvl: parseInt(get('lvl'), 10) || 0, skills: get('skills'), invited_by: get('invited_by') || '' };
 
         const blacklisted = await db.get('SELECT * FROM blacklist WHERE discord_id = ? OR static = ?', [app.discord_id, fields.static]);
         if (blacklisted) {
+          await logAudit(
+            guild,
+            interaction.user,
+            '⛔ Попытка принять заявку от человека из ЧС',
+            `Заявка #${appId}: <@${app.discord_id}> — в чёрном списке. Принятие отклонено.`,
+          );
           return safeReply(interaction, '⛔ Этот пользователь (или паспорт) находится в чёрном списке — принять заявку нельзя.');
         }
 
@@ -976,9 +2476,10 @@ client.on('interactionCreate', async (interaction) => {
         await db.run(
           `INSERT INTO participants (discord_id, discord_tag, name, static, lvl, skills, online, role_id, joined_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [app.discord_id, app.discord_tag, fields.name, fields.static, fields.lvl, fields.skills, fields.online, config.ROLE_APPLY, new Date().toISOString()],
+          [app.discord_id, app.discord_tag, fields.name, fields.static, fields.lvl, fields.skills, '', config.ROLE_APPLY, new Date().toISOString()],
         );
-        await db.run('UPDATE applications SET status = ? WHERE id = ?', ['accepted', appId]);
+        await db.run('UPDATE applications SET status = ?, accepted_by = ? WHERE id = ?', ['accepted', interaction.user.id, appId]);
+        await acceptances.recordAcceptance(interaction.user.id, app.discord_id, fields.name, fields.static, new Date().toISOString());
 
         try {
           const member = await guild.members.fetch(app.discord_id);
@@ -987,9 +2488,36 @@ client.on('interactionCreate', async (interaction) => {
           console.error('Не удалось выдать роль при принятии заявки:', err);
         }
 
-        await syncNickname(guild, app.discord_id, fields.name, fields.static);
-        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed({ ...app, ...fields, status: 'accepted' }), []);
+        await syncEffectiveIdentity(guild, app.discord_id);
+        await syncProfileChannelName(guild, app.discord_id);
+        const profileChannelUrl = await createProfileThread(guild, app.discord_id, fields.name, fields.static);
+
+        // Приглашение — только если пригласивший сейчас реально в списке участников (п.9)
+        // и этот новый участник ещё никогда не фигурировал как приглашённый (п.8).
+        if (fields.invited_by && !(await invitations.hasExistingInvitationRecord(app.discord_id))) {
+          const inviter = await invitations.resolveInviter(fields.invited_by);
+          if (inviter) {
+            await invitations.recordInvitation(inviter.discord_id, app.discord_id, fields.name, fields.static, new Date().toISOString());
+          }
+        }
+
+        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed({ ...app, ...fields, status: 'accepted' }), [], actionSummary(interaction.user.id, '✅ Принято'));
         await dmUser(guild, app.discord_id, '✅ Ваша заявка на вступление принята! Добро пожаловать в организацию.');
+        if (profileChannelUrl) {
+          await dmUser(
+            guild,
+            app.discord_id,
+            `📸 Ваш профиль для отчётов по контрактам: ${profileChannelUrl}\n\n` +
+              `Туда нужно присылать скриншоты **на весь экран** по каждому контракту — 2 штуки:\n` +
+              `1️⃣ когда вы **взяли** контракт\n` +
+              `2️⃣ когда контракт **выполнен или не выполнен**\n\n` +
+              `Можно прислать оба скриншота одним сообщением, можно — двумя сообщениями подряд (по одному).`,
+          );
+        }
+        const rulesText = await getCurrentText('rules', DEFAULT_RULES);
+        await dmUser(guild, app.discord_id, {
+          embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(rulesText.slice(0, 4000))],
+        });
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Заявка принята', `Заявка #${appId}: <@${app.discord_id}> принят(а) в организацию`);
         return safeReply(interaction, 'Заявка принята, участник добавлен.');
@@ -1000,14 +2528,15 @@ client.on('interactionCreate', async (interaction) => {
         const k = {
           discord_id: interaction.user.id,
           discord_tag: interaction.user.tag,
-          name: get('name'),
+          name: normalizeName(get('name')),
+          target_static: get('target_static') || 'all',
           reason: get('reason') || '',
           status: 'pending',
           created_at: new Date().toISOString(),
         };
         const result = await db.run(
-          `INSERT INTO kicks (discord_id, discord_tag, name, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-          [k.discord_id, k.discord_tag, k.name, k.reason, k.status, k.created_at],
+          `INSERT INTO kicks (discord_id, discord_tag, name, target_static, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [k.discord_id, k.discord_tag, k.name, k.target_static, k.reason, k.status, k.created_at],
         );
         k.id = result.lastID;
 
@@ -1020,16 +2549,16 @@ client.on('interactionCreate', async (interaction) => {
         });
         await db.run('UPDATE kicks SET message_id = ? WHERE id = ?', [sent.id, k.id]);
 
-        await logAudit(guild, interaction.user, 'Новая заявка на увольнение', `Заявка #${k.id} от <@${k.discord_id}> на участника «${k.name}»`);
+        await logAudit(guild, interaction.user, 'Новая заявка на увольнение', `Заявка #${k.id} от <@${k.discord_id}> на участника «${k.name}»${k.target_static !== 'all' ? ` (паспорт № ${k.target_static})` : ''}`);
         return safeReply(interaction, 'Заявка на увольнение отправлена на рассмотрение.');
       }
 
       // Редактирование заявки на увольнение
       if (id.startsWith('modal_kick_edit:')) {
         const kickId = id.split(':')[1];
-        await db.run('UPDATE kicks SET name = ?, reason = ? WHERE id = ?', [get('name'), get('reason') || '', kickId]);
+        await db.run('UPDATE kicks SET name = ?, target_static = ?, reason = ? WHERE id = ?', [normalizeName(get('name')), get('target_static') || 'all', get('reason') || '', kickId]);
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
-        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed(k), kickReviewComponents(k));
+        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed(k), kickReviewComponents(k), actionSummary(interaction.user.id, '✏️ Изменено'));
         await logAudit(guild, interaction.user, 'Заявка на увольнение изменена', `Заявка #${kickId} отредактирована`);
         return safeReply(interaction, 'Заявка обновлена.');
       }
@@ -1041,45 +2570,71 @@ client.on('interactionCreate', async (interaction) => {
         if (!k || k.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
 
         const reason = get('reason') || k.reason;
-        const name = get('name') || k.name;
+        const name = normalizeName(get('name')) || k.name;
+        const targetStatic = k.target_static || 'all';
 
-        const participant = await db.get('SELECT * FROM participants WHERE name = ?', [name]);
+        let participant = null;
+        if (targetStatic !== 'all') {
+          participant = await db.get('SELECT * FROM participants WHERE static = ?', [targetStatic]);
+          if (!participant) {
+            const inExtra = await db.get('SELECT discord_id FROM extra_passports WHERE static = ?', [targetStatic]);
+            if (inExtra) participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [inExtra.discord_id]);
+          }
+        }
+        if (!participant) participant = await db.get('SELECT * FROM participants WHERE name = ?', [name]);
+
         if (participant && perms.isProtectedTarget(participant.discord_id, interaction.user.id)) {
           return safeReply(interaction, '⛔ Этого участника нельзя уволить.');
         }
         await db.run('UPDATE kicks SET status = ?, reason = ?, name = ? WHERE id = ?', ['accepted', reason, name, kickId]);
 
+        let fullyRemoved = true;
         if (participant) {
-          await removeParticipant(guild, participant, reason);
+          const result = await kickPassportOrFull(guild, participant, targetStatic, reason);
+          fullyRemoved = result.fullyRemoved;
         }
 
-        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed({ ...k, status: 'accepted', reason, name }), []);
-        await logAudit(guild, interaction.user, 'Участник уволен', `Заявка #${kickId}: «${name}» уволен(а). Причина: ${reason || '—'}`);
-        return safeReply(interaction, 'Участник уволен.');
+        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed({ ...k, status: 'accepted', reason, name }), [], actionSummary(interaction.user.id, '🚫 Уволен(а)'));
+        await logAudit(
+          guild,
+          interaction.user,
+          fullyRemoved ? 'Участник уволен' : 'Паспорт участника снят',
+          `Заявка #${kickId}: «${name}»${targetStatic !== 'all' ? ` (паспорт № ${targetStatic})` : ''}. Причина: ${reason || '—'}`,
+        );
+        return safeReply(interaction, fullyRemoved ? 'Участник уволен.' : 'Паспорт снят.');
       }
 
       // Добавление участника вручную
       if (id === 'modal_members_add') {
+        const rawDiscordId = get('discord_id').trim();
+        const hasDiscord = rawDiscordId.length > 0;
+        const rawStatic = get('static').trim();
+        const hasStatic = rawStatic.length > 0;
+        const rawName = normalizeName(get('name'));
         const fields = {
-          name: get('name'),
-          discord_id: get('discord_id').trim(),
-          static: get('static'),
+          name: rawName || 'Без имени',
+          discord_id: hasDiscord ? rawDiscordId : `nodiscord-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          static: hasStatic ? rawStatic : `nostatic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           lvl: parseInt(get('lvl'), 10) || 0,
           online: get('online') || '',
         };
 
-        const dupId = await db.get('SELECT id FROM participants WHERE discord_id = ?', [fields.discord_id]);
-        if (dupId) return safeReply(interaction, 'Участник с таким Discord ID уже существует.');
-        if (await passportsLib.isStaticTaken(fields.static)) {
+        if (hasDiscord) {
+          const dupId = await db.get('SELECT id FROM participants WHERE discord_id = ?', [fields.discord_id]);
+          if (dupId) return safeReply(interaction, 'Участник с таким Discord ID уже существует.');
+        }
+        if (hasStatic && (await passportsLib.isStaticTaken(fields.static))) {
           return safeReply(interaction, 'Такой № Паспорта уже занят.');
         }
 
-        let discordTag = fields.discord_id;
-        try {
-          const member = await guild.members.fetch(fields.discord_id);
-          discordTag = member.user.tag;
-        } catch (_) {
-          // участника нет на сервере — сохраняем как есть
+        let discordTag = hasDiscord ? fields.discord_id : `${fields.name} (без Discord)`;
+        if (hasDiscord) {
+          try {
+            const member = await guild.members.fetch(fields.discord_id);
+            discordTag = member.user.tag;
+          } catch (_) {
+            // участника нет на сервере — сохраняем как есть
+          }
         }
 
         await db.run(
@@ -1088,15 +2643,22 @@ client.on('interactionCreate', async (interaction) => {
           [fields.discord_id, discordTag, fields.name, fields.static, fields.lvl, '', fields.online, config.ROLE_APPLY, new Date().toISOString()],
         );
 
-        try {
-          const member = await guild.members.fetch(fields.discord_id);
-          await member.roles.add(config.ROLE_APPLY);
-        } catch (_) {}
+        if (hasDiscord) {
+          try {
+            const member = await guild.members.fetch(fields.discord_id);
+            await member.roles.add(config.ROLE_APPLY);
+          } catch (_) {}
+          await syncEffectiveIdentity(guild, fields.discord_id);
+          await syncProfileChannelName(guild, fields.discord_id);
+          const profileChannelUrl = await createProfileThread(guild, fields.discord_id, fields.name, fields.static);
+          if (profileChannelUrl) {
+            await dmUser(guild, fields.discord_id, `📸 Ваш профиль для отчётов по контрактам: ${profileChannelUrl}`);
+          }
+        }
 
-        await syncNickname(guild, fields.discord_id, fields.name, fields.static);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Участник добавлен вручную', `${fields.name} (<@${fields.discord_id}>)`);
-        return safeReply(interaction, 'Участник добавлен.');
+        await logAudit(guild, interaction.user, 'Участник добавлен вручную', `${fields.name} (${hasDiscord ? `<@${fields.discord_id}>` : 'без Discord'})`);
+        return safeReply(interaction, `Участник добавлен.${hasDiscord ? '' : ' (без Discord — ник/роль/канал-профиль не создавались)'}`);
       }
 
       // Редактирование участника из списка
@@ -1106,7 +2668,7 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, '⛔ Данные этого участника нельзя изменять.');
         }
         const fields = {
-          name: get('name'),
+          name: normalizeName(get('name')),
           discord_id: get('discord_id').trim(),
           static: get('static'),
           lvl: parseInt(get('lvl'), 10) || 0,
@@ -1123,7 +2685,8 @@ client.on('interactionCreate', async (interaction) => {
           fields.name, fields.discord_id, fields.static, fields.lvl, fields.online, discordId,
         ]);
 
-        await syncNickname(guild, fields.discord_id, fields.name, fields.static);
+        await syncEffectiveIdentity(guild, fields.discord_id);
+        await syncProfileChannelName(guild, fields.discord_id);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Данные участника изменены', `${fields.name} (<@${fields.discord_id}>)`);
         return safeReply(interaction, 'Данные участника обновлены.');
@@ -1131,7 +2694,9 @@ client.on('interactionCreate', async (interaction) => {
 
       // Увольнение через список участников
       if (id.startsWith('modal_members_kick:')) {
-        const discordId = id.split(':')[1];
+        const parts = id.split(':');
+        const discordId = parts[1];
+        const scope = parts[2] || 'all';
         if (perms.isProtectedTarget(discordId, interaction.user.id)) {
           return safeReply(interaction, '⛔ Этого участника нельзя уволить.');
         }
@@ -1139,14 +2704,19 @@ client.on('interactionCreate', async (interaction) => {
         const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
         if (!participant) return safeReply(interaction, 'Участник не найден.');
 
-        await removeParticipant(guild, participant, reason);
-        await logAudit(guild, interaction.user, 'Участник уволен', `${participant.name} (<@${discordId}>). Причина: ${reason || '—'}`);
-        return safeReply(interaction, 'Участник уволен.');
+        const { fullyRemoved } = await kickPassportOrFull(guild, participant, scope, reason);
+        await logAudit(
+          guild,
+          interaction.user,
+          fullyRemoved ? 'Участник уволен полностью' : 'Паспорт участника снят',
+          `${participant.name} (<@${discordId}>)${scope !== 'all' ? ` — паспорт № ${scope}` : ''}. Причина: ${reason || '—'}`,
+        );
+        return safeReply(interaction, fullyRemoved ? 'Участник уволен.' : `Паспорт № ${scope} снят.`);
       }
 
       // Выбор участника через поиск (для kick/edit/promote/demote/паспорта/отпуск/AFK)
       if (id.startsWith('modal_pick_search:')) {
-        const action = id.split(':')[1];
+        const action = id.slice('modal_pick_search:'.length);
         const query = get('query').trim();
 
         let participants;
@@ -1194,19 +2764,68 @@ client.on('interactionCreate', async (interaction) => {
       // Добавление паспорта
       if (id.startsWith('modal_passport_add:')) {
         const discordId = id.split(':')[1];
-        const name = get('name');
+        const name = normalizeName(get('name'));
         const staticValue = get('static');
         if (await passportsLib.isStaticTaken(staticValue)) {
           return safeReply(interaction, 'Такой № Паспорта уже используется.');
         }
         try {
-          await passportsLib.addExtraPassport(discordId, name, staticValue);
+          await passportsLib.addExtraPassport(discordId, name, staticValue, interaction.user.id);
         } catch (err) {
           return safeReply(interaction, `⛔ ${err.message}`);
         }
+        await syncEffectiveIdentity(guild, discordId);
+        await syncProfileChannelName(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Паспорт добавлен', `<@${discordId}>: ${name} — № ${staticValue}`);
         return safeReply(interaction, 'Паспорт добавлен.');
+      }
+
+      // Ручное добавление контракта
+      if (id.startsWith('modal_faq_add:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const category = id.split(':')[1];
+        const title = get('title');
+        const content = get('content');
+        await faq.addEntry(category, title, content, interaction.user.id);
+        await faqDisplay.safeUpdateFaqChannel(guild, category);
+        await logAudit(guild, interaction.user, 'Гайд FAQ добавлен', `[${category}] «${title}»`);
+        return safeReply(interaction, 'Гайд добавлен.');
+      }
+
+      if (id.startsWith('modal_faq_edit:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const entryId = id.split(':')[1];
+        const entry = await faq.getEntry(entryId);
+        if (!entry) return safeReply(interaction, 'Гайд не найден.');
+        const title = get('title');
+        const content = get('content');
+        await faq.updateEntry(entryId, title, content, interaction.user.id);
+        await faqDisplay.safeUpdateFaqChannel(guild, entry.category);
+        await logAudit(guild, interaction.user, 'Гайд FAQ изменён', `[${entry.category}] «${title}»`);
+        return safeReply(interaction, 'Гайд обновлён.');
+      }
+
+      if (id.startsWith('modal_contract_manual:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const [, status, discordId] = id.split(':');
+        const link = get('link').trim();
+        const dateInput = get('date').trim();
+        let submittedAt;
+        if (dateInput) {
+          const date = parseDateOnly(dateInput);
+          if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ или оставьте поле пустым.');
+          submittedAt = date.toISOString();
+        } else {
+          submittedAt = new Date().toISOString();
+        }
+
+        await contracts.recordManualContract(discordId, link, submittedAt, status, interaction.user.id);
+        await contractsDisplay.safeUpdateContractsStats(guild);
+
+        const label = status === 'fulfilled' ? '✅ Выполнен' : '❌ Невыполнен';
+        await logAudit(guild, interaction.user, 'Контракт добавлен вручную', `<@${discordId}>: ${label} — ${link}`);
+        return safeReply(interaction, `Контракт добавлен (${label}).`);
       }
 
       // Заявка на отпуск (самостоятельно)
@@ -1244,46 +2863,56 @@ client.on('interactionCreate', async (interaction) => {
 
       // Выдача отпуска через список участников
       if (id.startsWith('modal_vacation_grant:')) {
-        const discordId = id.split(':')[1];
+        const parts = id.split(':');
+        const discordId = parts[1];
+        const staticsCsv = parts[2];
         const deadline = parseDeadline(get('deadline'));
         if (!deadline) {
           return safeReply(interaction, '⛔ Неверный формат. Используйте ДД.ММ.ГГГГ (будущая дата) или число+d, например 7d.');
         }
-        try {
-          const member = await guild.members.fetch(discordId);
-          await member.roles.add(config.ROLE_VACATION);
-        } catch (_) {}
-        await db.run('UPDATE participants SET vacation_until = ? WHERE discord_id = ?', [deadline.toISOString(), discordId]);
+        const passports = await passportsLib.getAllPassports(discordId);
+        const targets = staticsCsv ? passports.filter((p) => staticsCsv.split(',').includes(p.static)) : passports;
+        if (targets.length === 0) return safeReply(interaction, 'Паспорт(а) не найдены.');
+
+        for (const p of targets) {
+          await passportsLib.updatePassportFields(discordId, p.static, { vacation_until: deadline.toISOString() });
+        }
+        await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
+        const names = targets.map((p) => `${p.name} (№ ${p.static})`).join(', ');
         await dmUser(guild, discordId, {
-          content: `🏖️ Вам выдан отпуск до **${formatDateTime(deadline)}**.`,
+          content: `🏖️ Вам выдан отпуск до **${formatDateTime(deadline)}** (${names}).`,
           components: [row(new ButtonBuilder().setCustomId(`vacation_selfcancel:${discordId}`).setLabel('❌ Отменить отпуск').setStyle(ButtonStyle.Danger))],
         });
-        await logAudit(guild, interaction.user, 'Отпуск выдан', `<@${discordId}> до ${formatDateTime(deadline)}`);
-        return safeReply(interaction, 'Отпуск выдан.');
+        await logAudit(guild, interaction.user, 'Отпуск выдан', `<@${discordId}> (${names}) до ${formatDateTime(deadline)}`);
+        return safeReply(interaction, `Отпуск выдан: ${names}.`);
       }
 
       // Указание AFK
       if (id.startsWith('modal_afk_set:')) {
-        const discordId = id.split(':')[1];
+        const parts = id.split(':');
+        const discordId = parts[1];
+        const staticsCsv = parts[2];
         const date = parseDateOnly(get('date'));
         if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ.');
-        const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
-        try {
-          const member = await guild.members.fetch(discordId);
-          await member.roles.add(config.ROLE_AFK);
-        } catch (_) {}
-        await db.run('UPDATE participants SET afk_since = ? WHERE discord_id = ?', [formatDateOnly(date), discordId]);
-        await safeUpdateMembersList(guild);
-        if (participant) {
-          await dmUser(
-            guild,
-            discordId,
-            `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}. Пожалуйста, зайдите в игру под именем **${participant.name} | ${participant.static}**, чтобы статус отобразился.`,
-          );
+
+        const passports = await passportsLib.getAllPassports(discordId);
+        const targets = staticsCsv ? passports.filter((p) => staticsCsv.split(',').includes(p.static)) : passports;
+        if (targets.length === 0) return safeReply(interaction, 'Паспорт(а) не найдены.');
+
+        for (const p of targets) {
+          await passportsLib.updatePassportFields(discordId, p.static, { afk_since: formatDateOnly(date) });
         }
-        await logAudit(guild, interaction.user, 'AFK выставлен', `<@${discordId}> с ${formatDateOnly(date)}`);
-        return safeReply(interaction, 'Статус AFK выставлен.');
+        await syncStatusRoles(guild, discordId);
+        await safeUpdateMembersList(guild);
+        const names = targets.map((p) => `${p.name} | ${p.static}`).join(', ');
+        await dmUser(
+          guild,
+          discordId,
+          `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}. Пожалуйста, зайдите в игру под именем **${names}**, чтобы статус отобразился.`,
+        );
+        await logAudit(guild, interaction.user, 'AFK выставлен', `<@${discordId}> (${names}) с ${formatDateOnly(date)}`);
+        return safeReply(interaction, `Статус AFK выставлен: ${names}.`);
       }
 
       // Внесение в чёрный список
@@ -1310,6 +2939,30 @@ client.on('interactionCreate', async (interaction) => {
 
         await logAudit(guild, interaction.user, 'Внесение в ЧС', `<@${discordId}> (№ ${staticValue || '—'}). Причина: ${reason || '—'}${participant ? ' — участник автоматически уволен.' : ''}`);
         return safeReply(interaction, `Участник внесён в чёрный список.${participant ? ' Также автоматически уволен из организации.' : ''}`);
+      }
+
+      if (id === 'modal_blacklist_add_nodiscord') {
+        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
+        const name = normalizeName(get('name')) || '';
+        const staticValue = get('static');
+        const reason = get('reason') || '';
+        const syntheticId = `nodiscord-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const tag = name || `паспорт № ${staticValue}`;
+
+        await db.run(
+          'INSERT INTO blacklist (discord_id, discord_tag, static, reason, added_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [syntheticId, tag, staticValue, reason, interaction.user.id, new Date().toISOString()],
+        );
+        await safeUpdateBlacklist(guild);
+
+        // Если человек с таким паспортом уже есть в списке людей (тоже без Discord) — увольняем его
+        const participant = await db.get('SELECT * FROM participants WHERE static = ?', [staticValue]);
+        if (participant) {
+          await removeParticipant(guild, participant, `Внесён(а) в чёрный список. Причина: ${reason || '—'}`);
+        }
+
+        await logAudit(guild, interaction.user, 'Внесение в ЧС (без Discord)', `${tag} (№ ${staticValue}). Причина: ${reason || '—'}${participant ? ' — участник автоматически уволен.' : ''}`);
+        return safeReply(interaction, `Внесено в чёрный список (без Discord).${participant ? ' Также автоматически уволен из организации.' : ''}`);
       }
 
       // Убрать из чёрного списка
@@ -1356,13 +3009,33 @@ client.on('interactionCreate', async (interaction) => {
           .setTitle('Результаты поиска в ЧС')
           .setDescription(
             rows.length
-              ? rows.map((r) => `<@${r.discord_id}> | ${r.discord_tag} — № ${r.static || '—'} — ${r.reason || '—'}`).join('\n')
+              ? rows.map((r) => `${r.discord_id.startsWith('nodiscord-') ? r.discord_tag : `<@${r.discord_id}>`} | ${r.discord_tag} — № ${r.static || '—'} — ${r.reason || '—'}`).join('\n')
               : 'Ничего не найдено.',
           );
         return safeReply(interaction, { embeds: [embed] });
       }
 
       // Поиск
+      if (id.startsWith('modal_broadcast_target:')) {
+        const userId = id.split(':')[1];
+        if (interaction.user.id !== userId) return safeReply(interaction, '⛔ Эта рассылка не ваша.');
+        const pending = pendingBroadcasts.get(userId);
+        if (!pending) return safeReply(interaction, '⛔ Время ожидания истекло, начните заново командой /broadcast_message.');
+
+        const query = get('query');
+        const target = await invitations.resolveInviter(query);
+        if (!target) return safeReply(interaction, '⛔ Человек не найден в списке участников.');
+
+        pendingBroadcasts.set(userId, { text: pending.text, targetId: target.discord_id });
+        return safeReply(interaction, {
+          content: `Отправить это сообщение **${target.name}**?\n\n> ${pending.text.slice(0, 300)}`,
+          components: [row(
+            new ButtonBuilder().setCustomId(`broadcast_confirm:one:${userId}`).setLabel('✅ Отправить').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`broadcast_cancel:${userId}`).setLabel('❌ Не отправлять').setStyle(ButtonStyle.Danger),
+          )],
+        });
+      }
+
       if (id === 'modal_search') {
         const filters = {
           discord_tag: get('discord_tag'),
@@ -1406,6 +3079,17 @@ client.on('interactionCreate', async (interaction) => {
   } catch (err) {
     console.error('Ошибка обработки интеракции:', err);
     try {
+      const errGuild = interaction.guild || (process.env.GUILD_ID ? await client.guilds.fetch(process.env.GUILD_ID).catch(() => null) : null);
+      if (errGuild) {
+        await logAudit(
+          errGuild,
+          interaction.user,
+          '⚠️ Ошибка обработки интеракции',
+          `Тип: ${interaction.type}, customId: ${interaction.customId || interaction.commandName || '—'}\n\`\`\`${String(err.message || err).slice(0, 500)}\`\`\``,
+        );
+      }
+    } catch (_) {}
+    try {
       await safeReply(interaction, '❌ Произошла ошибка. Попробуйте позже.');
     } catch (_) {}
   }
@@ -1423,10 +3107,134 @@ process.on('unhandledRejection', (err) => {
 
 // ---------- Запуск ----------
 
+// ---------- Приём скриншотов контрактов из веток-профилей ----------
+
+// Ожидающие пары скриншотов "взял контракт" -> "выполнил/не выполнил" —
+// живёт в памяти процесса (сбрасывается при перезапуске бота, это
+// осознанное упрощение: в худшем случае человек просто пришлёт скриншот
+// повторно после перезапуска).
+const pendingTakenShots = new Map(); // discordId -> { url, messageId, submittedAt }
+
+async function postContractReviewCard(guild, discordId, takenUrl, takenAt, completedUrl, completedAt, replyToMessage) {
+  const contractId = await contracts.recordPendingContract(discordId, replyToMessage.channel.id, replyToMessage.id, completedUrl, completedAt);
+  await contracts.setTakenInfo(contractId, takenUrl, takenAt);
+
+  const embed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle('Новый контракт на проверку')
+    .addFields(
+      { name: 'Участник', value: `<@${discordId}>` },
+      { name: '1️⃣ Взял контракт', value: `[Скриншот](${takenUrl})`, inline: true },
+      { name: '2️⃣ Итог', value: `[Скриншот](${completedUrl})`, inline: true },
+    );
+
+  const reviewMsg = await replyToMessage.reply({
+    embeds: [embed],
+    components: [row(
+      new ButtonBuilder().setCustomId(`contract_fulfilled:${contractId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`contract_unfulfilled:${contractId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`contract_rejected:${contractId}`).setLabel('🚫 Не контракт').setStyle(ButtonStyle.Secondary),
+    )],
+  });
+  await contracts.setReviewMessageId(contractId, reviewMsg.id);
+}
+
+// Discord сам не логирует, когда человек удаляет СВОЁ ЖЕ сообщение — это
+// одна из вещей, которые их аудит не показывает, поэтому дублируем сюда.
+client.on('messageDelete', async (message) => {
+  try {
+    if (message.partial) return; // содержимое недоступно (не было в кэше)
+    if (!message.guild) return;
+    if (message.author && message.author.bot) return;
+
+    const contentPreview = message.content ? message.content.slice(0, 300) : '(без текста — вложение/embed)';
+    await logAudit(
+      message.guild,
+      message.author || { tag: 'неизвестно', id: '0' },
+      '🗑️ Сообщение удалено',
+      `Канал: <#${message.channel.id}>\nАвтор: ${message.author ? `<@${message.author.id}>` : '—'}\nСодержимое: ${contentPreview}`,
+    );
+  } catch (err) {
+    console.error('Ошибка логирования удаления сообщения:', err);
+  }
+});
+
+client.on('messageCreate', async (message) => {
+  try {
+    if (message.author.bot) return;
+    if (message.channel.type !== ChannelType.GuildText) return;
+    if (message.attachments.size === 0) return;
+
+    const imageUrls = [...message.attachments.values()]
+      .filter((a) => (a.contentType || '').startsWith('image/'))
+      .map((a) => a.url);
+    if (imageUrls.length === 0) return;
+
+    const participant = await db.get('SELECT * FROM participants WHERE profile_thread_id = ?', [message.channel.id]);
+    if (!participant) return;
+    if (message.author.id !== participant.discord_id) return; // считаем только скриншоты владельца профиля
+
+    const discordId = participant.discord_id;
+    const now = message.createdAt.toISOString();
+
+    // Одно сообщение сразу с 2+ скриншотами — считаем первым "взял", вторым "итог"
+    if (imageUrls.length >= 2) {
+      await postContractReviewCard(message.guild, discordId, imageUrls[0], now, imageUrls[1], now, message);
+      return;
+    }
+
+    // Одно изображение — либо это "взял" (ждём итог), либо "итог" (если "взял" уже ждал)
+    const pending = pendingTakenShots.get(discordId);
+    if (!pending) {
+      pendingTakenShots.set(discordId, { url: imageUrls[0], submittedAt: now });
+      await message.react('⏳').catch(() => {});
+      return;
+    }
+
+    pendingTakenShots.delete(discordId);
+    await postContractReviewCard(message.guild, discordId, pending.url, pending.submittedAt, imageUrls[0], now, message);
+  } catch (err) {
+    console.error('Ошибка обработки скриншота контракта:', err);
+  }
+});
+
 client.once('ready', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
   await db.init();
   await registerCommands();
+  backup.scheduleDailyBackup();
+
+  // Раз в час проверяем, не пробыл ли кто-то из "ожидающих" приглашённых
+  // нужный срок, оставаясь в организации (без этого события выхода не было
+  // бы повода пересчитать статус) — и обновляем отображаемую статистику.
+  setInterval(async () => {
+    try {
+      await invitations.promotePendingToConfirmed();
+      await acceptances.promotePendingToConfirmed();
+      if (process.env.GUILD_ID) {
+        const guild = await client.guilds.fetch(process.env.GUILD_ID);
+        await invitationsDisplay.safeUpdateInvitations(guild);
+        await applicationsDisplay.safeUpdateApplicationsStats(guild);
+      }
+    } catch (err) {
+      console.error('Ошибка периодической проверки приглашений/заявок:', err);
+    }
+  }, 60 * 60 * 1000);
+
+  // Раз в минуту проверяем, не истекли ли 15 минут бездействия на
+  // сообщениях статистики (контракты/приглашения/заявки) — если да,
+  // автоматически возвращаем отображение на текущую неделю (п.6/6.2).
+  setInterval(async () => {
+    try {
+      if (!process.env.GUILD_ID) return;
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      await contractsDisplay.checkAndRevertIfExpired(guild);
+      await invitationsDisplay.checkAndRevertIfExpired(guild);
+      await applicationsDisplay.checkAndRevertIfExpired(guild);
+    } catch (err) {
+      console.error('Ошибка проверки автовозврата недели статистики:', err);
+    }
+  }, 60 * 1000);
 });
 
 client.login(process.env.DISCORD_TOKEN);

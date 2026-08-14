@@ -64,15 +64,40 @@ function canManageBlacklist(member) {
   return config.ROLES_BLACKLIST_ALLOWED.some((roleId) => member.roles.cache.has(roleId));
 }
 
-// Строка упоминаний ролей руководства для новых заявок
+// Может ли участник рассматривать заявки/проверять контракты (шире, чем
+// управление списком участников — сюда входит и HR-Менеджер)
+function canReview(member) {
+  if (!member) return false;
+  if (member.id === config.OWNER_USER_ID) return true;
+  if (member.roles.cache.has(config.ROLE_ADMIN)) return true;
+  return config.ROLES_REVIEW_ALLOWED.some((roleId) => member.roles.cache.has(roleId));
+}
+
+// Строка упоминаний ролей руководства для новых заявок (включая HR),
+// от старшей роли к младшей: Владелец → Зам. Владелец → HR-Менеджер.
 function mentionManagementRoles() {
-  return config.ROLES_MEMBERS_LIST_ALLOWED.map((r) => `<@&${r}>`).join(' ');
+  const ordered = [...config.ROLES_REVIEW_ALLOWED].sort((a, b) => {
+    const ia = config.ROLE_IDS.indexOf(a);
+    const ib = config.ROLE_IDS.indexOf(b);
+    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+  });
+  return ordered.map((r) => `<@&${r}>`).join(' ');
+}
+
+// Управлять гайдами FAQ может только владелец бота или роль Владельца
+function canManageFaq(member) {
+  if (!member) return false;
+  if (member.id === config.OWNER_USER_ID) return true;
+  if (member.roles.cache.has(config.ROLE_ADMIN)) return true;
+  return member.roles.cache.has(config.ROLE_OWNER);
 }
 
 module.exports = {
   hasBotAccess,
   canManageMembersList,
   canManageBlacklist,
+  canReview,
+  canManageFaq,
   mentionManagementRoles,
   isProtectedTarget,
   getRankIndex,
