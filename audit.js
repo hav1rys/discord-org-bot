@@ -1,7 +1,17 @@
 const { EmbedBuilder } = require('discord.js');
 const { CHANNEL_AUDIT } = require('./config');
+const db = require('./db');
 
 async function logAudit(guild, actor, action, details) {
+  try {
+    await db.run(
+      'INSERT INTO audit_log (actor_id, actor_tag, action, details, at) VALUES (?, ?, ?, ?, ?)',
+      [actor.id, actor.tag, action, details, new Date().toISOString()],
+    );
+  } catch (err) {
+    console.error('Не удалось сохранить запись аудита в БД:', err);
+  }
+
   try {
     const channel = await guild.channels.fetch(CHANNEL_AUDIT);
     if (!channel) return;

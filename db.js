@@ -293,6 +293,48 @@ const SCHEMA = {
     indexes: [['status']],
   },
 
+  // Лог событий вступления/выхода по каждому паспорту — используется в
+  // профиле участника и в заявке на увольнение (дата вступления).
+  // Копия каждой записи аудита в БД — чтобы можно было искать (/audit_search),
+  // не листая канал вручную.
+  audit_log: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      actor_id: 'TEXT',
+      actor_tag: 'TEXT',
+      action: 'TEXT',
+      details: 'TEXT',
+      at: 'TEXT',
+    },
+    indexes: [['actor_id'], ['at']],
+  },
+
+  // Чтобы не слать напоминание об окончании отпуска повторно на каждой
+  // проверке — помечаем, что для этого конкретного отпуска уже отправили.
+  vacation_reminders_sent: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      static: 'TEXT',
+      until: 'TEXT',
+      sent_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  membership_events: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      static: 'TEXT',
+      name: 'TEXT',
+      event: 'TEXT', // 'joined' | 'left'
+      note: 'TEXT',
+      at: 'TEXT',
+    },
+    indexes: [['discord_id'], ['static']],
+  },
+
   faq_entries: {
     columns: {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',

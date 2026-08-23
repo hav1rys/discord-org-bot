@@ -10,6 +10,7 @@ const { getAllPassports } = require('./passports');
 const { formatDateTime } = require('./dates');
 
 const GROUPS_PER_PAGE = 10; // лимит embed-сообщений в одном сообщении Discord
+const ENTRIES_PER_EMBED = 8; // 8 записей * 3 поля = 24 (лимит embed'а — 25 полей)
 const FIELD_ID = '№. Упоминание | Тег | ID';
 const FIELD_NAME = 'Имя Фамилия';
 const FIELD_PASSPORT = '№ Паспорта';
@@ -30,62 +31,80 @@ async function getFlatPassportEntries() {
   return entries;
 }
 
-function buildEntryFields(entry, index) {
-  const { participant: p, passport } = entry;
+// Внутри ОДНОГО ранга группирует паспорта обратно по владельцу — если у
+// человека несколько паспортов на этом же ранге, они идут одной записью
+// (через "-"), а не отдельными строками.
+function groupByParticipant(entries) {
+  const order = [];
+  const map = new Map();
+  for (const e of entries) {
+    const key = e.participant.discord_id;
+    if (!map.has(key)) {
+      map.set(key, { participant: e.participant, passports: [] });
+      order.push(key);
+    }
+    map.get(key).passports.push(e.passport);
+  }
+  return order.map((key) => map.get(key));
+}
+
+function buildEntryFields(group, index) {
+  const { participant: p, passports } = group;
   const hasDiscord = !p.discord_id.startsWith('nodiscord-');
   const idValue = hasDiscord
     ? `${index}. <@${p.discord_id}> | ${p.discord_tag} | \`${p.discord_id}\``
     : `${index}. ${p.discord_tag} | без Discord`;
 
-  const fields = [
-    { name: FIELD_ID, value: idValue.slice(0, 1024), inline: true },
-    { name: FIELD_NAME, value: passport.name.slice(0, 1024), inline: true },
-    { name: FIELD_PASSPORT, value: passport.static.slice(0, 1024), inline: true },
-  ];
-
-  const statusLines = [];
-  if (passport.vacation_until) statusLines.push(`🏖️ В отпуске до ${formatDateTime(new Date(passport.vacation_until))}`);
-  if (passport.afk_since) statusLines.push(`💤 AFK с ${passport.afk_since}`);
-  if (statusLines.length > 0) {
-    fields.push({ name: '\u200b', value: statusLines.join('\n').slice(0, 1024) });
+  const multi = passports.length > 1;
+  const nameLines = [];
+  const passportLines = [];
+  for (const passport of passports) {
+    nameLines.push(multi ? `- ${passport.name}` : passport.name);
+    passportLines.push(multi ? `- ${passport.static}` : passport.static);
+    if (passport.vacation_until) nameLines.push(`🏖️ В отпуске до ${formatDateTime(new Date(passport.vacation_until))}`);
+    if (passport.afk_since) nameLines.push(`💤 AFK с ${passport.afk_since}`);
   }
 
-  return fields;
+  return [
+    { name: FIELD_ID, value: idValue.slice(0, 1024), inline: true },
+    { name: FIELD_NAME, value: nameLines.join('\n').slice(0, 1024), inline: true },
+    { name: FIELD_PASSPORT, value: passportLines.join('\n').slice(0, 1024), inline: true },
+  ];
 }
 
-async function buildRoleEmbed(role, entries, startIndex) {
-  const embed = new EmbedBuilder()
-    .setColor(0x2b2d31)
-    .setTitle(role ? role.name : 'Без роли')
-    .setFooter({ text: `Паспортов на ранге: ${entries.length}` });
+// Возвращает МАССИВ embed'ов для одного ранга — если групп больше
+// ENTRIES_PER_EMBED, лишние уходят в embed "(продолжение)" того же
+// сообщения, а не обрезаются с "используйте поиск" (п.1.1).
+async function buildRoleEmbeds(role, entries, startIndex) {
+  const groups = groupByParticipant(entries);
+  const title = role ? role.name : 'Без роли';
 
-  if (entries.length === 0) {
-    embed.addFields({ name: '\u200b', value: 'Нет паспортов с этим рангом' });
-    return { embed, nextIndex: startIndex };
+  if (groups.length === 0) {
+    const embed = new EmbedBuilder().setColor(0x2b2d31).setTitle(title)
+      .addFields({ name: '\u200b', value: 'Нет участников с этим рангом' })
+      .setFooter({ text: 'Участников: 0' });
+    return { embeds: [embed], nextIndex: startIndex };
   }
 
+  const embeds = [];
   let idx = startIndex;
-  let fieldCount = 0;
-  const limited = [];
-  for (const entry of entries) {
-    const perEntry = entry.passport.vacation_until || entry.passport.afk_since ? 4 : 3;
-    if (fieldCount + perEntry > 25) break;
-    fieldCount += perEntry;
-    limited.push(entry);
+  for (let start = 0; start < groups.length; start += ENTRIES_PER_EMBED) {
+    const chunk = groups.slice(start, start + ENTRIES_PER_EMBED);
+    const partNum = Math.floor(start / ENTRIES_PER_EMBED) + 1;
+    const totalParts = Math.ceil(groups.length / ENTRIES_PER_EMBED);
+    const embed = new EmbedBuilder()
+      .setColor(0x2b2d31)
+      .setTitle(totalParts > 1 ? `${title} (${partNum}/${totalParts})` : title);
+
+    for (const group of chunk) {
+      embed.addFields(...buildEntryFields(group, idx));
+      idx++;
+    }
+    embed.setFooter({ text: `Участников: ${groups.length}` });
+    embeds.push(embed);
   }
 
-  for (const entry of limited) {
-    embed.addFields(...buildEntryFields(entry, idx));
-    idx++;
-  }
-
-  if (limited.length < entries.length) {
-    embed.setFooter({
-      text: `Паспортов на ранге: ${entries.length}. Показаны первые ${limited.length} — используйте 🔍 «Найти» для остальных.`,
-    });
-  }
-
-  return { embed, nextIndex: idx };
+  return { embeds, nextIndex: idx };
 }
 
 async function buildAllGroupEmbeds(guild) {
@@ -102,15 +121,15 @@ async function buildAllGroupEmbeds(guild) {
     } catch (_) {
       // роль могла быть удалена с сервера
     }
-    const { embed, nextIndex } = await buildRoleEmbed(role, groupEntries, counter);
+    const { embeds: roleEmbeds, nextIndex } = await buildRoleEmbeds(role, groupEntries, counter);
     counter = nextIndex;
-    embeds.push(embed);
+    embeds.push(...roleEmbeds);
   }
 
   const unassigned = flatEntries.filter((e) => !ROLE_IDS.includes(e.passport.role_id));
   if (unassigned.length > 0) {
-    const { embed } = await buildRoleEmbed(null, unassigned, counter);
-    embeds.push(embed);
+    const { embeds: unassignedEmbeds } = await buildRoleEmbeds(null, unassigned, counter);
+    embeds.push(...unassignedEmbeds);
   }
 
   if (embeds.length === 0) {
@@ -120,30 +139,19 @@ async function buildAllGroupEmbeds(guild) {
   return embeds;
 }
 
+// Кнопки управления конкретным человеком (Уволить/Изменить/Повысить/
+// Понизить/Паспорта/Отпуск/AFK) переехали в профиль (п.1.2.2) — здесь
+// остаются только общие действия и навигация. "Найти" переименована в
+// "Профиль" — теперь именно так открывается карточка человека.
 function buildControlRows(page, totalPages) {
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('members_pick:add').setLabel('➕ Добавить').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('members_pick:kick').setLabel('🚫 Уволить').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('members_pick:edit').setLabel('✏️ Изменить').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('members_pick:promote').setLabel('⬆ Повысить').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('members_pick:demote').setLabel('⬇ Понизить').setStyle(ButtonStyle.Primary),
-  );
-
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('members_search').setLabel('🔍 Найти').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('members_search').setLabel('👤 Профиль').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('members_prev').setLabel('◀ Назад').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
     new ButtonBuilder().setCustomId('members_next').setLabel('Вперед ▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1),
   );
 
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('members_pick:passports').setLabel('📄 Паспорта').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('members_pick:vacation_grant').setLabel('🏖️ Отпуск').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('members_pick:vacation_revoke').setLabel('✅ Снять отпуск').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('members_pick:afk_set').setLabel('💤 AFK').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('members_pick:afk_revoke').setLabel('🟢 Снять AFK').setStyle(ButtonStyle.Secondary),
-  );
-
-  return [row1, row2, row3];
+  return [row1];
 }
 
 async function updateMembersList(guild) {

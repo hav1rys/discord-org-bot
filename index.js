@@ -18,6 +18,7 @@ const {
   StringSelectMenuOptionBuilder,
   ChannelType,
   PermissionFlagsBits,
+  AttachmentBuilder,
 } = require('discord.js');
 
 const db = require('./db');
@@ -36,6 +37,8 @@ const faqDisplay = require('./faq_display');
 const contracts = require('./contracts');
 const contractsDisplay = require('./contracts_display');
 const invitations = require('./invitations');
+const history = require('./history');
+const { buildCsv } = require('./csv');
 const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
@@ -205,6 +208,124 @@ async function startRankSelection(interaction, guild, action, discordId, scope, 
 // Роли "Отпуск"/"AFK" на сервере — общие на весь аккаунт (Discord-роль не
 // может быть "частичной"). Выставляем/снимаем их по правилу: есть хотя бы
 // один паспорт со статусом → роль есть; ни одного → роли нет.
+async function buildProfileEmbed(guild, discordId) {
+  const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
+  if (!participant) return null;
+  const passports = await passportsLib.getAllPassports(discordId);
+  const hasDiscord = !discordId.startsWith('nodiscord-');
+  const multi = passports.length > 1;
+
+  const idValue = hasDiscord
+    ? `<@${discordId}> | ${participant.discord_tag} | \`${discordId}\``
+    : `${participant.discord_tag} | без Discord`;
+
+  const nameLines = [];
+  const passportLines = [];
+  const infoLines = [];
+
+  let profileChannelUrl = null;
+  if (participant.profile_thread_id) {
+    try {
+      const channel = await guild.channels.fetch(participant.profile_thread_id);
+      profileChannelUrl = channel.url;
+    } catch (_) {}
+  }
+
+  for (const p of passports) {
+    let roleName = p.role_id;
+    try {
+      const role = await guild.roles.fetch(p.role_id);
+      if (role) roleName = role.name;
+    } catch (_) {}
+
+    nameLines.push(`${multi ? '- ' : ''}${p.name} | ${roleName}`);
+    passportLines.push(`${multi ? '- ' : ''}${p.static}`);
+
+    const joinedEvent = await history.getLastJoined(discordId, p.static);
+    const joinedDate = joinedEvent ? formatDateOnly(new Date(joinedEvent.at)) : (p.position === 0 && participant.joined_at ? formatDateOnly(new Date(participant.joined_at)) : null);
+
+    const details = [];
+    details.push(`Вступил: ${joinedDate || '—'}`);
+    if (profileChannelUrl) details.push(`[Канал с отчётами](${profileChannelUrl})`);
+
+    const appQuery = p.position === 0
+      ? await db.get(`SELECT message_id FROM applications WHERE discord_id = ? AND static = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1`, [discordId, p.static])
+      : await db.get(`SELECT message_id FROM passport_requests WHERE discord_id = ? AND static = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1`, [discordId, p.static]);
+    if (appQuery && appQuery.message_id) {
+      details.push(`[Заявка на вступление](https://discord.com/channels/${guild.id}/${config.CHANNEL_APPLY_REVIEW}/${appQuery.message_id})`);
+    }
+
+    const kickReq = await db.get(`SELECT message_id FROM kicks WHERE status = 'pending' AND target_static = ? ORDER BY id DESC LIMIT 1`, [p.static]);
+    if (kickReq && kickReq.message_id) {
+      details.push(`[Заявка на увольнение](https://discord.com/channels/${guild.id}/${config.CHANNEL_KICK_REVIEW}/${kickReq.message_id})`);
+    }
+
+    if (p.vacation_until) details.push(`🏖️ В отпуске до ${formatDateTime(new Date(p.vacation_until))}`);
+    if (p.afk_since) details.push(`💤 AFK с ${p.afk_since}`);
+
+    infoLines.push(details.join(' • '));
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('Профиль')
+    .setDescription(`**Упоминание | Тег | ID**\n${idValue}`)
+    .addFields(
+      { name: 'Имя Фамилия', value: nameLines.join('\n').slice(0, 1024), inline: true },
+      { name: '№ Паспорта', value: passportLines.join('\n').slice(0, 1024), inline: true },
+      { name: '\u200b', value: infoLines.join('\n\n').slice(0, 1024) || '—' },
+    );
+
+  return embed;
+}
+
+function buildProfileComponents(discordId) {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`profile_action:kick:${discordId}`).setLabel('🚫 Уволить').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`profile_action:edit:${discordId}`).setLabel('✏️ Изменить').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`profile_action:promote:${discordId}`).setLabel('⬆ Повысить').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`profile_action:demote:${discordId}`).setLabel('⬇ Понизить').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`profile_action:passports:${discordId}`).setLabel('📄 Паспорта').setStyle(ButtonStyle.Secondary),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`profile_action:vacation_grant:${discordId}`).setLabel('🏖️ Отпуск').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`profile_action:vacation_revoke:${discordId}`).setLabel('✅ Снять отпуск').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`profile_action:afk_set:${discordId}`).setLabel('💤 AFK').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`profile_action:afk_revoke:${discordId}`).setLabel('🟢 Снять AFK').setStyle(ButtonStyle.Secondary),
+  );
+  return [row1, row2];
+}
+
+// Раз в час (вызывается из общего таймера) — шлёт ЛС, если чей-то отпуск
+// заканчивается менее чем через сутки, и ещё не напоминали про именно этот
+// отпуск (проверяется по discordId+паспорт+точная дата окончания).
+async function checkVacationReminders(guild) {
+  const REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  const participants = await db.all('SELECT discord_id, static, name, vacation_until FROM participants WHERE vacation_until IS NOT NULL');
+  const extras = await db.all('SELECT discord_id, static, name, vacation_until FROM extra_passports WHERE vacation_until IS NOT NULL');
+  const candidates = [...participants, ...extras];
+
+  for (const c of candidates) {
+    const untilMs = new Date(c.vacation_until).getTime();
+    const msLeft = untilMs - now;
+    if (msLeft <= 0 || msLeft > REMINDER_WINDOW_MS) continue;
+
+    const already = await db.get(
+      'SELECT id FROM vacation_reminders_sent WHERE discord_id = ? AND static = ? AND until = ?',
+      [c.discord_id, c.static, c.vacation_until],
+    );
+    if (already) continue;
+
+    await dmUser(guild, c.discord_id, `⏰ Напоминание: ваш отпуск (${c.name}, № ${c.static}) заканчивается ${formatDateTime(new Date(c.vacation_until))} — меньше чем через сутки.`);
+    await db.run(
+      'INSERT INTO vacation_reminders_sent (discord_id, static, until, sent_at) VALUES (?, ?, ?, ?)',
+      [c.discord_id, c.static, c.vacation_until, new Date().toISOString()],
+    );
+  }
+}
+
 async function syncStatusRoles(guild, discordId) {
   const passports = await passportsLib.getAllPassports(discordId);
   const hasVacation = passports.some((p) => p.vacation_until);
@@ -331,7 +452,10 @@ async function createProfileThread(guild, discordId, name, staticValue) {
         }
         await db.run('UPDATE profile_channels SET status = ?, updated_at = ? WHERE discord_id = ?', ['active', new Date().toISOString(), discordId]);
         await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [channel.id, discordId]);
-        await channel.send(`📸 С возвращением, **${name}**! Профиль восстановлен.`);
+        await channel.send({
+          content: `📸 С возвращением, **${name}**! Профиль восстановлен.`,
+          components: [row(new ButtonBuilder().setCustomId(`my_profile:${discordId}`).setLabel('👤 Мой профиль').setStyle(ButtonStyle.Secondary))],
+        });
         return channel.url;
       } catch (err) {
         console.error(`Не удалось восстановить профиль-канал для ${discordId}, создаю новый:`, err.message);
@@ -354,14 +478,16 @@ async function createProfileThread(guild, discordId, name, staticValue) {
       topic: `Профиль ${name} (№ ${staticValue}) — сюда присылаются скриншоты контрактов`,
     });
 
-    await channel.send(
-      `📸 Профиль **${name}** (№ ${staticValue}).\n\n` +
-      `Сюда нужно присылать скриншоты **на весь экран** по каждому контракту — 2 штуки:\n` +
-      `1️⃣ когда вы **взяли** контракт\n` +
-      `2️⃣ когда контракт **выполнен или не выполнен**\n\n` +
-      `Можно прислать оба скриншота одним сообщением, можно — двумя сообщениями подряд (по одному). ` +
-      `После того как оба скриншота собраны, бот сам создаст карточку контракта на проверку руководству.`,
-    );
+    await channel.send({
+      content:
+        `📸 Профиль **${name}** (№ ${staticValue}).\n\n` +
+        `Сюда нужно присылать скриншоты **на весь экран** по каждому контракту — 2 штуки:\n` +
+        `1️⃣ когда вы **взяли** контракт\n` +
+        `2️⃣ когда контракт **выполнен или не выполнен**\n\n` +
+        `Можно прислать оба скриншота одним сообщением, можно — двумя сообщениями подряд (по одному). ` +
+        `После того как оба скриншота собраны, бот сам создаст карточку контракта на проверку руководству.`,
+      components: [row(new ButtonBuilder().setCustomId(`my_profile:${discordId}`).setLabel('👤 Мой профиль').setStyle(ButtonStyle.Secondary))],
+    });
 
     await db.run(
       'INSERT INTO profile_channels (discord_id, channel_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
@@ -655,6 +781,27 @@ const commands = [
   new SlashCommandBuilder()
     .setName('ping')
     .setDescription('Проверить скорость отклика бота (Discord, база данных)'),
+  new SlashCommandBuilder()
+    .setName('backfill_profiles')
+    .setDescription('Создать каналы-профили для всех, у кого их ещё нет, и заполнить дату вступления'),
+  new SlashCommandBuilder()
+    .setName('history')
+    .setDescription('Полная история вступлений/увольнений человека')
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('contracts_leaderboard')
+    .setDescription('Топ по контрактам за всё время'),
+  new SlashCommandBuilder()
+    .setName('audit_search')
+    .setDescription('Поиск по логу аудита')
+    .addStringOption((opt) => opt.setName('запрос').setDescription('Текст для поиска в действии/деталях/инициаторе').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('whois')
+    .setDescription('Быстрый поиск участника')
+    .addStringOption((opt) => opt.setName('запрос').setDescription('№ Паспорта / Discord тег / Имя Фамилия').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('export_stats')
+    .setDescription('Выгрузить статистику текущей недели (контракты/приглашения/заявки) в .csv'),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -752,7 +899,7 @@ async function initMenus(guild) {
 
 // ---------- Обработка заявок на вступление ----------
 
-function applicationReviewEmbed(app) {
+async function applicationReviewEmbed(app, guildId) {
   const embed = new EmbedBuilder()
     .setColor(0xfee75c)
     .setTitle(`Заявка на вступление #${app.id}`)
@@ -765,6 +912,31 @@ function applicationReviewEmbed(app) {
       { name: 'Навыки', value: app.skills || '—' },
       { name: 'Статус', value: statusLabel(app.status) },
     );
+
+  // Если человек уже был в организации раньше — прикладываем историю (п.2.1)
+  if (guildId) {
+    const priorApps = (await db.all('SELECT * FROM applications WHERE discord_id = ? ORDER BY id DESC LIMIT 5', [app.discord_id])).filter((pa) => pa.id !== app.id);
+    if (priorApps.length > 0) {
+      const lines = priorApps.map((pa) =>
+        pa.message_id
+          ? `[Заявка #${pa.id} — ${statusLabel(pa.status)}](https://discord.com/channels/${guildId}/${config.CHANNEL_APPLY_REVIEW}/${pa.message_id})`
+          : `Заявка #${pa.id} — ${statusLabel(pa.status)}`,
+      );
+      embed.addFields({ name: 'Прошлые заявки', value: lines.join('\n').slice(0, 1024) });
+    }
+
+    const priorChannel = await db.get('SELECT * FROM profile_channels WHERE discord_id = ?', [app.discord_id]);
+    if (priorChannel) {
+      embed.addFields({ name: 'Канал с отчётами (прошлый)', value: `[Открыть](https://discord.com/channels/${guildId}/${priorChannel.channel_id})`, inline: true });
+    }
+
+    const leftEvents = (await history.getHistory(app.discord_id)).filter((e) => e.event === 'left').slice(-3);
+    if (leftEvents.length > 0) {
+      const lines = leftEvents.map((e) => `${e.name} (№ ${e.static}) — ${formatDateOnly(new Date(e.at))}${e.note ? `: ${e.note}` : ''}`);
+      embed.addFields({ name: 'Ранее покидал(а) организацию (причина увольнения)', value: lines.join('\n').slice(0, 1024) });
+    }
+  }
+
   if (app.reject_reason) embed.addFields({ name: 'Причина отказа', value: app.reject_reason });
   return embed;
 }
@@ -780,7 +952,7 @@ function applicationReviewComponents(app) {
   ];
 }
 
-function kickReviewEmbed(k) {
+async function kickReviewEmbed(k) {
   const embed = new EmbedBuilder()
     .setColor(0xfee75c)
     .setTitle(`Заявка на увольнение #${k.id}`)
@@ -788,9 +960,31 @@ function kickReviewEmbed(k) {
       { name: 'Заявитель', value: `<@${k.discord_id}> (${k.discord_tag})` },
       { name: 'Имя Фамилия участника', value: k.name || '—' },
       { name: 'Паспорт', value: !k.target_static || k.target_static === 'all' ? 'Все паспорта' : `№ ${k.target_static}` },
-      { name: 'Причина', value: k.reason || '—' },
-      { name: 'Статус', value: statusLabel(k.status) },
     );
+
+  // Дата вступления цели заявки (п.3.1)
+  let targetParticipant = null;
+  if (k.target_static && k.target_static !== 'all') {
+    targetParticipant = await db.get('SELECT * FROM participants WHERE static = ?', [k.target_static]);
+    if (!targetParticipant) {
+      const inExtra = await db.get('SELECT discord_id FROM extra_passports WHERE static = ?', [k.target_static]);
+      if (inExtra) targetParticipant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [inExtra.discord_id]);
+    }
+  }
+  if (!targetParticipant && k.name) {
+    targetParticipant = await db.get('SELECT * FROM participants WHERE name = ?', [k.name]);
+  }
+  if (targetParticipant) {
+    const staticForJoin = (k.target_static && k.target_static !== 'all') ? k.target_static : targetParticipant.static;
+    const joinedEvent = await history.getLastJoined(targetParticipant.discord_id, staticForJoin);
+    const joinedDate = joinedEvent ? formatDateOnly(new Date(joinedEvent.at)) : (targetParticipant.joined_at ? formatDateOnly(new Date(targetParticipant.joined_at)) : null);
+    if (joinedDate) embed.addFields({ name: 'Вступил(а)', value: joinedDate, inline: true });
+  }
+
+  embed.addFields(
+    { name: 'Причина', value: k.reason || '—' },
+    { name: 'Статус', value: statusLabel(k.status) },
+  );
   if (k.reject_reason) embed.addFields({ name: 'Причина отказа', value: k.reject_reason });
   return embed;
 }
@@ -855,6 +1049,11 @@ async function dmUser(guild, discordId, content) {
 }
 
 async function removeParticipant(guild, participant, reason) {
+  const passportsBeforeRemoval = await passportsLib.getAllPassports(participant.discord_id);
+  for (const p of passportsBeforeRemoval) {
+    await history.logLeft(participant.discord_id, p.static, p.name, reason || '');
+  }
+
   await db.run('DELETE FROM participants WHERE discord_id = ?', [participant.discord_id]);
   await db.run('DELETE FROM extra_passports WHERE discord_id = ?', [participant.discord_id]);
 
@@ -897,13 +1096,246 @@ async function kickPassportOrFull(guild, participant, targetStatic, reason) {
     return { fullyRemoved: true };
   }
 
+  const removedPassport = passports.find((p) => p.static === targetStatic);
   await passportsLib.removePassportKeepAccount(participant.discord_id, targetStatic);
+  if (removedPassport) {
+    await history.logLeft(participant.discord_id, removedPassport.static, removedPassport.name, reason || '');
+  }
   await syncEffectiveIdentity(guild, participant.discord_id);
   await syncProfileChannelName(guild, participant.discord_id);
   await syncStatusRoles(guild, participant.discord_id);
   await safeUpdateMembersList(guild);
   await dmUser(guild, participant.discord_id, `🚫 У вас снят паспорт № ${targetStatic}.${reason ? ` Причина: ${reason}` : ''}`);
   return { fullyRemoved: false };
+}
+
+async function handleParticipantAction(interaction, guild, action, discordId, participant) {
+        if (action === 'view_profile') {
+          const embed = await buildProfileEmbed(guild, discordId);
+          if (!embed) return safeReply(interaction, 'Профиль не найден.');
+          return safeReply(interaction, { embeds: [embed], components: buildProfileComponents(discordId) });
+        }
+
+        if (action === 'kick') {
+          const passports = await passportsLib.getAllPassports(discordId);
+          if (passports.length <= 1) {
+            return interaction.showModal(buildKickApplicationModal(`modal_members_kick:${discordId}:all`, { name: participant.name }));
+          }
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_kick_scope:${discordId}`)
+            .setPlaceholder('Выберите паспорт или всех')
+            .addOptions([
+              new StringSelectMenuOptionBuilder().setLabel('Уволить всех (полностью)').setValue('all'),
+              ...passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)),
+            ]);
+          return safeReply(interaction, { content: `У **${participant.name}** несколько паспортов — кого уволить?`, components: [row(scopeSelect)] });
+        }
+
+        if (action === 'edit') {
+          return interaction.showModal(buildMemberModal(`modal_members_edit:${discordId}`, participant));
+        }
+
+        if (action === 'passports') {
+          return safeReply(interaction, {
+            content: `Управление паспортами **${participant.name}**:`,
+            components: [row(
+              new ButtonBuilder().setCustomId(`passport_add:${discordId}`).setLabel('➕ Добавить паспорт').setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`passport_remove:${discordId}`).setLabel('➖ Удалить паспорт').setStyle(ButtonStyle.Danger),
+            )],
+          });
+        }
+
+        if (action === 'contract_add') {
+          return safeReply(interaction, {
+            content: `Добавить контракт для **${participant.name}** — выберите итог:`,
+            components: [row(
+              new ButtonBuilder().setCustomId(`contract_manual_status:fulfilled:${discordId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
+              new ButtonBuilder().setCustomId(`contract_manual_status:unfulfilled:${discordId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
+            )],
+          });
+        }
+
+        if (action === 'contract_remove') {
+          const weeksAgo = await contractsDisplay.getCurrentWeeksAgo();
+          const range = contracts.getWeekRange(weeksAgo);
+          const list = await contracts.getUserContractsForWeek(discordId, range);
+          if (list.length === 0) {
+            return safeReply(interaction, `У ${participant.name} нет записей за отображаемую сейчас неделю (${contracts.formatWeekLabel(range)}).`);
+          }
+          const statusLabel = { fulfilled: '✅ Выполнен', unfulfilled: '❌ Невыполнен', rejected: '🚫 Не контракт' };
+          const removeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_contract_remove:${discordId}`)
+            .setPlaceholder('Выберите запись для удаления')
+            .addOptions(
+              list.map((c) =>
+                new StringSelectMenuOptionBuilder()
+                  .setLabel(`${contracts.formatDate(new Date(c.submitted_at))} — ${statusLabel[c.status] || c.status}`)
+                  .setValue(String(c.id)),
+              ),
+            );
+          return safeReply(interaction, { content: `Записи ${participant.name} за ${contracts.formatWeekLabel(range)}:`, components: [row(removeSelect)] });
+        }
+
+        if (action === 'contract_view') {
+          const weeksAgo = await contractsDisplay.getCurrentWeeksAgo();
+          const range = contracts.getWeekRange(weeksAgo);
+          const { fulfilled, unfulfilled } = await contracts.getUserWeekStats(discordId, range);
+          const fLines = fulfilled.map((c) => `[Скриншот](${c.message_url}) | ${contracts.formatDate(new Date(c.submitted_at))}`).join('\n') || '—';
+          const uLines = unfulfilled.map((c) => `[Скриншот](${c.message_url}) | ${contracts.formatDate(new Date(c.submitted_at))}`).join('\n') || '—';
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle(`Контракты ${participant.name} — за ${contracts.formatWeekLabel(range)}`)
+            .addFields(
+              { name: 'Выполненные', value: fLines.slice(0, 1024), inline: true },
+              { name: 'Не выполненные', value: uLines.slice(0, 1024), inline: true },
+            );
+          return safeReply(interaction, { embeds: [embed] });
+        }
+
+        // Шаг 1 ручного добавления приглашения: выбран пригласивший — теперь ищем приглашённого
+        if (action === 'invitation_add_inviter') {
+          return interaction.showModal(buildPickSearchModal(`invitation_add_invitee:${discordId}`));
+        }
+
+        // Шаг 2: пригласивший и приглашённый выбраны — сразу засчитываем (HR подтверждает по факту)
+        if (action.startsWith('invitation_add_invitee:')) {
+          const inviterId = action.split(':')[1];
+          if (inviterId === discordId) return safeReply(interaction, '⛔ Нельзя указать одного и того же человека пригласившим самого себя.');
+          try {
+            await invitations.addManualInvitation(inviterId, discordId, participant.name, participant.static, new Date().toISOString());
+          } catch (err) {
+            return safeReply(interaction, `⛔ ${err.message}`);
+          }
+          await invitationsDisplay.safeUpdateInvitations(guild);
+          await logAudit(guild, interaction.user, 'Приглашение добавлено вручную', `<@${inviterId}> пригласил(а) <@${discordId}>`);
+          return safeReply(interaction, `Приглашение добавлено: <@${inviterId}> → <@${discordId}>.`);
+        }
+
+        // Удаление: выбран пригласивший — показываем список его приглашений
+        if (action === 'invitation_remove') {
+          const list = await invitations.getInviterAllInvitations(discordId);
+          if (list.length === 0) return safeReply(interaction, `У ${participant.name} нет записей о приглашениях.`);
+          const statusLabel = { pending: '⏳ Ожидает', confirmed: '✅ Подтверждено', disqualified: '🚫 Дисквалифицировано' };
+          const removeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_invitation_remove:${discordId}`)
+            .setPlaceholder('Выберите приглашение для удаления')
+            .addOptions(
+              list.map((inv) =>
+                new StringSelectMenuOptionBuilder()
+                  .setLabel(`${inv.invitee_name} (№ ${inv.invitee_static}) — ${statusLabel[inv.status] || inv.status}`)
+                  .setValue(String(inv.id)),
+              ),
+            );
+          return safeReply(interaction, { content: `Приглашения от ${participant.name}:`, components: [row(removeSelect)] });
+        }
+
+        // Поиск: показать подтверждённые приглашения за отображаемую неделю
+        if (action === 'invitation_view') {
+          const weeksAgo = await invitationsDisplay.getCurrentWeeksAgo();
+          const range = contracts.getWeekRange(weeksAgo);
+          const list = await invitations.getInviterInviteesForWeek(discordId, range);
+          const lines = list.map((inv) => `<@${inv.invitee_discord_id}> | ${inv.invitee_name}, № ${inv.invitee_static}`).join('\n') || '—';
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle(`Приглашения ${participant.name} — за ${contracts.formatWeekLabel(range)}`)
+            .setDescription(lines.slice(0, 4000));
+          return safeReply(interaction, { embeds: [embed] });
+        }
+
+        if (action === 'vacation_grant') {
+          const passports = await passportsLib.getAllPassports(discordId);
+          if (passports.length <= 1) {
+            return interaction.showModal(buildVacationGrantModal(discordId));
+          }
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_vacation_grant_scope:${discordId}`)
+            .setPlaceholder('Выберите один, несколько или все паспорта')
+            .setMinValues(1)
+            .setMaxValues(passports.length)
+            .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `Кому из паспортов **${participant.name}** выдать отпуск?`, components: [row(scopeSelect)] });
+        }
+
+        if (action === 'vacation_revoke') {
+          const onVacation = (await passportsLib.getAllPassports(discordId)).filter((p) => p.vacation_until);
+          if (onVacation.length === 0) return safeReply(interaction, 'У участника нет активного отпуска.');
+
+          if (onVacation.length === 1) {
+            await passportsLib.updatePassportFields(discordId, onVacation[0].static, { vacation_until: null });
+            await syncStatusRoles(guild, discordId);
+            await safeUpdateMembersList(guild);
+            await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}> (${onVacation[0].name}, № ${onVacation[0].static})`);
+            await dmUser(guild, discordId, `📢 Ваш отпуск (${onVacation[0].name}) был досрочно завершён администрацией.`);
+            return safeReply(interaction, `Отпуск ${onVacation[0].name} снят.`);
+          }
+
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_vacation_revoke_scope:${discordId}`)
+            .setPlaceholder('Выберите, у кого снять отпуск')
+            .setMinValues(1)
+            .setMaxValues(onVacation.length)
+            .addOptions(onVacation.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `У кого из паспортов **${participant.name}** снять отпуск?`, components: [row(scopeSelect)] });
+        }
+
+        if (action === 'afk_set') {
+          const passports = await passportsLib.getAllPassports(discordId);
+          if (passports.length <= 1) {
+            return interaction.showModal(buildAfkModal(discordId));
+          }
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_afk_set_scope:${discordId}`)
+            .setPlaceholder('Выберите один, несколько или все паспорта')
+            .setMinValues(1)
+            .setMaxValues(passports.length)
+            .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `Кому из паспортов **${participant.name}** выставить AFK?`, components: [row(scopeSelect)] });
+        }
+
+        if (action === 'afk_revoke') {
+          const onAfk = (await passportsLib.getAllPassports(discordId)).filter((p) => p.afk_since);
+          if (onAfk.length === 0) return safeReply(interaction, 'У участника не выставлен статус AFK.');
+
+          if (onAfk.length === 1) {
+            await passportsLib.updatePassportFields(discordId, onAfk[0].static, { afk_since: null });
+            await syncStatusRoles(guild, discordId);
+            await safeUpdateMembersList(guild);
+            await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}> (${onAfk[0].name}, № ${onAfk[0].static})`);
+            return safeReply(interaction, `Статус AFK ${onAfk[0].name} снят.`);
+          }
+
+          const scopeSelect = new StringSelectMenuBuilder()
+            .setCustomId(`select_afk_revoke_scope:${discordId}`)
+            .setPlaceholder('Выберите, у кого снять AFK')
+            .setMinValues(1)
+            .setMaxValues(onAfk.length)
+            .addOptions(onAfk.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+          return safeReply(interaction, { content: `У кого из паспортов **${participant.name}** снять AFK?`, components: [row(scopeSelect)] });
+        }
+
+        // Шаг 1 повышения/понижения: участник выбран — показываем список
+        // доступных рангов, чтобы выбрать любой, а не только соседний.
+        if (action === 'promote' || action === 'demote') {
+          const passports = await passportsLib.getAllPassports(discordId);
+
+          if (passports.length > 1) {
+            const scopeSelect = new StringSelectMenuBuilder()
+              .setCustomId(`select_promote_scope:${action}:${discordId}`)
+              .setPlaceholder('Выберите паспорт или всех')
+              .addOptions([
+                new StringSelectMenuOptionBuilder().setLabel('Все паспорта').setValue('all'),
+                ...passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)),
+              ]);
+            return safeReply(interaction, {
+              content: `У **${participant.name}** несколько паспортов — кого именно ${action === 'promote' ? 'повысить' : 'понизить'}?`,
+              components: [row(scopeSelect)],
+            });
+          }
+
+          return startRankSelection(interaction, guild, action, discordId, passports[0] ? passports[0].static : participant.static, participant.name);
+        }
+
+        return;
 }
 
 // ---------- interactionCreate ----------
@@ -945,6 +1377,204 @@ client.on('interactionCreate', async (interaction) => {
           );
 
         await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'backfill_profiles') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const allParticipants = await db.all('SELECT * FROM participants');
+        let createdChannels = 0;
+        let loggedJoins = 0;
+
+        for (const p of allParticipants) {
+          if (p.discord_id.startsWith('nodiscord-')) continue; // без Discord — канал не нужен
+
+          let hasChannel = false;
+          if (p.profile_thread_id) {
+            try {
+              await guild.channels.fetch(p.profile_thread_id);
+              hasChannel = true;
+            } catch (_) {
+              hasChannel = false;
+            }
+          }
+          if (!hasChannel) {
+            await createProfileThread(guild, p.discord_id, p.name, p.static);
+            createdChannels++;
+          }
+
+          const existingJoin = await history.getLastJoined(p.discord_id, p.static);
+          if (!existingJoin) {
+            await history.logJoined(p.discord_id, p.static, p.name, 'Восстановлено (backfill)', p.joined_at);
+            loggedJoins++;
+          }
+
+          const allPassports = await passportsLib.getAllPassports(p.discord_id);
+          for (const extra of allPassports) {
+            if (extra.position === 0) continue;
+            const existingExtraJoin = await history.getLastJoined(p.discord_id, extra.static);
+            if (!existingExtraJoin) {
+              await history.logJoined(p.discord_id, extra.static, extra.name, 'Восстановлено (backfill)');
+              loggedJoins++;
+            }
+          }
+        }
+
+        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', `Создано каналов: ${createdChannels}. Добавлено записей о вступлении: ${loggedJoins}.`);
+        await interaction.editReply(`Готово. Проверено участников: ${allParticipants.length}. Создано новых каналов: ${createdChannels}. Добавлено записей о вступлении: ${loggedJoins}.`);
+        return;
+      }
+
+      if (cmd === 'history') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const query = interaction.options.getString('человек');
+        const target = await invitations.resolveInviter(query);
+        if (!target) {
+          await interaction.editReply('⛔ Человек не найден.');
+          return;
+        }
+        const events = await history.getHistory(target.discord_id);
+        if (events.length === 0) {
+          await interaction.editReply(`История для <@${target.discord_id}> пуста.`);
+          return;
+        }
+        const lines = events.map((e) => {
+          const label = e.event === 'joined' ? '✅ Вступил(а)' : '🚫 Покинул(а)';
+          const date = formatDateTime(new Date(e.at));
+          return `${label} — ${e.name} (№ ${e.static}) — ${date}${e.note ? `: ${e.note}` : ''}`;
+        });
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`История: <@${target.discord_id}>`)
+          .setDescription(lines.join('\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'contracts_leaderboard') {
+        if (!perms.canReview(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const board = await contracts.getAllTimeLeaderboard();
+        if (board.length === 0) {
+          await interaction.editReply('Пока нет обработанных контрактов.');
+          return;
+        }
+        const lines = board.slice(0, 25).map((row, i) => `${i + 1}. <@${row.discord_id}> — ✅ ${row.fulfilled} / ❌ ${row.unfulfilled}`);
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🏆 Топ по контрактам за всё время')
+          .setDescription(lines.join('\n'));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'audit_search') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const query = interaction.options.getString('запрос');
+        const q = `%${query}%`;
+        const rows = await db.all(
+          `SELECT * FROM audit_log WHERE action LIKE ? OR details LIKE ? OR actor_tag LIKE ? ORDER BY id DESC LIMIT 15`,
+          [q, q, q],
+        );
+        if (rows.length === 0) {
+          await interaction.editReply('Ничего не найдено.');
+          return;
+        }
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`Поиск по аудиту: «${query}»`)
+          .setDescription(
+            rows.map((r) => `**${r.action}** — <@${r.actor_id}> — ${formatDateTime(new Date(r.at))}\n${r.details.slice(0, 200)}`).join('\n\n').slice(0, 4000),
+          );
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'whois') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const query = interaction.options.getString('запрос');
+        const q = `%${query}%`;
+        const rows = await db.all(
+          `SELECT DISTINCT p.* FROM participants p
+           LEFT JOIN extra_passports e ON e.discord_id = p.discord_id
+           WHERE p.name LIKE ? OR p.static LIKE ? OR e.name LIKE ? OR e.static LIKE ? OR p.discord_tag LIKE ? OR p.discord_id LIKE ?
+           ORDER BY p.name LIMIT 10`,
+          [q, q, q, q, q, q],
+        );
+        if (rows.length === 0) {
+          await interaction.editReply('Ничего не найдено.');
+          return;
+        }
+        if (rows.length === 1) {
+          const embed = await buildProfileEmbed(guild, rows[0].discord_id);
+          await interaction.editReply({ embeds: [embed] });
+          return;
+        }
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`Результаты поиска: «${query}»`)
+          .setDescription(rows.map((r) => `<@${r.discord_id}> | ${r.discord_tag} — ${r.name} (№ ${r.static})`).join('\n'));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'export_stats') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        const range = contracts.getWeekRange(0);
+        const label = contracts.formatWeekLabel(range).replace(/\./g, '-');
+
+        const contractRows = await db.all(
+          `SELECT * FROM contracts WHERE submitted_at BETWEEN ? AND ? ORDER BY submitted_at`,
+          [range.start.toISOString(), range.end.toISOString()],
+        );
+        const contractsCsv = buildCsv(
+          ['discord_id', 'статус', 'дата отправки', 'ссылка'],
+          contractRows.map((r) => [r.discord_id, statusLabel(r.status), r.submitted_at, r.message_url]),
+        );
+
+        const invitationRows = await db.all(
+          `SELECT * FROM invitations WHERE status = 'confirmed' AND joined_at BETWEEN ? AND ? ORDER BY joined_at`,
+          [range.start.toISOString(), range.end.toISOString()],
+        );
+        const invitationsCsv = buildCsv(
+          ['пригласил (discord_id)', 'приглашённый (discord_id)', 'имя', 'паспорт', 'дата вступления'],
+          invitationRows.map((r) => [r.inviter_discord_id, r.invitee_discord_id, r.invitee_name, r.invitee_static, r.joined_at]),
+        );
+
+        const applicationRows = await db.all(
+          `SELECT * FROM applications WHERE created_at BETWEEN ? AND ? ORDER BY created_at`,
+          [range.start.toISOString(), range.end.toISOString()],
+        );
+        const applicationsCsv = buildCsv(
+          ['discord_id', 'имя', 'паспорт', 'статус', 'принял/отклонил', 'дата'],
+          applicationRows.map((r) => [r.discord_id, r.name, r.static, statusLabel(r.status), r.accepted_by || '', r.created_at]),
+        );
+
+        const files = [
+          new AttachmentBuilder(Buffer.from(contractsCsv, 'utf8'), { name: `contracts_${label}.csv` }),
+          new AttachmentBuilder(Buffer.from(invitationsCsv, 'utf8'), { name: `invitations_${label}.csv` }),
+          new AttachmentBuilder(Buffer.from(applicationsCsv, 'utf8'), { name: `applications_${label}.csv` }),
+        ];
+
+        await logAudit(guild, interaction.user, 'Экспорт статистики', `Выгружена неделя ${contracts.formatWeekLabel(range)}`);
+        await interaction.editReply({ content: `Статистика за ${contracts.formatWeekLabel(range)}:`, files });
         return;
       }
 
@@ -1431,6 +2061,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('data_change_accept:')) {
+        await interaction.deferReply({ ephemeral: true });
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const reqId = id.split(':')[1];
         const reqRow = await db.get('SELECT * FROM data_change_requests WHERE id = ?', [reqId]);
@@ -1470,6 +2101,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('hr_apply_accept:')) {
+        await interaction.deferReply({ ephemeral: true });
         if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ Принимать заявки на HR может только Владелец/Зам. Владелец.');
         const reqId = id.split(':')[1];
         const reqRow = await db.get('SELECT * FROM hr_applications WHERE id = ?', [reqId]);
@@ -1504,6 +2136,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('passport_request_accept:')) {
+        await interaction.deferReply({ ephemeral: true });
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const reqId = id.split(':')[1];
         const reqRow = await db.get('SELECT * FROM passport_requests WHERE id = ?', [reqId]);
@@ -1520,6 +2153,7 @@ client.on('interactionCreate', async (interaction) => {
         await db.run('UPDATE passport_requests SET status = ?, accepted_by = ? WHERE id = ?', ['accepted', interaction.user.id, reqId]);
         await syncEffectiveIdentity(guild, reqRow.discord_id);
         await syncProfileChannelName(guild, reqRow.discord_id);
+        await history.logJoined(reqRow.discord_id, reqRow.static, reqRow.name, `Добавлен паспорт по заявке #${reqId}`);
         await safeUpdateMembersList(guild);
 
         await refreshReviewMessage(
@@ -1581,11 +2215,34 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.showModal(buildPickSearchModal(action));
       }
 
+      if (id.startsWith('my_profile:')) {
+        const discordId = id.split(':')[1];
+        if (interaction.user.id !== discordId) {
+          return safeReply(interaction, '⛔ Это не ваш профиль.');
+        }
+        const embed = await buildProfileEmbed(guild, discordId);
+        if (!embed) return safeReply(interaction, 'Профиль не найден.');
+        return safeReply(interaction, { embeds: [embed] }); // без кнопок управления — только просмотр
+      }
+
+      if (id.startsWith('profile_action:')) {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        }
+        const [, action, discordId] = id.split(':');
+        const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
+        if (!participant) return safeReply(interaction, 'Участник не найден в базе.');
+        if (perms.isProtectedTarget(discordId, interaction.user.id)) {
+          return safeReply(interaction, '⛔ С этим участником нельзя взаимодействовать.');
+        }
+        return handleParticipantAction(interaction, guild, action, discordId, participant);
+      }
+
       if (id === 'members_search') {
         if (!perms.canManageMembersList(interaction.member)) {
           return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
         }
-        return interaction.showModal(buildSearchModal());
+        return interaction.showModal(buildPickSearchModal('view_profile'));
       }
 
       if (id === 'members_prev') {
@@ -1938,226 +2595,7 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, '⛔ С этим участником нельзя взаимодействовать.');
         }
 
-        if (action === 'kick') {
-          const passports = await passportsLib.getAllPassports(discordId);
-          if (passports.length <= 1) {
-            return interaction.showModal(buildKickApplicationModal(`modal_members_kick:${discordId}:all`, { name: participant.name }));
-          }
-          const scopeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_kick_scope:${discordId}`)
-            .setPlaceholder('Выберите паспорт или всех')
-            .addOptions([
-              new StringSelectMenuOptionBuilder().setLabel('Уволить всех (полностью)').setValue('all'),
-              ...passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)),
-            ]);
-          return safeReply(interaction, { content: `У **${participant.name}** несколько паспортов — кого уволить?`, components: [row(scopeSelect)] });
-        }
-
-        if (action === 'edit') {
-          return interaction.showModal(buildMemberModal(`modal_members_edit:${discordId}`, participant));
-        }
-
-        if (action === 'passports') {
-          return safeReply(interaction, {
-            content: `Управление паспортами **${participant.name}**:`,
-            components: [row(
-              new ButtonBuilder().setCustomId(`passport_add:${discordId}`).setLabel('➕ Добавить паспорт').setStyle(ButtonStyle.Success),
-              new ButtonBuilder().setCustomId(`passport_remove:${discordId}`).setLabel('➖ Удалить паспорт').setStyle(ButtonStyle.Danger),
-            )],
-          });
-        }
-
-        if (action === 'contract_add') {
-          return safeReply(interaction, {
-            content: `Добавить контракт для **${participant.name}** — выберите итог:`,
-            components: [row(
-              new ButtonBuilder().setCustomId(`contract_manual_status:fulfilled:${discordId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
-              new ButtonBuilder().setCustomId(`contract_manual_status:unfulfilled:${discordId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
-            )],
-          });
-        }
-
-        if (action === 'contract_remove') {
-          const weeksAgo = await contractsDisplay.getCurrentWeeksAgo();
-          const range = contracts.getWeekRange(weeksAgo);
-          const list = await contracts.getUserContractsForWeek(discordId, range);
-          if (list.length === 0) {
-            return safeReply(interaction, `У ${participant.name} нет записей за отображаемую сейчас неделю (${contracts.formatWeekLabel(range)}).`);
-          }
-          const statusLabel = { fulfilled: '✅ Выполнен', unfulfilled: '❌ Невыполнен', rejected: '🚫 Не контракт' };
-          const removeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_contract_remove:${discordId}`)
-            .setPlaceholder('Выберите запись для удаления')
-            .addOptions(
-              list.map((c) =>
-                new StringSelectMenuOptionBuilder()
-                  .setLabel(`${contracts.formatDate(new Date(c.submitted_at))} — ${statusLabel[c.status] || c.status}`)
-                  .setValue(String(c.id)),
-              ),
-            );
-          return safeReply(interaction, { content: `Записи ${participant.name} за ${contracts.formatWeekLabel(range)}:`, components: [row(removeSelect)] });
-        }
-
-        if (action === 'contract_view') {
-          const weeksAgo = await contractsDisplay.getCurrentWeeksAgo();
-          const range = contracts.getWeekRange(weeksAgo);
-          const { fulfilled, unfulfilled } = await contracts.getUserWeekStats(discordId, range);
-          const fLines = fulfilled.map((c) => `[Скриншот](${c.message_url}) | ${contracts.formatDate(new Date(c.submitted_at))}`).join('\n') || '—';
-          const uLines = unfulfilled.map((c) => `[Скриншот](${c.message_url}) | ${contracts.formatDate(new Date(c.submitted_at))}`).join('\n') || '—';
-          const embed = new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle(`Контракты ${participant.name} — за ${contracts.formatWeekLabel(range)}`)
-            .addFields(
-              { name: 'Выполненные', value: fLines.slice(0, 1024), inline: true },
-              { name: 'Не выполненные', value: uLines.slice(0, 1024), inline: true },
-            );
-          return safeReply(interaction, { embeds: [embed] });
-        }
-
-        // Шаг 1 ручного добавления приглашения: выбран пригласивший — теперь ищем приглашённого
-        if (action === 'invitation_add_inviter') {
-          return interaction.showModal(buildPickSearchModal(`invitation_add_invitee:${discordId}`));
-        }
-
-        // Шаг 2: пригласивший и приглашённый выбраны — сразу засчитываем (HR подтверждает по факту)
-        if (action.startsWith('invitation_add_invitee:')) {
-          const inviterId = action.split(':')[1];
-          if (inviterId === discordId) return safeReply(interaction, '⛔ Нельзя указать одного и того же человека пригласившим самого себя.');
-          try {
-            await invitations.addManualInvitation(inviterId, discordId, participant.name, participant.static, new Date().toISOString());
-          } catch (err) {
-            return safeReply(interaction, `⛔ ${err.message}`);
-          }
-          await invitationsDisplay.safeUpdateInvitations(guild);
-          await logAudit(guild, interaction.user, 'Приглашение добавлено вручную', `<@${inviterId}> пригласил(а) <@${discordId}>`);
-          return safeReply(interaction, `Приглашение добавлено: <@${inviterId}> → <@${discordId}>.`);
-        }
-
-        // Удаление: выбран пригласивший — показываем список его приглашений
-        if (action === 'invitation_remove') {
-          const list = await invitations.getInviterAllInvitations(discordId);
-          if (list.length === 0) return safeReply(interaction, `У ${participant.name} нет записей о приглашениях.`);
-          const statusLabel = { pending: '⏳ Ожидает', confirmed: '✅ Подтверждено', disqualified: '🚫 Дисквалифицировано' };
-          const removeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_invitation_remove:${discordId}`)
-            .setPlaceholder('Выберите приглашение для удаления')
-            .addOptions(
-              list.map((inv) =>
-                new StringSelectMenuOptionBuilder()
-                  .setLabel(`${inv.invitee_name} (№ ${inv.invitee_static}) — ${statusLabel[inv.status] || inv.status}`)
-                  .setValue(String(inv.id)),
-              ),
-            );
-          return safeReply(interaction, { content: `Приглашения от ${participant.name}:`, components: [row(removeSelect)] });
-        }
-
-        // Поиск: показать подтверждённые приглашения за отображаемую неделю
-        if (action === 'invitation_view') {
-          const weeksAgo = await invitationsDisplay.getCurrentWeeksAgo();
-          const range = contracts.getWeekRange(weeksAgo);
-          const list = await invitations.getInviterInviteesForWeek(discordId, range);
-          const lines = list.map((inv) => `<@${inv.invitee_discord_id}> | ${inv.invitee_name}, № ${inv.invitee_static}`).join('\n') || '—';
-          const embed = new EmbedBuilder()
-            .setColor(0x5865f2)
-            .setTitle(`Приглашения ${participant.name} — за ${contracts.formatWeekLabel(range)}`)
-            .setDescription(lines.slice(0, 4000));
-          return safeReply(interaction, { embeds: [embed] });
-        }
-
-        if (action === 'vacation_grant') {
-          const passports = await passportsLib.getAllPassports(discordId);
-          if (passports.length <= 1) {
-            return interaction.showModal(buildVacationGrantModal(discordId));
-          }
-          const scopeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_vacation_grant_scope:${discordId}`)
-            .setPlaceholder('Выберите один, несколько или все паспорта')
-            .setMinValues(1)
-            .setMaxValues(passports.length)
-            .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
-          return safeReply(interaction, { content: `Кому из паспортов **${participant.name}** выдать отпуск?`, components: [row(scopeSelect)] });
-        }
-
-        if (action === 'vacation_revoke') {
-          const onVacation = (await passportsLib.getAllPassports(discordId)).filter((p) => p.vacation_until);
-          if (onVacation.length === 0) return safeReply(interaction, 'У участника нет активного отпуска.');
-
-          if (onVacation.length === 1) {
-            await passportsLib.updatePassportFields(discordId, onVacation[0].static, { vacation_until: null });
-            await syncStatusRoles(guild, discordId);
-            await safeUpdateMembersList(guild);
-            await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}> (${onVacation[0].name}, № ${onVacation[0].static})`);
-            await dmUser(guild, discordId, `📢 Ваш отпуск (${onVacation[0].name}) был досрочно завершён администрацией.`);
-            return safeReply(interaction, `Отпуск ${onVacation[0].name} снят.`);
-          }
-
-          const scopeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_vacation_revoke_scope:${discordId}`)
-            .setPlaceholder('Выберите, у кого снять отпуск')
-            .setMinValues(1)
-            .setMaxValues(onVacation.length)
-            .addOptions(onVacation.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
-          return safeReply(interaction, { content: `У кого из паспортов **${participant.name}** снять отпуск?`, components: [row(scopeSelect)] });
-        }
-
-        if (action === 'afk_set') {
-          const passports = await passportsLib.getAllPassports(discordId);
-          if (passports.length <= 1) {
-            return interaction.showModal(buildAfkModal(discordId));
-          }
-          const scopeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_afk_set_scope:${discordId}`)
-            .setPlaceholder('Выберите один, несколько или все паспорта')
-            .setMinValues(1)
-            .setMaxValues(passports.length)
-            .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
-          return safeReply(interaction, { content: `Кому из паспортов **${participant.name}** выставить AFK?`, components: [row(scopeSelect)] });
-        }
-
-        if (action === 'afk_revoke') {
-          const onAfk = (await passportsLib.getAllPassports(discordId)).filter((p) => p.afk_since);
-          if (onAfk.length === 0) return safeReply(interaction, 'У участника не выставлен статус AFK.');
-
-          if (onAfk.length === 1) {
-            await passportsLib.updatePassportFields(discordId, onAfk[0].static, { afk_since: null });
-            await syncStatusRoles(guild, discordId);
-            await safeUpdateMembersList(guild);
-            await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}> (${onAfk[0].name}, № ${onAfk[0].static})`);
-            return safeReply(interaction, `Статус AFK ${onAfk[0].name} снят.`);
-          }
-
-          const scopeSelect = new StringSelectMenuBuilder()
-            .setCustomId(`select_afk_revoke_scope:${discordId}`)
-            .setPlaceholder('Выберите, у кого снять AFK')
-            .setMinValues(1)
-            .setMaxValues(onAfk.length)
-            .addOptions(onAfk.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
-          return safeReply(interaction, { content: `У кого из паспортов **${participant.name}** снять AFK?`, components: [row(scopeSelect)] });
-        }
-
-        // Шаг 1 повышения/понижения: участник выбран — показываем список
-        // доступных рангов, чтобы выбрать любой, а не только соседний.
-        if (action === 'promote' || action === 'demote') {
-          const passports = await passportsLib.getAllPassports(discordId);
-
-          if (passports.length > 1) {
-            const scopeSelect = new StringSelectMenuBuilder()
-              .setCustomId(`select_promote_scope:${action}:${discordId}`)
-              .setPlaceholder('Выберите паспорт или всех')
-              .addOptions([
-                new StringSelectMenuOptionBuilder().setLabel('Все паспорта').setValue('all'),
-                ...passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)),
-              ]);
-            return safeReply(interaction, {
-              content: `У **${participant.name}** несколько паспортов — кого именно ${action === 'promote' ? 'повысить' : 'понизить'}?`,
-              components: [row(scopeSelect)],
-            });
-          }
-
-          return startRankSelection(interaction, guild, action, discordId, passports[0] ? passports[0].static : participant.static, participant.name);
-        }
-
-        return;
+        return handleParticipantAction(interaction, guild, action, discordId, participant);
       }
 
       return;
@@ -2349,7 +2787,7 @@ client.on('interactionCreate', async (interaction) => {
         const reviewChannel = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW);
         const sent = await reviewChannel.send({
           content: perms.mentionManagementRoles(),
-          embeds: [applicationReviewEmbed(app)],
+          embeds: [await applicationReviewEmbed(app, guild.id)],
           components: applicationReviewComponents(app),
           ...mentionOpts,
         });
@@ -2389,7 +2827,7 @@ client.on('interactionCreate', async (interaction) => {
         await refreshReviewMessage(
           interaction.channel,
           app.message_id,
-          applicationReviewEmbed({ ...app, status: 'rejected', reject_reason: reason }),
+          await applicationReviewEmbed({ ...app, status: 'rejected', reject_reason: reason }, guild.id),
           [],
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
@@ -2408,7 +2846,7 @@ client.on('interactionCreate', async (interaction) => {
         await refreshReviewMessage(
           interaction.channel,
           k.message_id,
-          kickReviewEmbed({ ...k, status: 'rejected', reject_reason: reason }),
+          await kickReviewEmbed({ ...k, status: 'rejected', reject_reason: reason }),
           [],
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
@@ -2443,13 +2881,14 @@ client.on('interactionCreate', async (interaction) => {
           fields.name, fields.static, fields.lvl, fields.skills, fields.invited_by, appId,
         ]);
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
-        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed(app), applicationReviewComponents(app), actionSummary(interaction.user.id, '✏️ Изменено'));
+        await refreshReviewMessage(interaction.channel, app.message_id, await applicationReviewEmbed(app, guild.id), applicationReviewComponents(app), actionSummary(interaction.user.id, '✏️ Изменено'));
         await logAudit(guild, interaction.user, 'Заявка изменена', `Заявка #${appId} отредактирована`);
         return safeReply(interaction, 'Заявка обновлена.');
       }
 
       // Принятие заявки
       if (id.startsWith('modal_apply_accept:')) {
+        await interaction.deferReply({ ephemeral: true });
         const appId = id.split(':')[1];
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
         if (!app || app.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
@@ -2490,6 +2929,7 @@ client.on('interactionCreate', async (interaction) => {
 
         await syncEffectiveIdentity(guild, app.discord_id);
         await syncProfileChannelName(guild, app.discord_id);
+        await history.logJoined(app.discord_id, fields.static, fields.name, `Принята заявка #${appId}`);
         const profileChannelUrl = await createProfileThread(guild, app.discord_id, fields.name, fields.static);
 
         // Приглашение — только если пригласивший сейчас реально в списке участников (п.9)
@@ -2501,7 +2941,7 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
 
-        await refreshReviewMessage(interaction.channel, app.message_id, applicationReviewEmbed({ ...app, ...fields, status: 'accepted' }), [], actionSummary(interaction.user.id, '✅ Принято'));
+        await refreshReviewMessage(interaction.channel, app.message_id, await applicationReviewEmbed({ ...app, ...fields, status: 'accepted' }, guild.id), [], actionSummary(interaction.user.id, '✅ Принято'));
         await dmUser(guild, app.discord_id, '✅ Ваша заявка на вступление принята! Добро пожаловать в организацию.');
         if (profileChannelUrl) {
           await dmUser(
@@ -2543,7 +2983,7 @@ client.on('interactionCreate', async (interaction) => {
         const reviewChannel = await guild.channels.fetch(config.CHANNEL_KICK_REVIEW);
         const sent = await reviewChannel.send({
           content: perms.mentionManagementRoles(),
-          embeds: [kickReviewEmbed(k)],
+          embeds: [await kickReviewEmbed(k)],
           components: kickReviewComponents(k),
           ...mentionOpts,
         });
@@ -2558,13 +2998,14 @@ client.on('interactionCreate', async (interaction) => {
         const kickId = id.split(':')[1];
         await db.run('UPDATE kicks SET name = ?, target_static = ?, reason = ? WHERE id = ?', [normalizeName(get('name')), get('target_static') || 'all', get('reason') || '', kickId]);
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
-        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed(k), kickReviewComponents(k), actionSummary(interaction.user.id, '✏️ Изменено'));
+        await refreshReviewMessage(interaction.channel, k.message_id, await kickReviewEmbed(k), kickReviewComponents(k), actionSummary(interaction.user.id, '✏️ Изменено'));
         await logAudit(guild, interaction.user, 'Заявка на увольнение изменена', `Заявка #${kickId} отредактирована`);
         return safeReply(interaction, 'Заявка обновлена.');
       }
 
       // Подтверждение увольнения через заявку
       if (id.startsWith('modal_kick_confirm:')) {
+        await interaction.deferReply({ ephemeral: true });
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k || k.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
@@ -2594,7 +3035,7 @@ client.on('interactionCreate', async (interaction) => {
           fullyRemoved = result.fullyRemoved;
         }
 
-        await refreshReviewMessage(interaction.channel, k.message_id, kickReviewEmbed({ ...k, status: 'accepted', reason, name }), [], actionSummary(interaction.user.id, '🚫 Уволен(а)'));
+        await refreshReviewMessage(interaction.channel, k.message_id, await kickReviewEmbed({ ...k, status: 'accepted', reason, name }), [], actionSummary(interaction.user.id, '🚫 Уволен(а)'));
         await logAudit(
           guild,
           interaction.user,
@@ -2606,6 +3047,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Добавление участника вручную
       if (id === 'modal_members_add') {
+        await interaction.deferReply({ ephemeral: true });
         const rawDiscordId = get('discord_id').trim();
         const hasDiscord = rawDiscordId.length > 0;
         const rawStatic = get('static').trim();
@@ -2650,6 +3092,7 @@ client.on('interactionCreate', async (interaction) => {
           } catch (_) {}
           await syncEffectiveIdentity(guild, fields.discord_id);
           await syncProfileChannelName(guild, fields.discord_id);
+          await history.logJoined(fields.discord_id, fields.static, fields.name, 'Добавлен(а) вручную');
           const profileChannelUrl = await createProfileThread(guild, fields.discord_id, fields.name, fields.static);
           if (profileChannelUrl) {
             await dmUser(guild, fields.discord_id, `📸 Ваш профиль для отчётов по контрактам: ${profileChannelUrl}`);
@@ -2694,6 +3137,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Увольнение через список участников
       if (id.startsWith('modal_members_kick:')) {
+        await interaction.deferReply({ ephemeral: true });
         const parts = id.split(':');
         const discordId = parts[1];
         const scope = parts[2] || 'all';
@@ -2776,6 +3220,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         await syncEffectiveIdentity(guild, discordId);
         await syncProfileChannelName(guild, discordId);
+        await history.logJoined(discordId, staticValue, name, 'Паспорт добавлен вручную');
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Паспорт добавлен', `<@${discordId}>: ${name} — № ${staticValue}`);
         return safeReply(interaction, 'Паспорт добавлен.');
@@ -3215,6 +3660,7 @@ client.once('ready', async () => {
         const guild = await client.guilds.fetch(process.env.GUILD_ID);
         await invitationsDisplay.safeUpdateInvitations(guild);
         await applicationsDisplay.safeUpdateApplicationsStats(guild);
+        await checkVacationReminders(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);
