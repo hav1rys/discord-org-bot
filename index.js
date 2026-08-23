@@ -171,12 +171,16 @@ async function startRankSelection(interaction, guild, action, discordId, scope, 
     }
     const currentIndex = getRoleIndex(passport.role_id);
     if (currentIndex === -1) {
-      return safeReply(interaction, 'У паспорта не определён текущий ранг в иерархии — измените роль вручную на сервере.');
+      // У паспорта ещё нет назначенного ранга (например, добавлен до того,
+      // как ранг стал привязан к паспорту) — разрешаем назначить любой
+      // ранг, доступный актёру, вместо того чтобы блокировать насовсем.
+      eligibleIndexes = config.ROLE_IDS.map((_, i) => i).filter((i) => isPriv || i > actorIndex);
+    } else {
+      eligibleIndexes = config.ROLE_IDS
+        .map((_, i) => i)
+        .filter((i) => (action === 'promote' ? i < currentIndex : i > currentIndex))
+        .filter((i) => isPriv || i > actorIndex);
     }
-    eligibleIndexes = config.ROLE_IDS
-      .map((_, i) => i)
-      .filter((i) => (action === 'promote' ? i < currentIndex : i > currentIndex))
-      .filter((i) => isPriv || i > actorIndex);
   }
 
   if (eligibleIndexes.length === 0) {
@@ -187,10 +191,12 @@ async function startRankSelection(interaction, guild, action, discordId, scope, 
   for (const i of eligibleIndexes) {
     const roleId = config.ROLE_IDS[i];
     let roleName = roleId;
-    try {
-      const role = await guild.roles.fetch(roleId);
-      if (role) roleName = role.name;
-    } catch (_) {}
+    if (roleId) {
+      try {
+        const role = await guild.roles.fetch(roleId);
+        if (role) roleName = role.name;
+      } catch (_) {}
+    }
     options.push(new StringSelectMenuOptionBuilder().setLabel(roleName).setValue(roleId));
   }
 
@@ -232,11 +238,13 @@ async function buildProfileEmbed(guild, discordId) {
   }
 
   for (const p of passports) {
-    let roleName = p.role_id;
-    try {
-      const role = await guild.roles.fetch(p.role_id);
-      if (role) roleName = role.name;
-    } catch (_) {}
+    let roleName = p.role_id || 'ранг не назначен';
+    if (p.role_id) {
+      try {
+        const role = await guild.roles.fetch(p.role_id);
+        if (role) roleName = role.name;
+      } catch (_) {}
+    }
 
     nameLines.push(`${multi ? '- ' : ''}${p.name} | ${roleName}`);
     passportLines.push(`${multi ? '- ' : ''}${p.static}`);
@@ -1387,23 +1395,39 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply({ ephemeral: true });
         const allParticipants = await db.all('SELECT * FROM participants');
         let createdChannels = 0;
+        let restoredChannels = 0;
         let loggedJoins = 0;
+        let fixedRanks = 0;
 
         for (const p of allParticipants) {
           if (p.discord_id.startsWith('nodiscord-')) continue; // без Discord — канал не нужен
 
-          let hasChannel = false;
-          if (p.profile_thread_id) {
+          // Смотрим на profile_channels — это надёжный источник (переживает
+          // увольнение/повторное вступление), а не на кэш-поле в participants,
+          // которое могло устареть/разойтись.
+          const existingChannel = await db.get('SELECT * FROM profile_channels WHERE discord_id = ?', [p.discord_id]);
+          let isActiveAndInPlace = false;
+
+          if (existingChannel) {
             try {
-              await guild.channels.fetch(p.profile_thread_id);
-              hasChannel = true;
+              const ch = await guild.channels.fetch(existingChannel.channel_id);
+              if (ch.parentId === config.CHANNEL_PROFILES_ACTIVE_CATEGORY) {
+                isActiveAndInPlace = true;
+                // На всякий случай синхронизируем кэш-поле, если оно разошлось
+                if (p.profile_thread_id !== existingChannel.channel_id) {
+                  await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [existingChannel.channel_id, p.discord_id]);
+                }
+              }
             } catch (_) {
-              hasChannel = false;
+              isActiveAndInPlace = false; // канал не найден вообще — пересоздадим
             }
           }
-          if (!hasChannel) {
+
+          if (!isActiveAndInPlace) {
+            const wasArchived = !!existingChannel;
             await createProfileThread(guild, p.discord_id, p.name, p.static);
-            createdChannels++;
+            if (wasArchived) restoredChannels++;
+            else createdChannels++;
           }
 
           const existingJoin = await history.getLastJoined(p.discord_id, p.static);
@@ -1413,7 +1437,13 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           const allPassports = await passportsLib.getAllPassports(p.discord_id);
+          let ranksChanged = false;
           for (const extra of allPassports) {
+            if (!extra.role_id) {
+              await passportsLib.updatePassportFields(p.discord_id, extra.static, { role_id: config.ROLE_APPLY });
+              fixedRanks++;
+              ranksChanged = true;
+            }
             if (extra.position === 0) continue;
             const existingExtraJoin = await history.getLastJoined(p.discord_id, extra.static);
             if (!existingExtraJoin) {
@@ -1421,10 +1451,14 @@ client.on('interactionCreate', async (interaction) => {
               loggedJoins++;
             }
           }
+          if (ranksChanged) {
+            await syncEffectiveIdentity(guild, p.discord_id);
+            await syncProfileChannelName(guild, p.discord_id);
+          }
         }
 
-        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', `Создано каналов: ${createdChannels}. Добавлено записей о вступлении: ${loggedJoins}.`);
-        await interaction.editReply(`Готово. Проверено участников: ${allParticipants.length}. Создано новых каналов: ${createdChannels}. Добавлено записей о вступлении: ${loggedJoins}.`);
+        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', `Создано каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}.`);
+        await interaction.editReply(`Готово. Проверено участников: ${allParticipants.length}. Создано новых каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}.`);
         return;
       }
 
