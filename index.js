@@ -2286,7 +2286,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const totalPeople = (await db.get('SELECT COUNT(*) as cnt FROM participants')).cnt;
+        const totalAccounts = (await db.get('SELECT COUNT(*) as cnt FROM participants')).cnt;
+        const totalExtraPassports = (await db.get('SELECT COUNT(*) as cnt FROM extra_passports')).cnt;
+        const totalPeople = totalAccounts + totalExtraPassports; // паспортов, не Discord-аккаунтов
         const onVacation = (await db.get(
           `SELECT COUNT(*) as cnt FROM (
              SELECT vacation_until FROM participants WHERE vacation_until IS NOT NULL
@@ -2322,7 +2324,8 @@ client.on('interactionCreate', async (interaction) => {
           .setColor(0x5865f2)
           .setTitle('📊 Сводка по организации')
           .addFields(
-            { name: 'Всего людей', value: String(totalPeople), inline: true },
+            { name: 'Всего людей (паспортов)', value: String(totalPeople), inline: true },
+            { name: 'Discord-аккаунтов', value: String(totalAccounts), inline: true },
             { name: '🏖️ В отпуске', value: String(onVacation), inline: true },
             { name: '💤 AFK', value: String(onAfk), inline: true },
             { name: `Контракты (${contracts.formatWeekLabel(range)})`, value: `✅ ${fulfilled} / ❌ ${unfulfilled}`, inline: false },
