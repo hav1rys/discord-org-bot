@@ -4151,10 +4151,9 @@ process.on('unhandledRejection', (err) => {
 // ---------- Приём скриншотов контрактов из веток-профилей ----------
 
 // Ожидающие пары скриншотов "взял контракт" -> "выполнил/не выполнил" —
-// живёт в памяти процесса (сбрасывается при перезапуске бота, это
-// осознанное упрощение: в худшем случае человек просто пришлёт скриншот
-// повторно после перезапуска).
-const pendingTakenShots = new Map(); // discordId -> { url, messageId, submittedAt }
+// раньше жило в памяти процесса и терялось при перезапуске/передеплое
+// (человек присылал 1-й скриншот, бот перезапускался, 2-й скриншот уже
+// не с чем было склеить) — теперь хранится в БД, переживает рестарт.
 
 async function postContractReviewCard(guild, discordId, takenUrl, takenAt, completedUrl, completedAt, replyToMessage) {
   const contractId = await contracts.recordPendingContract(discordId, replyToMessage.channel.id, replyToMessage.id, completedUrl, completedAt);
@@ -4229,15 +4228,18 @@ client.on('messageCreate', async (message) => {
     }
 
     // Одно изображение — либо это "взял" (ждём итог), либо "итог" (если "взял" уже ждал)
-    const pending = pendingTakenShots.get(discordId);
+    const pending = await db.get('SELECT * FROM pending_contract_shots WHERE discord_id = ?', [discordId]);
     if (!pending) {
-      pendingTakenShots.set(discordId, { url: imageUrls[0], submittedAt: now });
+      await db.run(
+        'INSERT INTO pending_contract_shots (discord_id, url, submitted_at) VALUES (?, ?, ?) ON CONFLICT(discord_id) DO UPDATE SET url = excluded.url, submitted_at = excluded.submitted_at',
+        [discordId, imageUrls[0], now],
+      );
       await message.react('⏳').catch(() => {});
       return;
     }
 
-    pendingTakenShots.delete(discordId);
-    await postContractReviewCard(message.guild, discordId, pending.url, pending.submittedAt, imageUrls[0], now, message);
+    await db.run('DELETE FROM pending_contract_shots WHERE discord_id = ?', [discordId]);
+    await postContractReviewCard(message.guild, discordId, pending.url, pending.submitted_at, imageUrls[0], now, message);
   } catch (err) {
     console.error('Ошибка обработки скриншота контракта:', err);
   }

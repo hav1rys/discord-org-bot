@@ -330,6 +330,18 @@ const SCHEMA = {
   // История выдачи/снятия отпуска (когда выдал руководитель, не сам
   // человек — самостоятельные заявки уже есть в vacations) и AFK —
   // отдельной "заявки" на AFK не существует, поэтому только так.
+  // "Взял контракт"-скриншот, ожидающий пары со скриншотом итога. Раньше
+  // это жило в памяти процесса и терялось при перезапуске/передеплое —
+  // теперь переживает рестарт.
+  pending_contract_shots: {
+    columns: {
+      discord_id: 'TEXT UNIQUE',
+      url: 'TEXT',
+      submitted_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
   status_events: {
     columns: {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
