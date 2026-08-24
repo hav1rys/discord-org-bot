@@ -941,7 +941,7 @@ const commands = [
     .setName('rules_broadcast')
     .setDescription('Разослать свод правил в ЛС — всем в организации или одному человеку')
     .addStringOption((opt) =>
-      opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false),
+      opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false).setAutocomplete(true),
     ),
   new SlashCommandBuilder()
     .setName('broadcast_message')
@@ -967,7 +967,7 @@ const commands = [
   new SlashCommandBuilder()
     .setName('history')
     .setDescription('Полная история вступлений/увольнений человека')
-    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true)),
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
     .setName('contracts_leaderboard')
     .setDescription('Топ по контрактам за всё время'),
@@ -978,14 +978,14 @@ const commands = [
   new SlashCommandBuilder()
     .setName('whois')
     .setDescription('Быстрый поиск участника')
-    .addStringOption((opt) => opt.setName('запрос').setDescription('№ Паспорта / Discord тег / Имя Фамилия').setRequired(true)),
+    .addStringOption((opt) => opt.setName('запрос').setDescription('№ Паспорта / Discord тег / Имя Фамилия').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
     .setName('export_stats')
     .setDescription('Выгрузить статистику текущей недели (контракты/приглашения/заявки) в .csv'),
   new SlashCommandBuilder()
     .setName('send_report_channels')
     .setDescription('Отправить в ЛС ссылки на каналы с отчётами — одному человеку или всем в организации')
-    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false)),
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false).setAutocomplete(true)),
   new SlashCommandBuilder()
     .setName('org_stats')
     .setDescription('Общая сводка по организации: люди, отпуск/AFK, контракты за неделю, очередь заявок'),
@@ -1578,6 +1578,32 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
 client.on('interactionCreate', async (interaction) => {
   try {
     const guild = await resolveGuild(interaction);
+
+    // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
+    if (interaction.isAutocomplete()) {
+      const autocompleteCommands = ['history', 'whois', 'rules_broadcast', 'send_report_channels'];
+      if (!autocompleteCommands.includes(interaction.commandName)) return;
+
+      const focused = interaction.options.getFocused();
+      const q = `%${focused}%`;
+      const rows = await db.all(
+        `SELECT DISTINCT p.discord_id, p.name, p.static, p.discord_tag FROM participants p
+         LEFT JOIN extra_passports e ON e.discord_id = p.discord_id
+         WHERE p.name LIKE ? OR p.static LIKE ? OR p.discord_tag LIKE ? OR e.name LIKE ? OR e.static LIKE ?
+         ORDER BY p.name LIMIT 25`,
+        [q, q, q, q, q],
+      );
+      const choices = rows.map((r) => ({
+        name: `${r.name} | № ${r.static} | ${r.discord_tag}`.slice(0, 100),
+        value: r.discord_id,
+      }));
+      try {
+        await interaction.respond(choices);
+      } catch (_) {
+        // интеракция могла устареть — не критично, просто не покажем подсказки
+      }
+      return;
+    }
 
     // ----- Слэш-команды -----
     if (interaction.isChatInputCommand()) {
@@ -2990,6 +3016,17 @@ client.on('interactionCreate', async (interaction) => {
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}>: ${removedNames.join(', ')}`);
         return safeReply(interaction, `AFK снят: ${removedNames.join(', ')}.`);
+      }
+
+      if (customId.startsWith('faq_view:')) {
+        const entryId = interaction.values[0];
+        const entry = await faq.getEntry(entryId);
+        if (!entry) return safeReply(interaction, 'Этот гайд больше не существует — возможно, его удалили.');
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`❓ ${entry.title}`)
+          .setDescription(entry.content.slice(0, 4000));
+        return safeReply(interaction, { embeds: [embed] });
       }
 
       if (customId.startsWith('select_faq_edit:')) {

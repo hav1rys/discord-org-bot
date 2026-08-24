@@ -1,4 +1,9 @@
-const { EmbedBuilder } = require('discord.js');
+const {
+  EmbedBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+} = require('discord.js');
 const { getSetting, setSetting } = require('./db');
 const config = require('./config');
 const faq = require('./faq');
@@ -11,58 +16,72 @@ function titleFor(category) {
   return category === 'hr' ? '❓ FAQ для HR-Менеджеров' : '❓ FAQ для участников организации';
 }
 
-async function buildEmbeds(category) {
+async function buildPayload(category) {
   const entries = await faq.listEntries(category);
+  const bannerEmbed = new EmbedBuilder().setColor(0x5865f2).setTitle(titleFor(category));
+
   if (entries.length === 0) {
-    return [new EmbedBuilder().setColor(0x5865f2).setTitle(titleFor(category)).setDescription('Пока нет гайдов.')];
+    bannerEmbed.setDescription('Пока нет гайдов.');
+    return { embeds: [bannerEmbed], components: [] };
   }
-  const embeds = entries.map((e) =>
-    new EmbedBuilder().setColor(0x5865f2).setTitle(e.title).setDescription(e.content.slice(0, 4000)),
-  );
-  embeds[0].setAuthor({ name: titleFor(category) });
-  return embeds;
+
+  bannerEmbed.setDescription('Выберите вопрос из списка ниже, чтобы увидеть ответ.');
+
+  // Discord позволяет максимум 25 пунктов в одном select-меню
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`faq_view:${category}`)
+    .setPlaceholder('Выберите необходимый вопрос')
+    .addOptions(
+      entries.slice(0, 25).map((e) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(e.title.slice(0, 100))
+          .setDescription('Ответ на данный вопрос (Нажмите)')
+          .setValue(String(e.id))
+          .setEmoji('❓'),
+      ),
+    );
+
+  return { embeds: [bannerEmbed], components: [new ActionRowBuilder().addComponents(select)] };
 }
 
-// Discord позволяет максимум 10 embed'ов в одном сообщении — если гайдов
-// больше, разбиваем на несколько сообщений подряд в этом же канале.
 async function updateFaqChannel(guild, category) {
   const channel = await guild.channels.fetch(channelFor(category));
   if (!channel) return;
 
-  const allEmbeds = await buildEmbeds(category);
-  const chunks = [];
-  for (let i = 0; i < allEmbeds.length; i += 10) chunks.push(allEmbeds.slice(i, i + 10));
-  if (chunks.length === 0) chunks.push([]);
+  const payload = await buildPayload(category);
+  const key = `faq_${category}_message_id`;
+  const messageId = await getSetting(key);
+  let message = null;
 
-  const key = `faq_${category}_message_ids`;
-  const stored = await getSetting(key);
-  const storedIds = stored ? JSON.parse(stored) : [];
-  const newIds = [];
-
-  for (let i = 0; i < chunks.length; i++) {
-    const payload = { embeds: chunks[i] };
-    if (storedIds[i]) {
-      try {
-        const msg = await channel.messages.fetch(storedIds[i]);
-        await msg.edit(payload);
-        newIds.push(storedIds[i]);
-        continue;
-      } catch (_) {
-        // сообщение удалили вручную — отправим новое
-      }
-    }
-    const sent = await channel.send(payload);
-    newIds.push(sent.id);
-  }
-
-  for (let i = chunks.length; i < storedIds.length; i++) {
+  if (messageId) {
     try {
-      const msg = await channel.messages.fetch(storedIds[i]);
-      await msg.delete();
-    } catch (_) {}
+      message = await channel.messages.fetch(messageId);
+    } catch (_) {
+      message = null;
+    }
   }
 
-  await setSetting(key, JSON.stringify(newIds));
+  // На случай, если раньше стояла старая версия FAQ (несколько отдельных
+  // сообщений-эмбедов) — подчищаем их, теперь всё в одном сообщении.
+  const oldIdsKey = `faq_${category}_message_ids`;
+  const oldIdsRaw = await getSetting(oldIdsKey);
+  if (oldIdsRaw) {
+    for (const oldId of JSON.parse(oldIdsRaw)) {
+      if (oldId === messageId) continue;
+      try {
+        const msg = await channel.messages.fetch(oldId);
+        await msg.delete();
+      } catch (_) {}
+    }
+    await setSetting(oldIdsKey, '');
+  }
+
+  if (message) {
+    await message.edit(payload);
+  } else {
+    const sent = await channel.send(payload);
+    await setSetting(key, sent.id);
+  }
 }
 
 async function safeUpdateFaqChannel(guild, category) {
