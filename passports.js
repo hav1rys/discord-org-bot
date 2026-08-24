@@ -1,12 +1,12 @@
 const db = require('./db');
 const config = require('./config');
 
-// Возвращает [{name, static, position, role_id, vacation_until, afk_since}]
-// — позиция 0 это основной паспорт из participants, 1 и 2 — дополнительные
-// из extra_passports. Отсортировано по позиции (по возрастанию).
+// Возвращает [{name, static, position, role_id, vacation_until, afk_since,
+// profile_thread_id}] — позиция 0 это основной паспорт из participants,
+// 1 и 2 — дополнительные из extra_passports. Отсортировано по позиции.
 async function getAllPassports(discordId) {
   const participant = await db.get(
-    'SELECT name, static, role_id, vacation_until, afk_since FROM participants WHERE discord_id = ?',
+    'SELECT name, static, role_id, vacation_until, afk_since, profile_thread_id FROM participants WHERE discord_id = ?',
     [discordId],
   );
   const list = [];
@@ -18,14 +18,26 @@ async function getAllPassports(discordId) {
       role_id: participant.role_id,
       vacation_until: participant.vacation_until,
       afk_since: participant.afk_since,
+      profile_thread_id: participant.profile_thread_id,
     });
   }
   const extras = await db.all(
-    'SELECT name, static, position, role_id, vacation_until, afk_since FROM extra_passports WHERE discord_id = ? ORDER BY position',
+    'SELECT name, static, position, role_id, vacation_until, afk_since, profile_thread_id FROM extra_passports WHERE discord_id = ? ORDER BY position',
     [discordId],
   );
   for (const e of extras) list.push(e);
   return list;
+}
+
+// Проставляет discord-канал для конкретного паспорта — сам определяет,
+// лежит ли этот паспорт в participants (позиция 0) или в extra_passports.
+async function setPassportChannel(discordId, staticValue, channelId) {
+  const inParticipants = await db.get('SELECT id FROM participants WHERE discord_id = ? AND static = ?', [discordId, staticValue]);
+  if (inParticipants) {
+    await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [channelId, discordId]);
+  } else {
+    await db.run('UPDATE extra_passports SET profile_thread_id = ? WHERE discord_id = ? AND static = ?', [channelId, discordId, staticValue]);
+  }
 }
 
 // Проверяет, занят ли номер паспорта где-либо в системе (кроме самого discordId, если передан)
@@ -123,13 +135,14 @@ async function removePassportKeepAccount(discordId, targetStatic) {
     throw new Error('Это последний паспорт участника — используйте полное увольнение.');
   }
 
+  const removed = passports.find((p) => p.static === targetStatic);
   const isPrimary = passports[0].static === targetStatic;
 
   if (isPrimary) {
     const next = passports[1];
     await db.run(
-      'UPDATE participants SET name = ?, static = ?, role_id = ?, vacation_until = ?, afk_since = ? WHERE discord_id = ?',
-      [next.name, next.static, next.role_id, next.vacation_until, next.afk_since, discordId],
+      'UPDATE participants SET name = ?, static = ?, role_id = ?, vacation_until = ?, afk_since = ?, profile_thread_id = ? WHERE discord_id = ?',
+      [next.name, next.static, next.role_id, next.vacation_until, next.afk_since, next.profile_thread_id, discordId],
     );
     await db.run('DELETE FROM extra_passports WHERE discord_id = ? AND static = ?', [discordId, next.static]);
   } else {
@@ -140,6 +153,8 @@ async function removePassportKeepAccount(discordId, targetStatic) {
   for (let i = 0; i < remaining.length; i++) {
     await db.run('UPDATE extra_passports SET position = ? WHERE id = ?', [i + 1, remaining[i].id]);
   }
+
+  return { archivedChannelId: removed ? removed.profile_thread_id : null };
 }
 
 module.exports = {
@@ -149,6 +164,7 @@ module.exports = {
   removeExtraPassport,
   removePassportKeepAccount,
   updatePassportFields,
+  setPassportChannel,
   rankIndexOf,
   computeEffectiveIdentity,
 };

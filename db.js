@@ -91,6 +91,7 @@ const SCHEMA = {
       status: "TEXT DEFAULT 'pending'",
       reject_reason: 'TEXT',
       accepted_by: 'TEXT',
+      rejected_by: 'TEXT',
       message_id: 'TEXT',
       created_at: 'TEXT',
     },
@@ -130,6 +131,7 @@ const SCHEMA = {
       role_id: 'TEXT',
       vacation_until: 'TEXT',
       afk_since: 'TEXT',
+      profile_thread_id: 'TEXT',
       created_at: 'TEXT',
     },
     indexes: [['discord_id']],
@@ -184,15 +186,18 @@ const SCHEMA = {
 
   // Профиль-канал участника — переживает увольнение/повторное вступление
   // (в отличие от participants, которая при увольнении удаляется целиком).
+  // Один канал-профиль НА КАЖДЫЙ ПАСПОРТ (не на весь Discord-аккаунт).
+  // static уникален глобально, поэтому им и ключуем.
   profile_channels: {
     columns: {
-      discord_id: 'TEXT UNIQUE',
+      discord_id: 'TEXT',
+      static: 'TEXT UNIQUE',
       channel_id: 'TEXT',
       status: "TEXT DEFAULT 'active'", // active | archived
       created_at: 'TEXT',
       updated_at: 'TEXT',
     },
-    indexes: [['discord_id']],
+    indexes: [['discord_id'], ['static']],
   },
 
   invitations: {
@@ -320,6 +325,25 @@ const SCHEMA = {
       sent_at: 'TEXT',
     },
     indexes: [['discord_id']],
+  },
+
+  // История выдачи/снятия отпуска (когда выдал руководитель, не сам
+  // человек — самостоятельные заявки уже есть в vacations) и AFK —
+  // отдельной "заявки" на AFK не существует, поэтому только так.
+  status_events: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      static: 'TEXT',
+      name: 'TEXT',
+      type: 'TEXT', // 'vacation' | 'afk'
+      action: 'TEXT', // 'granted' | 'revoked'
+      reason: 'TEXT',
+      until: 'TEXT', // для отпуска — до какой даты (не используется для AFK)
+      actor_id: 'TEXT',
+      at: 'TEXT',
+    },
+    indexes: [['discord_id'], ['static']],
   },
 
   membership_events: {

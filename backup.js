@@ -19,23 +19,27 @@ function todayStamp() {
 }
 
 // Копирует текущий data.db в backups/data-ГГГГ-ММ-ДД.db
-function backupNow() {
+function backupNow(onError) {
   const dest = path.join(backupsDir, `data-${todayStamp()}.db`);
   try {
     fs.copyFileSync(db.dbPath, dest);
     console.log(`Резервная копия базы данных сохранена: ${dest}`);
+    return true;
   } catch (err) {
     console.error('Не удалось создать резервную копию базы данных:', err.message);
+    if (onError) onError(`Не удалось создать резервную копию БД: ${err.message}`);
+    return false;
   }
 }
 
 // Удаляет файлы резервных копий старше BACKUP_RETENTION_DAYS дней
-function cleanupOldBackups() {
+function cleanupOldBackups(onError) {
   let files;
   try {
     files = fs.readdirSync(backupsDir);
   } catch (err) {
     console.error('Не удалось прочитать папку резервных копий:', err.message);
+    if (onError) onError(`Не удалось прочитать папку резервных копий: ${err.message}`);
     return;
   }
 
@@ -51,12 +55,15 @@ function cleanupOldBackups() {
       }
     } catch (err) {
       console.error(`Не удалось проверить/удалить файл ${file}:`, err.message);
+      if (onError) onError(`Не удалось удалить устаревшую копию ${file}: ${err.message}`);
     }
   }
 }
 
-// Планирует запуск в 23:59 каждый день (по времени сервера, где крутится бот)
-function scheduleDailyBackup() {
+// Планирует запуск в 23:59 каждый день (по времени сервера, где крутится бот).
+// notifyFn(text), если передана, вызывается при сбое — используется, чтобы
+// заодно отправить сообщение в канал аудита (п.8), а не только в консоль.
+function scheduleDailyBackup(notifyFn) {
   function msUntilNext2359() {
     const now = new Date();
     const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 0, 0);
@@ -67,8 +74,12 @@ function scheduleDailyBackup() {
   }
 
   function runAndReschedule() {
-    backupNow();
-    cleanupOldBackups();
+    const ok = backupNow(notifyFn);
+    if (ok && notifyFn) {
+      // Успех тоже можно было бы слать, но это шум каждый день — молчим,
+      // как и раньше; в аудит идут только сбои.
+    }
+    cleanupOldBackups(notifyFn);
     setTimeout(runAndReschedule, 24 * 60 * 60 * 1000);
   }
 

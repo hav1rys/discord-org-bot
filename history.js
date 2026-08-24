@@ -27,4 +27,23 @@ async function getHistory(discordId) {
   return db.all('SELECT * FROM membership_events WHERE discord_id = ? ORDER BY at ASC', [discordId]);
 }
 
-module.exports = { logJoined, logLeft, getLastJoined, getHistory };
+// Отпуск/AFK — выдача и снятие (п. "История AFK" / "История отпусков от руководства")
+async function logStatusGranted(type, discordId, staticValue, name, reason, until, actorId) {
+  await db.run(
+    'INSERT INTO status_events (discord_id, static, name, type, action, reason, until, actor_id, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [discordId, staticValue, name, type, 'granted', reason || '', until || null, actorId, new Date().toISOString()],
+  );
+}
+
+async function logStatusRevoked(type, discordId, staticValue, name, actorId) {
+  await db.run(
+    'INSERT INTO status_events (discord_id, static, name, type, action, actor_id, at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [discordId, staticValue, name, type, 'revoked', actorId, new Date().toISOString()],
+  );
+}
+
+async function getStatusHistory(discordId, type) {
+  return db.all('SELECT * FROM status_events WHERE discord_id = ? AND type = ? ORDER BY at DESC LIMIT 10', [discordId, type]);
+}
+
+module.exports = { logJoined, logLeft, getLastJoined, getHistory, logStatusGranted, logStatusRevoked, getStatusHistory };

@@ -102,19 +102,12 @@ async function buildBlacklistEmbeds() {
   return embeds;
 }
 
-function buildControlRow(page, totalPages) {
+function buildControlRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('blacklist_add').setLabel('🚫 Внести в ЧС').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('blacklist_add_nodiscord').setLabel('🚫 Внести (без Discord)').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('blacklist_remove').setLabel('✅ Убрать из ЧС').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('blacklist_search').setLabel('🔍 Найти').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('blacklist_prev').setLabel('◀ Назад').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
-  );
-}
-
-function buildControlRow2(page, totalPages) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('blacklist_next').setLabel('Вперед ▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= totalPages - 1),
   );
 }
 
@@ -123,13 +116,7 @@ async function updateBlacklist(guild) {
   if (!channel) return;
 
   const allEmbeds = await buildBlacklistEmbeds();
-  const totalPages = allEmbeds.length;
-
-  let page = parseInt((await getSetting('blacklist_page')) || '0', 10);
-  if (page >= totalPages) page = totalPages - 1;
-  if (page < 0) page = 0;
-
-  const components = [buildControlRow(page, totalPages), buildControlRow2(page, totalPages)];
+  const components = [buildControlRow()];
   const messageId = await getSetting('blacklist_message_id');
   let message = null;
 
@@ -141,7 +128,10 @@ async function updateBlacklist(guild) {
     }
   }
 
-  const payload = { embeds: [allEmbeds[page]], components };
+  // До 10 эмбедов в одном сообщении Discord — с запасом хватает и на
+  // основной список, и на отдельную секцию "без Discord" сразу вместе,
+  // без необходимости листать страницы, чтобы её увидеть.
+  const payload = { embeds: allEmbeds.slice(0, 10), components };
 
   if (message) {
     await message.edit(payload);
@@ -149,19 +139,12 @@ async function updateBlacklist(guild) {
     const sent = await channel.send(payload);
     await setSetting('blacklist_message_id', sent.id);
   }
-
-  await setSetting('blacklist_page', String(page));
 }
 
-async function changeBlacklistPage(guild, direction) {
-  const allEmbeds = await buildBlacklistEmbeds();
-  const totalPages = allEmbeds.length;
-  let page = parseInt((await getSetting('blacklist_page')) || '0', 10);
-  page += direction;
-  if (page < 0) page = 0;
-  if (page > totalPages - 1) page = totalPages - 1;
-  await setSetting('blacklist_page', String(page));
-  await updateBlacklist(guild);
+async function changeBlacklistPage() {
+  // Постраничность больше не нужна — все секции ЧС теперь в одном
+  // сообщении разом (см. updateBlacklist). Оставлено для обратной
+  // совместимости с уже существующими кнопками ◀/▶.
 }
 
 module.exports = { updateBlacklist, changeBlacklistPage };

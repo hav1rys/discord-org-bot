@@ -59,6 +59,7 @@ const client = new Client({
 const pendingUpdates = new Map(); // key: `${type}:${userId}` -> text
 // причина, указанная в форме "Убрать из ЧС", до подтверждения удаления
 const pendingBlacklistReasons = new Map(); // key: userId -> reason
+const APPLICATION_COOLDOWN_HOURS = 6; // кулдаун на повторную заявку после отказа
 const pendingBroadcasts = new Map(); // key: userId -> { text, targetId? }
 
 // ---------- Утилиты ----------
@@ -150,6 +151,11 @@ function normalizeName(input) {
     .trim();
 }
 
+// № Паспорта — только цифры (без пробелов/букв/спецсимволов)
+function isValidStatic(value) {
+  return /^\d+$/.test((value || '').trim());
+}
+
 // Показывает select-меню выбора нового ранга. scope — либо № конкретного
 // паспорта (тогда список рангов строится от ЕГО текущего ранга), либо
 // 'all' (тогда список — все ранги, доступные актёру, без привязки к
@@ -214,7 +220,7 @@ async function startRankSelection(interaction, guild, action, discordId, scope, 
 // Роли "Отпуск"/"AFK" на сервере — общие на весь аккаунт (Discord-роль не
 // может быть "частичной"). Выставляем/снимаем их по правилу: есть хотя бы
 // один паспорт со статусом → роль есть; ни одного → роли нет.
-async function buildProfileEmbed(guild, discordId) {
+async function buildProfileEmbeds(guild, discordId) {
   const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [discordId]);
   if (!participant) return null;
   const passports = await passportsLib.getAllPassports(discordId);
@@ -227,15 +233,12 @@ async function buildProfileEmbed(guild, discordId) {
 
   const nameLines = [];
   const passportLines = [];
-  const infoLines = [];
+  const joinLeaveLines = [];
 
-  let profileChannelUrl = null;
-  if (participant.profile_thread_id) {
-    try {
-      const channel = await guild.channels.fetch(participant.profile_thread_id);
-      profileChannelUrl = channel.url;
-    } catch (_) {}
-  }
+  // Все статики, которые когда-либо принадлежали этому Discord ID — нужно
+  // для полного поиска заявок на увольнение по истории, не только текущих.
+  const everStatics = new Set(passports.map((p) => p.static));
+  for (const e of await history.getHistory(discordId)) everStatics.add(e.static);
 
   for (const p of passports) {
     let roleName = p.role_id || 'ранг не назначен';
@@ -246,45 +249,180 @@ async function buildProfileEmbed(guild, discordId) {
       } catch (_) {}
     }
 
+    const extraDetails = [];
+    if (p.profile_thread_id) {
+      try {
+        const channel = await guild.channels.fetch(p.profile_thread_id);
+        extraDetails.push(`[Канал с отчётами](${channel.url})`);
+      } catch (_) {}
+    }
+    if (p.vacation_until) extraDetails.push(`🏖️ В отпуске до ${formatDateTime(new Date(p.vacation_until))}`);
+    if (p.afk_since) extraDetails.push(`💤 AFK с ${p.afk_since}`);
+
     nameLines.push(`${multi ? '- ' : ''}${p.name} | ${roleName}`);
+    if (extraDetails.length) nameLines.push(extraDetails.join(' • '));
+
     passportLines.push(`${multi ? '- ' : ''}${p.static}`);
 
     const joinedEvent = await history.getLastJoined(discordId, p.static);
     const joinedDate = joinedEvent ? formatDateOnly(new Date(joinedEvent.at)) : (p.position === 0 && participant.joined_at ? formatDateOnly(new Date(participant.joined_at)) : null);
 
-    const details = [];
-    details.push(`Вступил: ${joinedDate || '—'}`);
-    if (profileChannelUrl) details.push(`[Канал с отчётами](${profileChannelUrl})`);
-
     const appQuery = p.position === 0
       ? await db.get(`SELECT message_id FROM applications WHERE discord_id = ? AND static = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1`, [discordId, p.static])
       : await db.get(`SELECT message_id FROM passport_requests WHERE discord_id = ? AND static = ? AND status = 'accepted' ORDER BY id DESC LIMIT 1`, [discordId, p.static]);
+    let joinPart = joinedDate || '—';
     if (appQuery && appQuery.message_id) {
-      details.push(`[Заявка на вступление](https://discord.com/channels/${guild.id}/${config.CHANNEL_APPLY_REVIEW}/${appQuery.message_id})`);
+      joinPart += `([Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_APPLY_REVIEW}/${appQuery.message_id}))`;
     }
-
-    const kickReq = await db.get(`SELECT message_id FROM kicks WHERE status = 'pending' AND target_static = ? ORDER BY id DESC LIMIT 1`, [p.static]);
-    if (kickReq && kickReq.message_id) {
-      details.push(`[Заявка на увольнение](https://discord.com/channels/${guild.id}/${config.CHANNEL_KICK_REVIEW}/${kickReq.message_id})`);
-    }
-
-    if (p.vacation_until) details.push(`🏖️ В отпуске до ${formatDateTime(new Date(p.vacation_until))}`);
-    if (p.afk_since) details.push(`💤 AFK с ${p.afk_since}`);
-
-    infoLines.push(details.join(' • '));
+    joinLeaveLines.push(`${multi ? '- ' : ''}${joinPart}`);
   }
 
-  const embed = new EmbedBuilder()
+  const mainEmbed = new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle('Профиль')
     .setDescription(`**Упоминание | Тег | ID**\n${idValue}`)
     .addFields(
-      { name: 'Имя Фамилия', value: nameLines.join('\n').slice(0, 1024), inline: true },
-      { name: '№ Паспорта', value: passportLines.join('\n').slice(0, 1024), inline: true },
-      { name: '\u200b', value: infoLines.join('\n\n').slice(0, 1024) || '—' },
+      { name: 'Имя Фамилия', value: nameLines.join('\n').slice(0, 1024) || '—', inline: true },
+      { name: '№ Паспорта', value: passportLines.join('\n').slice(0, 1024) || '—', inline: true },
+      { name: 'Вступил/Уволился', value: joinLeaveLines.join('\n').slice(0, 1024) || '—', inline: true },
     );
 
-  return embed;
+  // Заявки в организацию — все, что когда-либо подавал этот Discord ID
+  const allApps = await db.all('SELECT * FROM applications WHERE discord_id = ? ORDER BY id DESC LIMIT 10', [discordId]);
+  if (allApps.length > 0) {
+    const lines = allApps.map((a) => {
+      const link = a.message_id ? `[Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_APPLY_REVIEW}/${a.message_id})` : 'Заявка';
+      return `- ${link} | ${a.name} | № ${a.static} | ${formatDateOnly(new Date(a.created_at))}`;
+    });
+    mainEmbed.addFields({ name: 'Заявки в организацию', value: lines.join('\n').slice(0, 1024) });
+  }
+
+  // Заявки на увольнение — по всем паспортам, которые когда-либо принадлежали этому человеку
+  if (everStatics.size > 0) {
+    const placeholders = [...everStatics].map(() => '?').join(',');
+    const kickRows = await db.all(`SELECT * FROM kicks WHERE target_static IN (${placeholders}) ORDER BY id DESC LIMIT 10`, [...everStatics]);
+    if (kickRows.length > 0) {
+      const lines = kickRows.map((k) => {
+        const link = k.message_id ? `[Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_KICK_REVIEW}/${k.message_id})` : 'Заявка';
+        return `- ${link} | ${k.name} | № ${k.target_static} | ${k.reason || '—'} | ${formatDateOnly(new Date(k.created_at))}`;
+      });
+      mainEmbed.addFields({ name: 'Заявки на увольнение', value: lines.join('\n').slice(0, 1024) });
+    }
+  }
+
+  // Отпуск — самостоятельные заявки + выданные/снятые руководством напрямую
+  const vacationRows = await db.all('SELECT * FROM vacations WHERE discord_id = ? ORDER BY id DESC LIMIT 10', [discordId]);
+  const vacationGrants = await history.getStatusHistory(discordId, 'vacation');
+  if (vacationRows.length > 0 || vacationGrants.length > 0) {
+    const lines = [];
+    for (const v of vacationRows) {
+      const link = v.message_id ? `[Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_VACATION_REVIEW}/${v.message_id})` : 'Заявка';
+      lines.push(`${link} | ${v.reason || '—'} | ${formatDateOnly(new Date(v.created_at))} | до ${formatDateOnly(new Date(v.until))}`);
+    }
+    for (const g of vacationGrants) {
+      const label = g.action === 'granted' ? 'Выдан руководством' : 'Снят руководством';
+      const extra = g.action === 'granted' && g.until ? ` | до ${formatDateOnly(new Date(g.until))}` : '';
+      lines.push(`${label} | ${g.reason || '—'} | ${formatDateOnly(new Date(g.at))}${extra}`);
+    }
+    mainEmbed.addFields({ name: 'Отпуск', value: lines.join('\n').slice(0, 1024) });
+  }
+
+  // AFK — своей "заявки" не существует, но выдача/снятие напрямую руководством теперь логируется
+  const afkGrants = await history.getStatusHistory(discordId, 'afk');
+  if (afkGrants.length > 0) {
+    const lines = afkGrants.map((g) => {
+      const label = g.action === 'granted' ? 'Выдан' : 'Снят';
+      return `${label} | ${g.reason || '—'} | ${formatDateOnly(new Date(g.at))}`;
+    });
+    mainEmbed.addFields({ name: 'AFK', value: lines.join('\n').slice(0, 1024) });
+  }
+
+  const embeds = [mainEmbed];
+  const MAX_WEEKS_BACK = 12;
+  const MAX_WEEKS_SHOWN = 8;
+
+  // --- Контракты по неделям (последние непустые) ---
+  const contractWeeks = [];
+  for (let w = 0; w < MAX_WEEKS_BACK && contractWeeks.length < MAX_WEEKS_SHOWN; w++) {
+    const range = contracts.getWeekRange(w);
+    const { fulfilled, unfulfilled } = await contracts.getUserWeekStats(discordId, range);
+    if (fulfilled.length === 0 && unfulfilled.length === 0) continue;
+    contractWeeks.push({ range, fulfilled, unfulfilled });
+  }
+  if (contractWeeks.length > 0) {
+    const contractsEmbed = new EmbedBuilder().setColor(0x5865f2).setTitle('📄 Контракты');
+    for (const cw of contractWeeks.reverse()) {
+      const fLines = cw.fulfilled.map((c) => `- ${contracts.formatDate(new Date(c.submitted_at))}([Скриншот](${c.message_url}))`);
+      fLines.unshift(`Всего: ${cw.fulfilled.length}`);
+      const uLines = cw.unfulfilled.map((c) => `- ${contracts.formatDate(new Date(c.submitted_at))}([Скриншот](${c.message_url}))`);
+      uLines.unshift(`Всего: ${cw.unfulfilled.length}`);
+      contractsEmbed.addFields(
+        { name: 'Неделя', value: contracts.formatWeekLabel(cw.range), inline: true },
+        { name: 'Выполнение', value: fLines.join('\n').slice(0, 1024), inline: true },
+        { name: 'Не выполнение', value: uLines.join('\n').slice(0, 1024), inline: true },
+      );
+    }
+    embeds.push(contractsEmbed);
+  }
+
+  // --- Приглашения по неделям (где этот человек кого-то пригласил) ---
+  const inviteWeeks = [];
+  for (let w = 0; w < MAX_WEEKS_BACK && inviteWeeks.length < MAX_WEEKS_SHOWN; w++) {
+    const range = contracts.getWeekRange(w);
+    const invitees = await invitations.getInviterInviteesForWeek(discordId, range);
+    if (invitees.length === 0) continue;
+    inviteWeeks.push({ range, invitees });
+  }
+  if (inviteWeeks.length > 0) {
+    const invitesEmbed = new EmbedBuilder().setColor(0x5865f2).setTitle('📨 Приглашения');
+    for (const iw of inviteWeeks.reverse()) {
+      const lines = iw.invitees.map((inv) => `- <@${inv.invitee_discord_id}> | ${inv.invitee_name} | \`${inv.invitee_discord_id}\` — ${formatDateOnly(new Date(inv.joined_at))}`);
+      invitesEmbed.addFields(
+        { name: 'Неделя', value: contracts.formatWeekLabel(iw.range), inline: true },
+        { name: 'Пригласил', value: lines.join('\n').slice(0, 1024), inline: true },
+      );
+    }
+    embeds.push(invitesEmbed);
+  }
+
+  // --- Проверенные заявки (для HR) по неделям ---
+  const reviewWeeks = [];
+  for (let w = 0; w < MAX_WEEKS_BACK && reviewWeeks.length < MAX_WEEKS_SHOWN; w++) {
+    const range = contracts.getWeekRange(w);
+    const accepted = await db.all(
+      `SELECT * FROM applications WHERE accepted_by = ? AND status = 'accepted' AND created_at BETWEEN ? AND ? ORDER BY id`,
+      [discordId, range.start.toISOString(), range.end.toISOString()],
+    );
+    const rejected = await db.all(
+      `SELECT * FROM applications WHERE rejected_by = ? AND status = 'rejected' AND created_at BETWEEN ? AND ? ORDER BY id`,
+      [discordId, range.start.toISOString(), range.end.toISOString()],
+    );
+    if (accepted.length === 0 && rejected.length === 0) continue;
+    reviewWeeks.push({ range, accepted, rejected });
+  }
+  if (reviewWeeks.length > 0) {
+    const reviewEmbed = new EmbedBuilder().setColor(0x5865f2).setTitle('📋 Проверенные заявки (для HR-Менеджеров)');
+    for (const rw of reviewWeeks.reverse()) {
+      const aLines = rw.accepted.map((a) => {
+        const link = a.message_id ? `[Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_APPLY_REVIEW}/${a.message_id})` : 'Заявка';
+        return `- ${link} | ${formatDateOnly(new Date(a.created_at))}`;
+      });
+      aLines.unshift(`Всего: ${rw.accepted.length}`);
+      const rLines = rw.rejected.map((a) => {
+        const link = a.message_id ? `[Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_APPLY_REVIEW}/${a.message_id})` : 'Заявка';
+        return `- ${link} | ${a.reject_reason || '—'} | ${formatDateOnly(new Date(a.created_at))}`;
+      });
+      rLines.unshift(`Всего: ${rw.rejected.length}`);
+      reviewEmbed.addFields(
+        { name: 'Неделя', value: contracts.formatWeekLabel(rw.range), inline: true },
+        { name: 'Принятые | Дата', value: aLines.join('\n').slice(0, 1024), inline: true },
+        { name: 'Не принятые | Причина | Дата', value: rLines.join('\n').slice(0, 1024), inline: true },
+      );
+    }
+    embeds.push(reviewEmbed);
+  }
+
+  return embeds;
 }
 
 function buildProfileComponents(discordId) {
@@ -307,6 +445,31 @@ function buildProfileComponents(discordId) {
 // Раз в час (вызывается из общего таймера) — шлёт ЛС, если чей-то отпуск
 // заканчивается менее чем через сутки, и ещё не напоминали про именно этот
 // отпуск (проверяется по discordId+паспорт+точная дата окончания).
+// Раз в неделю (проверяется из часового таймера) — напоминает HR/руководству
+// проверить накопившиеся заявки, если они есть.
+async function checkHrReminder(guild) {
+  const lastReminder = await db.getSetting('hr_reminder_last_sent');
+  const weekMs = 7 * 24 * 60 * 60 * 1000;
+  if (lastReminder && Date.now() - new Date(lastReminder).getTime() < weekMs) return;
+
+  const pendingRow = await db.get(`SELECT COUNT(*) as cnt FROM applications WHERE status = 'pending'`);
+  const count = pendingRow ? pendingRow.cnt : 0;
+  if (count === 0) return;
+
+  try {
+    const channel = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW);
+    await channel.send({
+      content: perms.mentionManagementRoles(),
+      embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle('📋 Напоминание: непроверенные заявки').setDescription(`В очереди сейчас **${count}** заявок на рассмотрение — загляните, пожалуйста.`)],
+      ...mentionOpts,
+    });
+  } catch (err) {
+    console.error('Не удалось отправить еженедельное напоминание HR:', err.message);
+  }
+
+  await db.setSetting('hr_reminder_last_sent', new Date().toISOString());
+}
+
 async function checkVacationReminders(guild) {
   const REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
   const now = Date.now();
@@ -348,6 +511,10 @@ async function syncStatusRoles(guild, discordId) {
   } catch (_) {
     // участника нет на сервере
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getDirSize(dirPath) {
@@ -411,23 +578,25 @@ function buildProfileChannelName(discordTag, name, staticValue) {
 // Переименовывает профиль-канал под текущую "эффективную личность" (тег +
 // имя + паспорт по правилам 7.2) — вызывать после любого изменения
 // паспортов/рангов, которое может сдвинуть эффективную личность.
-async function syncProfileChannelName(guild, discordId) {
+async function syncProfileChannelName(guild, discordId, staticValue) {
+  if (!staticValue) return; // без конкретного паспорта переименовывать нечего
   try {
-    const row = await db.get('SELECT profile_thread_id, discord_tag FROM participants WHERE discord_id = ?', [discordId]);
-    if (!row || !row.profile_thread_id) return;
-    const identity = await passportsLib.computeEffectiveIdentity(discordId);
-    if (!identity) return;
-    const channel = await guild.channels.fetch(row.profile_thread_id);
-    const newName = buildProfileChannelName(row.discord_tag, identity.name, identity.static) || channel.name;
+    const passports = await passportsLib.getAllPassports(discordId);
+    const passport = passports.find((p) => p.static === staticValue);
+    if (!passport || !passport.profile_thread_id) return;
+    const participant = await db.get('SELECT discord_tag FROM participants WHERE discord_id = ?', [discordId]);
+    const discordTag = participant ? participant.discord_tag : discordId;
+    const channel = await guild.channels.fetch(passport.profile_thread_id);
+    const newName = buildProfileChannelName(discordTag, passport.name, passport.static) || channel.name;
     if (channel.name !== newName) await channel.setName(newName);
   } catch (err) {
-    console.error(`Не удалось переименовать профиль-канал для ${discordId}:`, err.message);
+    console.error(`Не удалось переименовать профиль-канал (паспорт ${staticValue}) для ${discordId}:`, err.message);
   }
 }
 
 async function createProfileThread(guild, discordId, name, staticValue) {
   try {
-    const existing = await db.get('SELECT * FROM profile_channels WHERE discord_id = ?', [discordId]);
+    const existing = await db.get('SELECT * FROM profile_channels WHERE static = ?', [staticValue]);
 
     const overwrites = [
       { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
@@ -446,8 +615,8 @@ async function createProfileThread(guild, discordId, name, staticValue) {
       overwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
     }
 
-    // Уже есть архивный канал с прошлого раза — восстанавливаем его вместо
-    // создания нового (п.1.4)
+    // Уже есть архивный канал для этого ИМЕННО паспорта — восстанавливаем
+    // его вместо создания нового (п.1.4)
     if (existing) {
       try {
         const channel = await guild.channels.fetch(existing.channel_id);
@@ -458,15 +627,15 @@ async function createProfileThread(guild, discordId, name, staticValue) {
         for (const roleId of config.ROLES_REVIEW_ALLOWED) {
           await channel.permissionOverwrites.edit(roleId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
         }
-        await db.run('UPDATE profile_channels SET status = ?, updated_at = ? WHERE discord_id = ?', ['active', new Date().toISOString(), discordId]);
-        await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [channel.id, discordId]);
+        await db.run('UPDATE profile_channels SET status = ?, discord_id = ?, updated_at = ? WHERE static = ?', ['active', discordId, new Date().toISOString(), staticValue]);
+        await passportsLib.setPassportChannel(discordId, staticValue, channel.id);
         await channel.send({
-          content: `📸 С возвращением, **${name}**! Профиль восстановлен.`,
+          content: `<@${discordId}> — 📸 С возвращением, **${name}**! Профиль восстановлен.`,
           components: [row(new ButtonBuilder().setCustomId(`my_profile:${discordId}`).setLabel('👤 Мой профиль').setStyle(ButtonStyle.Secondary))],
         });
         return channel.url;
       } catch (err) {
-        console.error(`Не удалось восстановить профиль-канал для ${discordId}, создаю новый:`, err.message);
+        console.error(`Не удалось восстановить профиль-канал для паспорта ${staticValue}, создаю новый:`, err.message);
       }
     }
 
@@ -476,7 +645,7 @@ async function createProfileThread(guild, discordId, name, staticValue) {
       discordTag = member.user.tag;
     } catch (_) {}
 
-    const channelName = buildProfileChannelName(discordTag, name, staticValue) || `profile-${discordId}`;
+    const channelName = buildProfileChannelName(discordTag, name, staticValue) || `profile-${staticValue}`;
 
     const channel = await guild.channels.create({
       name: channelName,
@@ -488,7 +657,7 @@ async function createProfileThread(guild, discordId, name, staticValue) {
 
     await channel.send({
       content:
-        `📸 Профиль **${name}** (№ ${staticValue}).\n\n` +
+        `<@${discordId}> — 📸 Профиль **${name}** (№ ${staticValue}).\n\n` +
         `Сюда нужно присылать скриншоты **на весь экран** по каждому контракту — 2 штуки:\n` +
         `1️⃣ когда вы **взяли** контракт\n` +
         `2️⃣ когда контракт **выполнен или не выполнен**\n\n` +
@@ -498,13 +667,13 @@ async function createProfileThread(guild, discordId, name, staticValue) {
     });
 
     await db.run(
-      'INSERT INTO profile_channels (discord_id, channel_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-      [discordId, channel.id, 'active', new Date().toISOString(), new Date().toISOString()],
+      'INSERT INTO profile_channels (discord_id, static, channel_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [discordId, staticValue, channel.id, 'active', new Date().toISOString(), new Date().toISOString()],
     );
-    await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [channel.id, discordId]);
+    await passportsLib.setPassportChannel(discordId, staticValue, channel.id);
     return channel.url;
   } catch (err) {
-    console.error(`Не удалось создать профиль-канал для ${discordId}:`, err.message);
+    console.error(`Не удалось создать профиль-канал для паспорта ${staticValue} (${discordId}):`, err.message);
     return null;
   }
 }
@@ -702,6 +871,7 @@ function buildVacationGrantModal(discordId, staticsCsv) {
   const modal = new ModalBuilder().setCustomId(customId).setTitle('Выдать отпуск');
   modal.addComponents(
     row(txt(null, 'deadline', 'Дата (ДД.ММ.ГГГГ) или срок (7d)')),
+    row(txt(null, 'reason', 'Причина', { required: false })),
   );
   return modal;
 }
@@ -711,6 +881,7 @@ function buildAfkModal(discordId, staticsCsv) {
   const modal = new ModalBuilder().setCustomId(customId).setTitle('Указать AFK');
   modal.addComponents(
     row(txt(null, 'date', 'Дата с которой AFK (ДД.ММ.ГГГГ)')),
+    row(txt(null, 'reason', 'Причина', { required: false })),
   );
   return modal;
 }
@@ -810,6 +981,16 @@ const commands = [
   new SlashCommandBuilder()
     .setName('export_stats')
     .setDescription('Выгрузить статистику текущей недели (контракты/приглашения/заявки) в .csv'),
+  new SlashCommandBuilder()
+    .setName('send_report_channels')
+    .setDescription('Отправить в ЛС ссылки на каналы с отчётами — одному человеку или всем в организации')
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('org_stats')
+    .setDescription('Общая сводка по организации: люди, отпуск/AFK, контракты за неделю, очередь заявок'),
+  new SlashCommandBuilder()
+    .setName('status')
+    .setDescription('Проверка здоровья бота: БД, доступ к ключевым каналам, время работы'),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -855,54 +1036,87 @@ async function sendFaqManagePanel(guild) {
   await db.setSetting('faq_manage_message_id', sent.id);
 }
 
+// Отправляет меню один раз и запоминает его id в settings — при повторном
+// /init_menus редактирует то же сообщение вместо отправки нового (п.1).
+async function sendOrEditMenu(channel, settingKey, payload) {
+  const messageId = await db.getSetting(settingKey);
+  if (messageId) {
+    try {
+      const msg = await channel.messages.fetch(messageId);
+      await msg.edit(payload);
+      return msg;
+    } catch (_) {
+      // сообщение удалили вручную — отправим новое ниже
+    }
+  }
+  const sent = await channel.send(payload);
+  await db.setSetting(settingKey, sent.id);
+  return sent;
+}
+
+// Оборачивает один шаг инициализации так, чтобы ошибка в нём (например,
+// канал ещё не создан на сервере или бот не видит его) не остановила
+// выполнение остальных шагов — раньше именно это и происходило: если
+// initMenus падал на любом шаге, всё, что шло ПОСЛЕ (включая статистику
+// контрактов), просто не выполнялось (п.6).
+async function safeInitStep(label, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`/init_menus: не удалось выполнить шаг «${label}»:`, err.message);
+  }
+}
+
 async function initMenus(guild) {
-  const applyChannel = await guild.channels.fetch(config.CHANNEL_APPLY_MENU);
-  await applyChannel.send({
-    embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Вступление в организацию').setDescription('Нажмите кнопку ниже, чтобы подать заявку на вступление.')],
-    components: [row(new ButtonBuilder().setCustomId('apply_submit').setLabel('📝 Подать заявку').setStyle(ButtonStyle.Success))],
+  await safeInitStep('канал вступления', async () => {
+    const applyChannel = await guild.channels.fetch(config.CHANNEL_APPLY_MENU);
+    await sendOrEditMenu(applyChannel, 'apply_menu_message_id', {
+      embeds: [new EmbedBuilder().setColor(0x57f287).setTitle('Вступление в организацию').setDescription('Нажмите кнопку ниже, чтобы подать заявку на вступление.')],
+      components: [row(new ButtonBuilder().setCustomId('apply_submit').setLabel('📝 Подать заявку').setStyle(ButtonStyle.Success))],
+    });
   });
 
-  const kickChannel = await guild.channels.fetch(config.CHANNEL_KICK_MENU);
-  await kickChannel.send({
-    embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Заявка на увольнение').setDescription('Нажмите кнопку ниже, чтобы подать заявку на увольнение участника.')],
-    components: [row(new ButtonBuilder().setCustomId('kick_submit').setLabel('🚫 Подать заявку на увольнение').setStyle(ButtonStyle.Danger))],
+  await safeInitStep('канал увольнения', async () => {
+    const kickChannel = await guild.channels.fetch(config.CHANNEL_KICK_MENU);
+    await sendOrEditMenu(kickChannel, 'kick_menu_message_id', {
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('Заявка на увольнение').setDescription('Нажмите кнопку ниже, чтобы подать заявку на увольнение участника.')],
+      components: [row(new ButtonBuilder().setCustomId('kick_submit').setLabel('🚫 Подать заявку на увольнение').setStyle(ButtonStyle.Danger))],
+    });
   });
 
-  const vacationChannel = await guild.channels.fetch(config.CHANNEL_VACATION_MENU);
-  await vacationChannel.send({
-    embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle('Отпуск').setDescription('Нажмите кнопку ниже, чтобы подать заявку на отпуск.')],
-    components: [row(new ButtonBuilder().setCustomId('vacation_apply').setLabel('🏖️ Подать заявку на отпуск').setStyle(ButtonStyle.Primary))],
+  await safeInitStep('канал отпуска', async () => {
+    const vacationChannel = await guild.channels.fetch(config.CHANNEL_VACATION_MENU);
+    await sendOrEditMenu(vacationChannel, 'vacation_menu_message_id', {
+      embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle('Отпуск').setDescription('Нажмите кнопку ниже, чтобы подать заявку на отпуск.')],
+      components: [row(new ButtonBuilder().setCustomId('vacation_apply').setLabel('🏖️ Подать заявку на отпуск').setStyle(ButtonStyle.Primary))],
+    });
   });
 
-  const dataChangeChannel = await guild.channels.fetch(config.CHANNEL_DATA_CHANGE_MENU);
-  const dataChangeMenuId = await db.getSetting('data_change_menu_message_id');
-  if (!dataChangeMenuId) {
-    const sentDc = await dataChangeChannel.send({
+  await safeInitStep('канал изменения данных', async () => {
+    const dataChangeChannel = await guild.channels.fetch(config.CHANNEL_DATA_CHANGE_MENU);
+    await sendOrEditMenu(dataChangeChannel, 'data_change_menu_message_id', {
       embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Изменение данных').setDescription('Нажмите кнопку ниже, чтобы подать заявку на изменение Имени Фамилии по одному из ваших паспортов.')],
       components: [row(new ButtonBuilder().setCustomId('data_change_apply').setLabel('✏️ Изменить данные').setStyle(ButtonStyle.Primary))],
     });
-    await db.setSetting('data_change_menu_message_id', sentDc.id);
-  }
+  });
 
-  const hrApplyChannel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
-  const hrInfoMessageId = await db.getSetting('hr_apply_menu_message_id');
-  if (!hrInfoMessageId) {
+  await safeInitStep('канал заявки на HR', async () => {
+    const hrApplyChannel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
     const hrText = await getCurrentText('hr_info', DEFAULT_HR_INFO);
-    const sentHr = await hrApplyChannel.send({
+    await sendOrEditMenu(hrApplyChannel, 'hr_apply_menu_message_id', {
       embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(hrText)],
       components: [row(new ButtonBuilder().setCustomId('hr_apply_submit').setLabel('📝 Подать заявку на HR').setStyle(ButtonStyle.Success))],
     });
-    await db.setSetting('hr_apply_menu_message_id', sentHr.id);
-  }
+  });
 
-  await safeUpdateMembersList(guild);
-  await safeUpdateBlacklist(guild);
-  await contractsDisplay.safeUpdateContractsStats(guild);
-  await invitationsDisplay.safeUpdateInvitations(guild);
-  await applicationsDisplay.safeUpdateApplicationsStats(guild);
-  await faqDisplay.safeUpdateFaqChannel(guild, 'member');
-  await faqDisplay.safeUpdateFaqChannel(guild, 'hr');
-  await sendFaqManagePanel(guild);
+  await safeInitStep('список участников', () => safeUpdateMembersList(guild));
+  await safeInitStep('чёрный список', () => safeUpdateBlacklist(guild));
+  await safeInitStep('статистика по контрактам', () => contractsDisplay.safeUpdateContractsStats(guild));
+  await safeInitStep('статистика по приглашениям', () => invitationsDisplay.safeUpdateInvitations(guild));
+  await safeInitStep('статистика по заявкам', () => applicationsDisplay.safeUpdateApplicationsStats(guild));
+  await safeInitStep('FAQ участников', () => faqDisplay.safeUpdateFaqChannel(guild, 'member'));
+  await safeInitStep('FAQ HR', () => faqDisplay.safeUpdateFaqChannel(guild, 'hr'));
+  await safeInitStep('панель управления FAQ', () => sendFaqManagePanel(guild));
 }
 
 // ---------- Обработка заявок на вступление ----------
@@ -1056,6 +1270,18 @@ async function dmUser(guild, discordId, content) {
   }
 }
 
+async function archiveProfileChannel(guild, discordId, channelId) {
+  if (!channelId) return;
+  try {
+    const channel = await guild.channels.fetch(channelId);
+    await channel.permissionOverwrites.edit(discordId, { ViewChannel: false, SendMessages: false });
+    await channel.setParent(config.CHANNEL_PROFILES_ARCHIVE_CATEGORY, { lockPermissions: false });
+    await db.run('UPDATE profile_channels SET status = ?, updated_at = ? WHERE channel_id = ?', ['archived', new Date().toISOString(), channelId]);
+  } catch (_) {
+    // канал уже мог быть удалён вручную
+  }
+}
+
 async function removeParticipant(guild, participant, reason) {
   const passportsBeforeRemoval = await passportsLib.getAllPassports(participant.discord_id);
   for (const p of passportsBeforeRemoval) {
@@ -1072,15 +1298,9 @@ async function removeParticipant(guild, participant, reason) {
     // участник уже мог покинуть сервер
   }
 
-  if (participant.profile_thread_id) {
-    try {
-      const channel = await guild.channels.fetch(participant.profile_thread_id);
-      await channel.permissionOverwrites.edit(participant.discord_id, { ViewChannel: false, SendMessages: false });
-      await channel.setParent(config.CHANNEL_PROFILES_ARCHIVE_CATEGORY, { lockPermissions: false });
-      await db.run('UPDATE profile_channels SET status = ?, updated_at = ? WHERE discord_id = ?', ['archived', new Date().toISOString(), participant.discord_id]);
-    } catch (_) {
-      // канал уже мог быть удалён вручную
-    }
+  // У каждого паспорта — свой канал, архивируем их все (п. "канал на каждый паспорт")
+  for (const p of passportsBeforeRemoval) {
+    await archiveProfileChannel(guild, participant.discord_id, p.profile_thread_id);
   }
 
   await invitations.resolveOnLeave(participant.discord_id);
@@ -1095,7 +1315,8 @@ async function removeParticipant(guild, participant, reason) {
 // targetStatic: конкретный № паспорта или 'all'. Если это последний паспорт
 // участника — всё равно полностью увольняем (п.6.2), иначе снимается
 // только один паспорт (п.6/6.1), а роли/аккаунт остаются (п.6.3 через
-// syncEffectiveIdentity/syncStatusRoles).
+// syncEffectiveIdentity/syncStatusRoles). Архивируется канал ИМЕННО
+// снятого паспорта — остальные каналы человека не трогаются.
 async function kickPassportOrFull(guild, participant, targetStatic, reason) {
   const passports = await passportsLib.getAllPassports(participant.discord_id);
 
@@ -1105,12 +1326,12 @@ async function kickPassportOrFull(guild, participant, targetStatic, reason) {
   }
 
   const removedPassport = passports.find((p) => p.static === targetStatic);
-  await passportsLib.removePassportKeepAccount(participant.discord_id, targetStatic);
+  const { archivedChannelId } = await passportsLib.removePassportKeepAccount(participant.discord_id, targetStatic);
   if (removedPassport) {
     await history.logLeft(participant.discord_id, removedPassport.static, removedPassport.name, reason || '');
   }
+  await archiveProfileChannel(guild, participant.discord_id, archivedChannelId);
   await syncEffectiveIdentity(guild, participant.discord_id);
-  await syncProfileChannelName(guild, participant.discord_id);
   await syncStatusRoles(guild, participant.discord_id);
   await safeUpdateMembersList(guild);
   await dmUser(guild, participant.discord_id, `🚫 У вас снят паспорт № ${targetStatic}.${reason ? ` Причина: ${reason}` : ''}`);
@@ -1119,9 +1340,9 @@ async function kickPassportOrFull(guild, participant, targetStatic, reason) {
 
 async function handleParticipantAction(interaction, guild, action, discordId, participant) {
         if (action === 'view_profile') {
-          const embed = await buildProfileEmbed(guild, discordId);
-          if (!embed) return safeReply(interaction, 'Профиль не найден.');
-          return safeReply(interaction, { embeds: [embed], components: buildProfileComponents(discordId) });
+          const embeds = await buildProfileEmbeds(guild, discordId);
+          if (!embeds) return safeReply(interaction, 'Профиль не найден.');
+          return safeReply(interaction, { embeds, components: buildProfileComponents(discordId) });
         }
 
         if (action === 'kick') {
@@ -1270,6 +1491,7 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
 
           if (onVacation.length === 1) {
             await passportsLib.updatePassportFields(discordId, onVacation[0].static, { vacation_until: null });
+            await history.logStatusRevoked('vacation', discordId, onVacation[0].static, onVacation[0].name, interaction.user.id);
             await syncStatusRoles(guild, discordId);
             await safeUpdateMembersList(guild);
             await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}> (${onVacation[0].name}, № ${onVacation[0].static})`);
@@ -1306,6 +1528,7 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
 
           if (onAfk.length === 1) {
             await passportsLib.updatePassportFields(discordId, onAfk[0].static, { afk_since: null });
+            await history.logStatusRevoked('afk', discordId, onAfk[0].static, onAfk[0].name, interaction.user.id);
             await syncStatusRoles(guild, discordId);
             await safeUpdateMembersList(guild);
             await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}> (${onAfk[0].name}, № ${onAfk[0].static})`);
@@ -1402,58 +1625,53 @@ client.on('interactionCreate', async (interaction) => {
         for (const p of allParticipants) {
           if (p.discord_id.startsWith('nodiscord-')) continue; // без Discord — канал не нужен
 
-          // Смотрим на profile_channels — это надёжный источник (переживает
-          // увольнение/повторное вступление), а не на кэш-поле в participants,
-          // которое могло устареть/разойтись.
-          const existingChannel = await db.get('SELECT * FROM profile_channels WHERE discord_id = ?', [p.discord_id]);
-          let isActiveAndInPlace = false;
-
-          if (existingChannel) {
-            try {
-              const ch = await guild.channels.fetch(existingChannel.channel_id);
-              if (ch.parentId === config.CHANNEL_PROFILES_ACTIVE_CATEGORY) {
-                isActiveAndInPlace = true;
-                // На всякий случай синхронизируем кэш-поле, если оно разошлось
-                if (p.profile_thread_id !== existingChannel.channel_id) {
-                  await db.run('UPDATE participants SET profile_thread_id = ? WHERE discord_id = ?', [existingChannel.channel_id, p.discord_id]);
-                }
-              }
-            } catch (_) {
-              isActiveAndInPlace = false; // канал не найден вообще — пересоздадим
-            }
-          }
-
-          if (!isActiveAndInPlace) {
-            const wasArchived = !!existingChannel;
-            await createProfileThread(guild, p.discord_id, p.name, p.static);
-            if (wasArchived) restoredChannels++;
-            else createdChannels++;
-          }
-
-          const existingJoin = await history.getLastJoined(p.discord_id, p.static);
-          if (!existingJoin) {
-            await history.logJoined(p.discord_id, p.static, p.name, 'Восстановлено (backfill)', p.joined_at);
-            loggedJoins++;
-          }
-
           const allPassports = await passportsLib.getAllPassports(p.discord_id);
           let ranksChanged = false;
-          for (const extra of allPassports) {
-            if (!extra.role_id) {
-              await passportsLib.updatePassportFields(p.discord_id, extra.static, { role_id: config.ROLE_APPLY });
+
+          for (const passport of allPassports) {
+            // Ранг не назначен (данные до этой фичи) — чиним сразу
+            if (!passport.role_id) {
+              await passportsLib.updatePassportFields(p.discord_id, passport.static, { role_id: config.ROLE_APPLY });
               fixedRanks++;
               ranksChanged = true;
             }
-            if (extra.position === 0) continue;
-            const existingExtraJoin = await history.getLastJoined(p.discord_id, extra.static);
-            if (!existingExtraJoin) {
-              await history.logJoined(p.discord_id, extra.static, extra.name, 'Восстановлено (backfill)');
+
+            // Дата вступления
+            const existingJoin = await history.getLastJoined(p.discord_id, passport.static);
+            if (!existingJoin) {
+              const fallbackDate = passport.position === 0 ? p.joined_at : null;
+              await history.logJoined(p.discord_id, passport.static, passport.name, 'Восстановлено (backfill)', fallbackDate);
               loggedJoins++;
             }
+
+            // Канал-профиль — свой на КАЖДЫЙ паспорт (не на весь аккаунт)
+            const existingChannel = await db.get('SELECT * FROM profile_channels WHERE static = ?', [passport.static]);
+            let isActiveAndInPlace = false;
+
+            if (existingChannel) {
+              try {
+                const ch = await guild.channels.fetch(existingChannel.channel_id);
+                if (ch.parentId === config.CHANNEL_PROFILES_ACTIVE_CATEGORY) {
+                  isActiveAndInPlace = true;
+                  if (passport.profile_thread_id !== existingChannel.channel_id) {
+                    await passportsLib.setPassportChannel(p.discord_id, passport.static, existingChannel.channel_id);
+                  }
+                }
+              } catch (_) {
+                isActiveAndInPlace = false; // канал не найден вообще — пересоздадим
+              }
+            }
+
+            if (!isActiveAndInPlace) {
+              const wasArchived = !!existingChannel;
+              await createProfileThread(guild, p.discord_id, passport.name, passport.static);
+              if (wasArchived) restoredChannels++;
+              else createdChannels++;
+            }
           }
+
           if (ranksChanged) {
             await syncEffectiveIdentity(guild, p.discord_id);
-            await syncProfileChannelName(guild, p.discord_id);
           }
         }
 
@@ -1554,8 +1772,8 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         if (rows.length === 1) {
-          const embed = await buildProfileEmbed(guild, rows[0].discord_id);
-          await interaction.editReply({ embeds: [embed] });
+          const embeds = await buildProfileEmbeds(guild, rows[0].discord_id);
+          await interaction.editReply({ embeds });
           return;
         }
         const embed = new EmbedBuilder()
@@ -1609,6 +1827,169 @@ client.on('interactionCreate', async (interaction) => {
 
         await logAudit(guild, interaction.user, 'Экспорт статистики', `Выгружена неделя ${contracts.formatWeekLabel(range)}`);
         await interaction.editReply({ content: `Статистика за ${contracts.formatWeekLabel(range)}:`, files });
+        return;
+      }
+
+      if (cmd === 'send_report_channels') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+
+        const query = interaction.options.getString('человек');
+        let targets;
+        if (query) {
+          const target = await invitations.resolveInviter(query);
+          if (!target) {
+            await interaction.editReply('⛔ Человек не найден в списке участников.');
+            return;
+          }
+          targets = [target];
+        } else {
+          targets = await db.all('SELECT * FROM participants');
+        }
+
+        let sent = 0;
+        let skipped = 0;
+        for (const t of targets) {
+          if (t.discord_id.startsWith('nodiscord-')) {
+            skipped++;
+            continue;
+          }
+          const passports = await passportsLib.getAllPassports(t.discord_id);
+          const lines = [];
+          for (const p of passports) {
+            if (!p.profile_thread_id) continue;
+            try {
+              const channel = await guild.channels.fetch(p.profile_thread_id);
+              lines.push(`${p.name} (№ ${p.static}): ${channel.url}`);
+            } catch (_) {}
+          }
+          if (lines.length === 0) {
+            skipped++;
+            continue;
+          }
+          try {
+            const member = await guild.members.fetch(t.discord_id);
+            await member.send(`📸 Ваши каналы с отчётами по контрактам:\n${lines.join('\n')}`);
+            sent++;
+          } catch (_) {
+            skipped++;
+          }
+          await sleep(500);
+        }
+
+        await logAudit(guild, interaction.user, 'Рассылка ссылок на каналы с отчётами', query ? `Одному: ${targets[0].name}` : `Всем участникам (${sent}/${targets.length}, пропущено: ${skipped})`);
+        await interaction.editReply(query ? `Отправлено ${targets[0].name}.` : `Отправлено ${sent} из ${targets.length} (пропущено: ${skipped} — нет Discord или каналов).`);
+        return;
+      }
+
+      if (cmd === 'org_stats') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+
+        const totalPeople = (await db.get('SELECT COUNT(*) as cnt FROM participants')).cnt;
+        const onVacation = (await db.get(
+          `SELECT COUNT(*) as cnt FROM (
+             SELECT vacation_until FROM participants WHERE vacation_until IS NOT NULL
+             UNION ALL
+             SELECT vacation_until FROM extra_passports WHERE vacation_until IS NOT NULL
+           )`,
+        )).cnt;
+        const onAfk = (await db.get(
+          `SELECT COUNT(*) as cnt FROM (
+             SELECT afk_since FROM participants WHERE afk_since IS NOT NULL
+             UNION ALL
+             SELECT afk_since FROM extra_passports WHERE afk_since IS NOT NULL
+           )`,
+        )).cnt;
+
+        const range = contracts.getWeekRange(0);
+        const contractRows = await db.all(
+          `SELECT status FROM contracts WHERE status IN ('fulfilled','unfulfilled') AND submitted_at BETWEEN ? AND ?`,
+          [range.start.toISOString(), range.end.toISOString()],
+        );
+        const fulfilled = contractRows.filter((r) => r.status === 'fulfilled').length;
+        const unfulfilled = contractRows.filter((r) => r.status === 'unfulfilled').length;
+
+        const pendingApps = (await db.get(`SELECT COUNT(*) as cnt FROM applications WHERE status = 'pending'`)).cnt;
+        const pendingKicks = (await db.get(`SELECT COUNT(*) as cnt FROM kicks WHERE status = 'pending'`)).cnt;
+        const pendingVacations = (await db.get(`SELECT COUNT(*) as cnt FROM vacations WHERE status = 'pending'`)).cnt;
+        const pendingDataChanges = (await db.get(`SELECT COUNT(*) as cnt FROM data_change_requests WHERE status = 'pending'`)).cnt;
+        const pendingHr = (await db.get(`SELECT COUNT(*) as cnt FROM hr_applications WHERE status = 'pending'`)).cnt;
+        const pendingPassports = (await db.get(`SELECT COUNT(*) as cnt FROM passport_requests WHERE status = 'pending'`)).cnt;
+        const blacklistCount = (await db.get('SELECT COUNT(DISTINCT discord_id) as cnt FROM blacklist')).cnt;
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('📊 Сводка по организации')
+          .addFields(
+            { name: 'Всего людей', value: String(totalPeople), inline: true },
+            { name: '🏖️ В отпуске', value: String(onVacation), inline: true },
+            { name: '💤 AFK', value: String(onAfk), inline: true },
+            { name: `Контракты (${contracts.formatWeekLabel(range)})`, value: `✅ ${fulfilled} / ❌ ${unfulfilled}`, inline: false },
+            { name: 'Заявки на вступление', value: String(pendingApps), inline: true },
+            { name: 'Заявки на увольнение', value: String(pendingKicks), inline: true },
+            { name: 'Заявки на отпуск', value: String(pendingVacations), inline: true },
+            { name: 'Заявки на изменение данных', value: String(pendingDataChanges), inline: true },
+            { name: 'Заявки на роль HR', value: String(pendingHr), inline: true },
+            { name: 'Заявки на паспорт', value: String(pendingPassports), inline: true },
+            { name: 'В чёрном списке', value: String(blacklistCount), inline: true },
+          );
+
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'status') {
+        if (!perms.hasBotAccess(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+
+        let dbStatus = '✅ Подключена';
+        try {
+          await db.get('SELECT 1');
+        } catch (err) {
+          dbStatus = `❌ Ошибка: ${err.message}`;
+        }
+
+        const channelsToCheck = [
+          ['Список людей', config.CHANNEL_MEMBERS],
+          ['Заявки на вступление', config.CHANNEL_APPLY_REVIEW],
+          ['ЧС', config.CHANNEL_BLACKLIST],
+          ['Статистика (контракты)', config.CHANNEL_CONTRACTS_STATS],
+          ['Приглашения', config.CHANNEL_INVITATIONS],
+          ['Аудит', config.CHANNEL_AUDIT],
+          ['Профили (активные)', config.CHANNEL_PROFILES_ACTIVE_CATEGORY],
+          ['Профили (архив)', config.CHANNEL_PROFILES_ARCHIVE_CATEGORY],
+        ];
+        const channelResults = [];
+        for (const [label, channelId] of channelsToCheck) {
+          try {
+            await guild.channels.fetch(channelId);
+            channelResults.push(`✅ ${label}`);
+          } catch (err) {
+            channelResults.push(`❌ ${label} (${err.message})`);
+          }
+        }
+
+        const uptimeSeconds = Math.floor(client.uptime / 1000);
+        const uptimeStr = `${Math.floor(uptimeSeconds / 3600)}ч ${Math.floor((uptimeSeconds % 3600) / 60)}м`;
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🩺 Статус бота')
+          .addFields(
+            { name: 'База данных', value: dbStatus, inline: false },
+            { name: 'Доступ к каналам', value: channelResults.join('\n').slice(0, 1024), inline: false },
+            { name: 'Работает без перезапуска', value: uptimeStr, inline: true },
+            { name: 'WebSocket', value: `${client.ws.ping >= 0 ? client.ws.ping : '—'} мс`, inline: true },
+          );
+
+        await interaction.editReply({ embeds: [embed] });
         return;
       }
 
@@ -1678,6 +2059,7 @@ client.on('interactionCreate', async (interaction) => {
           } catch (_) {
             // закрытые ЛС и т.п.
           }
+          await sleep(500);
         }
 
         await logAudit(guild, interaction.user, 'Рассылка правил', query ? `Одному: ${targets[0].name}` : `Всем участникам (${sent}/${targets.length})`);
@@ -1930,6 +2312,7 @@ client.on('interactionCreate', async (interaction) => {
             await member.send(pending.text);
             sent++;
           } catch (_) {}
+          await sleep(500);
         }
 
         await logAudit(guild, interaction.user, 'Рассылка сообщения', `${scope === 'all' ? `Всем (${sent}/${targets.length})` : `Одному: <@${pending.targetId}>`}\n> ${pending.text.slice(0, 300)}`);
@@ -2004,6 +2387,20 @@ client.on('interactionCreate', async (interaction) => {
         if (existing) {
           return interaction.showModal(buildPassportRequestModal());
         }
+
+        const lastRejected = await db.get(
+          `SELECT * FROM applications WHERE discord_id = ? AND status = 'rejected' ORDER BY id DESC LIMIT 1`,
+          [interaction.user.id],
+        );
+        if (lastRejected) {
+          const cooldownMs = APPLICATION_COOLDOWN_HOURS * 60 * 60 * 1000;
+          const elapsed = Date.now() - new Date(lastRejected.created_at).getTime();
+          if (elapsed < cooldownMs) {
+            const retryAt = Math.floor((new Date(lastRejected.created_at).getTime() + cooldownMs) / 1000);
+            return safeReply(interaction, `⛔ Ваша прошлая заявка была отклонена. Подать новую можно будет <t:${retryAt}:R>.`);
+          }
+        }
+
         return interaction.showModal(buildApplicationModal('modal_apply'));
       }
 
@@ -2023,6 +2420,7 @@ client.on('interactionCreate', async (interaction) => {
         const identity = await passportsLib.computeEffectiveIdentity(discordId);
         if (identity) {
           await passportsLib.updatePassportFields(discordId, identity.static, { vacation_until: null });
+          await history.logStatusRevoked('vacation', discordId, identity.static, identity.name, discordId);
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
@@ -2103,7 +2501,7 @@ client.on('interactionCreate', async (interaction) => {
 
         await passportsLib.updatePassportFields(reqRow.discord_id, reqRow.target_static, { name: reqRow.new_name });
         await syncEffectiveIdentity(guild, reqRow.discord_id);
-        await syncProfileChannelName(guild, reqRow.discord_id);
+        await syncProfileChannelName(guild, reqRow.discord_id, reqRow.target_static);
         await safeUpdateMembersList(guild);
         await db.run('UPDATE data_change_requests SET status = ? WHERE id = ?', ['accepted', reqId]);
 
@@ -2186,8 +2584,11 @@ client.on('interactionCreate', async (interaction) => {
         }
         await db.run('UPDATE passport_requests SET status = ?, accepted_by = ? WHERE id = ?', ['accepted', interaction.user.id, reqId]);
         await syncEffectiveIdentity(guild, reqRow.discord_id);
-        await syncProfileChannelName(guild, reqRow.discord_id);
         await history.logJoined(reqRow.discord_id, reqRow.static, reqRow.name, `Добавлен паспорт по заявке #${reqId}`);
+        const newPassportChannelUrl = await createProfileThread(guild, reqRow.discord_id, reqRow.name, reqRow.static);
+        if (newPassportChannelUrl) {
+          await dmUser(guild, reqRow.discord_id, `📸 Канал с отчётами для паспорта № ${reqRow.static}: ${newPassportChannelUrl}`);
+        }
         await safeUpdateMembersList(guild);
 
         await refreshReviewMessage(
@@ -2251,12 +2652,15 @@ client.on('interactionCreate', async (interaction) => {
 
       if (id.startsWith('my_profile:')) {
         const discordId = id.split(':')[1];
-        if (interaction.user.id !== discordId) {
+        const isOwnerOfChannel = interaction.user.id === discordId;
+        const isManagement = perms.canReview(interaction.member);
+        if (!isOwnerOfChannel && !isManagement) {
           return safeReply(interaction, '⛔ Это не ваш профиль.');
         }
-        const embed = await buildProfileEmbed(guild, discordId);
-        if (!embed) return safeReply(interaction, 'Профиль не найден.');
-        return safeReply(interaction, { embeds: [embed] }); // без кнопок управления — только просмотр
+        const embeds = await buildProfileEmbeds(guild, discordId);
+        if (!embeds) return safeReply(interaction, 'Профиль не найден.');
+        // Руководству — с кнопками управления, самому человеку — только просмотр
+        return safeReply(interaction, isManagement ? { embeds, components: buildProfileComponents(discordId) } : { embeds });
       }
 
       if (id.startsWith('profile_action:')) {
@@ -2337,18 +2741,6 @@ client.on('interactionCreate', async (interaction) => {
         const modal = new ModalBuilder().setCustomId('modal_blacklist_search').setTitle('Поиск в ЧС');
         modal.addComponents(row(txt(null, 'query', 'Тег / ID / № Паспорта / Причина')));
         return interaction.showModal(modal);
-      }
-
-      if (id === 'blacklist_prev') {
-        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
-        await interaction.deferUpdate();
-        return changeBlacklistPage(guild, -1);
-      }
-
-      if (id === 'blacklist_next') {
-        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
-        await interaction.deferUpdate();
-        return changeBlacklistPage(guild, 1);
       }
 
       if (id.startsWith('blacklist_confirm_remove:')) {
@@ -2434,9 +2826,14 @@ client.on('interactionCreate', async (interaction) => {
         if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
         const discordId = customId.split(':')[1];
         const staticValue = interaction.values[0];
+        const passports = await passportsLib.getAllPassports(discordId);
+        const removedPassport = passports.find((p) => p.static === staticValue);
         await passportsLib.removeExtraPassport(discordId, staticValue);
+        if (removedPassport) {
+          await history.logLeft(discordId, removedPassport.static, removedPassport.name, 'Паспорт удалён вручную');
+          await archiveProfileChannel(guild, discordId, removedPassport.profile_thread_id);
+        }
         await syncEffectiveIdentity(guild, discordId);
-        await syncProfileChannelName(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Паспорт удалён', `<@${discordId}>: № ${staticValue}`);
         return safeReply(interaction, 'Паспорт удалён.');
@@ -2479,7 +2876,10 @@ client.on('interactionCreate', async (interaction) => {
         for (const staticValue of interaction.values) {
           const passport = (await passportsLib.getAllPassports(discordId)).find((p) => p.static === staticValue);
           await passportsLib.updatePassportFields(discordId, staticValue, { vacation_until: null });
-          if (passport) removedNames.push(`${passport.name} (№ ${passport.static})`);
+          if (passport) {
+            removedNames.push(`${passport.name} (№ ${passport.static})`);
+            await history.logStatusRevoked('vacation', discordId, staticValue, passport.name, interaction.user.id);
+          }
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
@@ -2501,7 +2901,10 @@ client.on('interactionCreate', async (interaction) => {
         for (const staticValue of interaction.values) {
           const passport = (await passportsLib.getAllPassports(discordId)).find((p) => p.static === staticValue);
           await passportsLib.updatePassportFields(discordId, staticValue, { afk_since: null });
-          if (passport) removedNames.push(`${passport.name} (№ ${passport.static})`);
+          if (passport) {
+            removedNames.push(`${passport.name} (№ ${passport.static})`);
+            await history.logStatusRevoked('afk', discordId, staticValue, passport.name, interaction.user.id);
+          }
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
@@ -2601,7 +3004,6 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await syncEffectiveIdentity(guild, discordId);
-        await syncProfileChannelName(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(
           guild,
@@ -2742,6 +3144,9 @@ client.on('interactionCreate', async (interaction) => {
       if (id === 'modal_passport_request') {
         const name = normalizeName(get('name'));
         const staticValue = get('static');
+        if (!isValidStatic(staticValue)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         if (await passportsLib.isStaticTaken(staticValue)) {
           return safeReply(interaction, 'Такой № Паспорта уже используется.');
         }
@@ -2785,6 +3190,10 @@ client.on('interactionCreate', async (interaction) => {
           status: 'pending',
           created_at: new Date().toISOString(),
         };
+
+        if (!isValidStatic(app.static)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
 
         const blacklisted = await db.get('SELECT * FROM blacklist WHERE discord_id = ? OR static = ?', [app.discord_id, app.static]);
         if (blacklisted) {
@@ -2857,7 +3266,7 @@ client.on('interactionCreate', async (interaction) => {
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
         if (!app || app.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
         const reason = get('reason');
-        await db.run('UPDATE applications SET status = ?, reject_reason = ? WHERE id = ?', ['rejected', reason, appId]);
+        await db.run('UPDATE applications SET status = ?, reject_reason = ?, rejected_by = ? WHERE id = ?', ['rejected', reason, interaction.user.id, appId]);
         await refreshReviewMessage(
           interaction.channel,
           app.message_id,
@@ -2911,6 +3320,9 @@ client.on('interactionCreate', async (interaction) => {
       if (id.startsWith('modal_apply_edit:')) {
         const appId = id.split(':')[1];
         const fields = { name: normalizeName(get('name')), static: get('static'), lvl: parseInt(get('lvl'), 10) || 0, skills: get('skills'), invited_by: get('invited_by') || '' };
+        if (!isValidStatic(fields.static)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         await db.run('UPDATE applications SET name = ?, static = ?, lvl = ?, skills = ?, invited_by = ? WHERE id = ?', [
           fields.name, fields.static, fields.lvl, fields.skills, fields.invited_by, appId,
         ]);
@@ -2928,6 +3340,9 @@ client.on('interactionCreate', async (interaction) => {
         if (!app || app.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
 
         const fields = { name: normalizeName(get('name')), static: get('static'), lvl: parseInt(get('lvl'), 10) || 0, skills: get('skills'), invited_by: get('invited_by') || '' };
+        if (!isValidStatic(fields.static)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
 
         const blacklisted = await db.get('SELECT * FROM blacklist WHERE discord_id = ? OR static = ?', [app.discord_id, fields.static]);
         if (blacklisted) {
@@ -2962,7 +3377,6 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await syncEffectiveIdentity(guild, app.discord_id);
-        await syncProfileChannelName(guild, app.discord_id);
         await history.logJoined(app.discord_id, fields.static, fields.name, `Принята заявка #${appId}`);
         const profileChannelUrl = await createProfileThread(guild, app.discord_id, fields.name, fields.static);
 
@@ -3086,6 +3500,9 @@ client.on('interactionCreate', async (interaction) => {
         const hasDiscord = rawDiscordId.length > 0;
         const rawStatic = get('static').trim();
         const hasStatic = rawStatic.length > 0;
+        if (hasStatic && !isValidStatic(rawStatic)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         const rawName = normalizeName(get('name'));
         const fields = {
           name: rawName || 'Без имени',
@@ -3125,7 +3542,6 @@ client.on('interactionCreate', async (interaction) => {
             await member.roles.add(config.ROLE_APPLY);
           } catch (_) {}
           await syncEffectiveIdentity(guild, fields.discord_id);
-          await syncProfileChannelName(guild, fields.discord_id);
           await history.logJoined(fields.discord_id, fields.static, fields.name, 'Добавлен(а) вручную');
           const profileChannelUrl = await createProfileThread(guild, fields.discord_id, fields.name, fields.static);
           if (profileChannelUrl) {
@@ -3154,6 +3570,9 @@ client.on('interactionCreate', async (interaction) => {
 
         const dupId = await db.get('SELECT id FROM participants WHERE discord_id = ? AND discord_id != ?', [fields.discord_id, discordId]);
         if (dupId) return safeReply(interaction, 'Такой Discord ID уже используется другим участником.');
+        if (!isValidStatic(fields.static)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         if (await passportsLib.isStaticTaken(fields.static, discordId)) {
           return safeReply(interaction, 'Такой № Паспорта уже занят другим участником.');
         }
@@ -3163,7 +3582,7 @@ client.on('interactionCreate', async (interaction) => {
         ]);
 
         await syncEffectiveIdentity(guild, fields.discord_id);
-        await syncProfileChannelName(guild, fields.discord_id);
+        await syncProfileChannelName(guild, fields.discord_id, fields.static);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Данные участника изменены', `${fields.name} (<@${fields.discord_id}>)`);
         return safeReply(interaction, 'Данные участника обновлены.');
@@ -3244,6 +3663,9 @@ client.on('interactionCreate', async (interaction) => {
         const discordId = id.split(':')[1];
         const name = normalizeName(get('name'));
         const staticValue = get('static');
+        if (!isValidStatic(staticValue)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         if (await passportsLib.isStaticTaken(staticValue)) {
           return safeReply(interaction, 'Такой № Паспорта уже используется.');
         }
@@ -3253,8 +3675,11 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, `⛔ ${err.message}`);
         }
         await syncEffectiveIdentity(guild, discordId);
-        await syncProfileChannelName(guild, discordId);
         await history.logJoined(discordId, staticValue, name, 'Паспорт добавлен вручную');
+        const newPassportChannelUrl = await createProfileThread(guild, discordId, name, staticValue);
+        if (newPassportChannelUrl) {
+          await dmUser(guild, discordId, `📸 Канал с отчётами для паспорта № ${staticValue}: ${newPassportChannelUrl}`);
+        }
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'Паспорт добавлен', `<@${discordId}>: ${name} — № ${staticValue}`);
         return safeReply(interaction, 'Паспорт добавлен.');
@@ -3346,6 +3771,7 @@ client.on('interactionCreate', async (interaction) => {
         const discordId = parts[1];
         const staticsCsv = parts[2];
         const deadline = parseDeadline(get('deadline'));
+        const reason = get('reason') || '';
         if (!deadline) {
           return safeReply(interaction, '⛔ Неверный формат. Используйте ДД.ММ.ГГГГ (будущая дата) или число+d, например 7d.');
         }
@@ -3355,15 +3781,16 @@ client.on('interactionCreate', async (interaction) => {
 
         for (const p of targets) {
           await passportsLib.updatePassportFields(discordId, p.static, { vacation_until: deadline.toISOString() });
+          await history.logStatusGranted('vacation', discordId, p.static, p.name, reason, deadline.toISOString(), interaction.user.id);
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
         const names = targets.map((p) => `${p.name} (№ ${p.static})`).join(', ');
         await dmUser(guild, discordId, {
-          content: `🏖️ Вам выдан отпуск до **${formatDateTime(deadline)}** (${names}).`,
+          content: `🏖️ Вам выдан отпуск до **${formatDateTime(deadline)}** (${names}).${reason ? ` Причина: ${reason}` : ''}`,
           components: [row(new ButtonBuilder().setCustomId(`vacation_selfcancel:${discordId}`).setLabel('❌ Отменить отпуск').setStyle(ButtonStyle.Danger))],
         });
-        await logAudit(guild, interaction.user, 'Отпуск выдан', `<@${discordId}> (${names}) до ${formatDateTime(deadline)}`);
+        await logAudit(guild, interaction.user, 'Отпуск выдан', `<@${discordId}> (${names}) до ${formatDateTime(deadline)}${reason ? `. Причина: ${reason}` : ''}`);
         return safeReply(interaction, `Отпуск выдан: ${names}.`);
       }
 
@@ -3373,6 +3800,7 @@ client.on('interactionCreate', async (interaction) => {
         const discordId = parts[1];
         const staticsCsv = parts[2];
         const date = parseDateOnly(get('date'));
+        const reason = get('reason') || '';
         if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ.');
 
         const passports = await passportsLib.getAllPassports(discordId);
@@ -3381,6 +3809,7 @@ client.on('interactionCreate', async (interaction) => {
 
         for (const p of targets) {
           await passportsLib.updatePassportFields(discordId, p.static, { afk_since: formatDateOnly(date) });
+          await history.logStatusGranted('afk', discordId, p.static, p.name, reason, null, interaction.user.id);
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
@@ -3388,7 +3817,7 @@ client.on('interactionCreate', async (interaction) => {
         await dmUser(
           guild,
           discordId,
-          `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}. Пожалуйста, зайдите в игру под именем **${names}**, чтобы статус отобразился.`,
+          `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}.${reason ? ` Причина: ${reason}.` : ''} Пожалуйста, зайдите в игру под именем **${names}**, чтобы статус отобразился.`,
         );
         await logAudit(guild, interaction.user, 'AFK выставлен', `<@${discordId}> (${names}) с ${formatDateOnly(date)}`);
         return safeReply(interaction, `Статус AFK выставлен: ${names}.`);
@@ -3399,6 +3828,9 @@ client.on('interactionCreate', async (interaction) => {
         if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
         const discordId = get('discord_id').trim();
         const staticValue = get('static') || '';
+        if (staticValue && !isValidStatic(staticValue)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         const reason = get('reason') || '';
         let discordTag = discordId;
         try {
@@ -3424,6 +3856,9 @@ client.on('interactionCreate', async (interaction) => {
         if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
         const name = normalizeName(get('name')) || '';
         const staticValue = get('static');
+        if (!isValidStatic(staticValue)) {
+          return safeReply(interaction, '⛔ № Паспорта должен состоять только из цифр.');
+        }
         const reason = get('reason') || '';
         const syntheticId = `nodiscord-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const tag = name || `паспорт № ${staticValue}`;
@@ -3649,7 +4084,11 @@ client.on('messageCreate', async (message) => {
       .map((a) => a.url);
     if (imageUrls.length === 0) return;
 
-    const participant = await db.get('SELECT * FROM participants WHERE profile_thread_id = ?', [message.channel.id]);
+    let participant = await db.get('SELECT * FROM participants WHERE profile_thread_id = ?', [message.channel.id]);
+    if (!participant) {
+      const extra = await db.get('SELECT discord_id FROM extra_passports WHERE profile_thread_id = ?', [message.channel.id]);
+      if (extra) participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [extra.discord_id]);
+    }
     if (!participant) return;
     if (message.author.id !== participant.discord_id) return; // считаем только скриншоты владельца профиля
 
@@ -3681,7 +4120,16 @@ client.once('ready', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
   await db.init();
   await registerCommands();
-  backup.scheduleDailyBackup();
+  backup.scheduleDailyBackup(async (text) => {
+    console.error('Ошибка бэкапа:', text);
+    try {
+      if (!process.env.GUILD_ID) return;
+      const guild = await client.guilds.fetch(process.env.GUILD_ID);
+      await logAudit(guild, client.user, '⚠️ Сбой резервного копирования БД', text);
+    } catch (err) {
+      console.error('Не удалось отправить уведомление о сбое бэкапа в аудит:', err.message);
+    }
+  });
 
   // Раз в час проверяем, не пробыл ли кто-то из "ожидающих" приглашённых
   // нужный срок, оставаясь в организации (без этого события выхода не было
@@ -3695,6 +4143,7 @@ client.once('ready', async () => {
         await invitationsDisplay.safeUpdateInvitations(guild);
         await applicationsDisplay.safeUpdateApplicationsStats(guild);
         await checkVacationReminders(guild);
+        await checkHrReminder(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);
