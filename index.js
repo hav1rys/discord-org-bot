@@ -1027,6 +1027,10 @@ const commands = [
     .setName('giveaway_cancel')
     .setDescription('Отменить розыгрыш без выбора победителей')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш отменить').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('giveaway_participants')
+    .setDescription('Показать, кто участвует (или участвовал) в розыгрыше')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true)),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -1741,15 +1745,22 @@ client.on('interactionCreate', async (interaction) => {
 
     // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
     if (interaction.isAutocomplete()) {
-      if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel' || interaction.commandName === 'giveaway_reroll') {
-        const status = interaction.commandName === 'giveaway_reroll' ? 'ended' : 'active';
+      if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel' || interaction.commandName === 'giveaway_reroll' || interaction.commandName === 'giveaway_participants') {
         const focused = interaction.options.getFocused();
+        let statusClause = '';
+        let params = [`%${focused}%`];
+        if (interaction.commandName === 'giveaway_reroll') {
+          statusClause = "AND status = 'ended'";
+        } else if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel') {
+          statusClause = "AND status = 'active'";
+        } // giveaway_participants — любой статус, без фильтра
         const rows = await db.all(
-          `SELECT * FROM giveaways WHERE status = ? AND prize LIKE ? ORDER BY id DESC LIMIT 25`,
-          [status, `%${focused}%`],
+          `SELECT * FROM giveaways WHERE prize LIKE ? ${statusClause} ORDER BY id DESC LIMIT 25`,
+          params,
         );
+        const statusLabels = { active: '🟢 идёт', ended: '⚪ завершён', cancelled: '❌ отменён' };
         const choices = rows.map((g) => ({
-          name: `${g.prize} (до ${formatDateTime(new Date(g.ends_at))})`.slice(0, 100),
+          name: `${g.prize} — ${statusLabels[g.status] || g.status}`.slice(0, 100),
           value: String(g.id),
         }));
         try {
@@ -2359,6 +2370,40 @@ client.on('interactionCreate', async (interaction) => {
         const giveawayId = interaction.options.getString('розыгрыш');
         const cancelled = await cancelGiveaway(guild, giveawayId, interaction.user);
         await interaction.editReply(cancelled ? 'Розыгрыш отменён.' : '⛔ Розыгрыш не найден или уже завершён.');
+        return;
+      }
+
+      if (cmd === 'giveaway_participants') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway) {
+          await interaction.editReply('⛔ Розыгрыш не найден.');
+          return;
+        }
+        const entries = await giveaways.getEntries(giveawayId);
+        const statusLabels = { active: '🟢 Идёт', ended: '⚪ Завершён', cancelled: '❌ Отменён' };
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`🎉 Участники: ${giveaway.prize}`)
+          .addFields(
+            { name: 'Статус', value: statusLabels[giveaway.status] || giveaway.status, inline: true },
+            { name: 'Победителей', value: String(giveaway.winners_count), inline: true },
+            { name: 'Всего участников', value: String(entries.length), inline: true },
+          );
+        if (entries.length > 0) {
+          const list = entries.map((discordId, i) => `${i + 1}. <@${discordId}>`).join('\n');
+          embed.addFields({ name: 'Список', value: list.slice(0, 4000) });
+          if (list.length > 4000) {
+            embed.setFooter({ text: 'Список обрезан — слишком много участников для одного сообщения.' });
+          }
+        } else {
+          embed.addFields({ name: 'Список', value: 'Пока никто не участвует.' });
+        }
+        await interaction.editReply({ embeds: [embed] });
         return;
       }
 
