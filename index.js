@@ -107,6 +107,62 @@ async function resolveGuild(interaction) {
 
 const mentionOpts = { allowedMentions: { roles: config.ROLES_REVIEW_ALLOWED } };
 
+// Справочные таблицы для /помощь и /права_команд — держать в актуальном
+// состоянии вручную при добавлении новых команд.
+const COMMAND_CATEGORIES = [
+  {
+    title: '👤 Участники и паспорта',
+    commands: ['история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk'],
+  },
+  {
+    title: '📄 Контракты и приглашения',
+    commands: ['топ_контракты', 'топ_приглашения'],
+  },
+  {
+    title: '🎉 Розыгрыши',
+    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники'],
+  },
+  {
+    title: '📢 Тексты и рассылки',
+    commands: ['правила', 'правила_обновить', 'правила_разослать', 'агитация', 'агитация_обновить', 'hr_вакансия', 'hr_вакансия_обновить', 'рассылка_сообщение', 'каналы_отчётов', 'предпросмотр'],
+  },
+  {
+    title: '⚙️ Управление организацией',
+    commands: ['меню_создать', 'профили_восстановить'],
+  },
+  {
+    title: '🛠️ Настройки бота',
+    commands: ['настройка_изменить', 'настройка_показать', 'настройка_переключить'],
+  },
+  {
+    title: '💾 Резервные копии',
+    commands: ['бэкап_сейчас', 'бэкапы_список'],
+  },
+  {
+    title: '🩺 Диагностика и отчётность',
+    commands: ['пинг', 'статус', 'статистика_организации', 'экспорт_id', 'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт'],
+  },
+  {
+    title: '❔ Справка',
+    commands: ['помощь', 'права_команд'],
+  },
+];
+
+// Уровни доступа — сверены с проверками прав в обработчиках команд
+const PERMISSION_TIERS = {
+  'Все с доступом к боту (роль `+`, Владелец, Admin)': ['пинг', 'меню_создать', 'помощь', 'права_команд'],
+  'Владелец / Зам. Владелец / HR-Менеджер (проверка заявок)': ['топ_приглашения'],
+  'Владелец / Зам. Владелец': [
+    'история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk', 'топ_контракты',
+    'розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники',
+    'правила', 'правила_обновить', 'правила_разослать', 'агитация', 'агитация_обновить',
+    'hr_вакансия', 'hr_вакансия_обновить', 'рассылка_сообщение', 'каналы_отчётов', 'предпросмотр',
+    'профили_восстановить', 'настройка_изменить', 'настройка_показать', 'настройка_переключить',
+    'бэкап_сейчас', 'бэкапы_список', 'статус', 'статистика_организации', 'экспорт_id',
+    'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт',
+  ],
+};
+
 async function getCurrentText(key, fallback) {
   const v = await contentVersions.getLatestVersion(key);
   return v ? v.content : fallback;
@@ -949,7 +1005,7 @@ function buildBlacklistRemoveModal() {
 const commands = [
   new SlashCommandBuilder()
     .setName('меню_создать')
-    .setDescription('Инициализировать меню заявок и список участников'),
+    .setDescription('Инициализировать все меню, статистику и FAQ в соответствующих каналах'),
   new SlashCommandBuilder()
     .setName('правила')
     .setDescription('Отправить текущий свод правил в канал правил'),
@@ -1013,7 +1069,7 @@ const commands = [
     .setDescription('Проверка здоровья бота: БД, доступ к ключевым каналам, время работы'),
   new SlashCommandBuilder()
     .setName('экспорт_id')
-    .setDescription('Выгрузить названия и ID всех каналов и ролей сервера в файл'),
+    .setDescription('Выгрузить названия, ID и права доступа всех каналов и ролей сервера в файл'),
   new SlashCommandBuilder()
     .setName('розыгрыш_старт')
     .setDescription('Запустить розыгрыш')
@@ -1081,6 +1137,26 @@ const commands = [
     .setName('аудит_экспорт')
     .setDescription('Выгрузить лог аудита в .csv за период')
     .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 30)').setRequired(false).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName('помощь')
+    .setDescription('Список всех команд бота по темам'),
+  new SlashCommandBuilder()
+    .setName('права_команд')
+    .setDescription('Какая роль нужна для каждой команды'),
+  new SlashCommandBuilder()
+    .setName('паспорт_история')
+    .setDescription('История изменений конкретного паспорта (смена Имени Фамилии, вступление/увольнение)')
+    .addStringOption((opt) => opt.setName('паспорт').setDescription('№ Паспорта').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('предпросмотр')
+    .setDescription('Показать себе, как выглядит текущий текст, прежде чем рассылать всем')
+    .addStringOption((opt) =>
+      opt.setName('тип').setDescription('Какой текст показать').setRequired(true).addChoices(
+        { name: 'Правила', value: 'rules' },
+        { name: 'Агитация', value: 'agitation' },
+        { name: 'Вакансия HR', value: 'hr_info' },
+      ),
+    ),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -1795,6 +1871,20 @@ client.on('interactionCreate', async (interaction) => {
 
     // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
     if (interaction.isAutocomplete()) {
+      if (interaction.commandName === 'паспорт_история') {
+        const focused = interaction.options.getFocused();
+        const q = `%${focused}%`;
+        const rows = await db.all(
+          `SELECT DISTINCT static, name FROM membership_events WHERE static LIKE ? OR name LIKE ? ORDER BY id DESC LIMIT 25`,
+          [q, q],
+        );
+        const choices = rows.map((r) => ({ name: `№ ${r.static} — ${r.name}`.slice(0, 100), value: r.static }));
+        try {
+          await interaction.respond(choices);
+        } catch (_) {}
+        return;
+      }
+
       if (interaction.commandName === 'настройка_изменить' || interaction.commandName === 'настройка_показать') {
         const focused = interaction.options.getFocused().toLowerCase();
         const keys = configStore.getSettableKeys().filter((k) => k.toLowerCase().includes(focused));
@@ -2669,6 +2759,90 @@ client.on('interactionCreate', async (interaction) => {
         const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `audit_${days}d.csv` });
         await logAudit(guild, interaction.user, 'Экспорт аудита', `За последние ${days} дней, записей: ${rows.length}`);
         await interaction.editReply({ content: `Аудит за последние ${days} дней (${rows.length} записей):`, files: [file] });
+        return;
+      }
+
+      if (cmd === 'помощь') {
+        if (!perms.hasBotAccess(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const descByName = new Map(commands.map((c) => [c.name, c.description]));
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📖 Все команды бота');
+        for (const cat of COMMAND_CATEGORIES) {
+          const lines = cat.commands.map((name) => `\`/${name}\` — ${descByName.get(name) || '—'}`);
+          embed.addFields({ name: cat.title, value: lines.join('\n').slice(0, 1024) });
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'права_команд') {
+        if (!perms.hasBotAccess(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔐 Права доступа к командам');
+        for (const [tier, cmdNames] of Object.entries(PERMISSION_TIERS)) {
+          const lines = cmdNames.map((name) => `\`/${name}\``).join(', ');
+          embed.addFields({ name: tier, value: lines.slice(0, 1024) });
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'паспорт_история') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const staticValue = interaction.options.getString('паспорт').trim();
+
+        const changes = await db.all(
+          `SELECT * FROM data_change_requests WHERE target_static = ? ORDER BY id ASC`,
+          [staticValue],
+        );
+        const events = await db.all(
+          `SELECT * FROM membership_events WHERE static = ? ORDER BY at ASC`,
+          [staticValue],
+        );
+
+        if (changes.length === 0 && events.length === 0) {
+          await interaction.editReply(`По паспорту № ${staticValue} истории не найдено.`);
+          return;
+        }
+
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(`История паспорта № ${staticValue}`);
+
+        if (events.length > 0) {
+          const lines = events.map((e) => `${e.event === 'joined' ? '✅ Вступил(а)' : '🚫 Покинул(а)'} — ${e.name} — ${formatDateTime(new Date(e.at))}${e.note ? `: ${e.note}` : ''}`);
+          embed.addFields({ name: 'Вступление/увольнение', value: lines.join('\n').slice(0, 1024) });
+        }
+
+        if (changes.length > 0) {
+          const lines = changes
+            .filter((c) => c.status === 'accepted')
+            .map((c) => `«${c.old_name}» → «${c.new_name}» — ${formatDateTime(new Date(c.created_at))}`);
+          if (lines.length > 0) {
+            embed.addFields({ name: 'Смена Имени Фамилии', value: lines.join('\n').slice(0, 1024) });
+          }
+        }
+
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'предпросмотр') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const type = interaction.options.getString('тип');
+        const defaults = { rules: DEFAULT_RULES, agitation: DEFAULT_AGITATION, hr_info: DEFAULT_HR_INFO };
+        const titles = { rules: '📕 Свод правил (предпросмотр)', agitation: '🗣️ Агитация (предпросмотр)', hr_info: '📋 Вакансия HR (предпросмотр)' };
+        const text = await getCurrentText(type, defaults[type]);
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(titles[type]).setDescription(text.slice(0, 4000));
+        await interaction.editReply({ content: 'Вот как это выглядит сейчас — видите только вы, никому не отправлено:', embeds: [embed] });
         return;
       }
 
