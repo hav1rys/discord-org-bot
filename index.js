@@ -948,106 +948,106 @@ function buildBlacklistRemoveModal() {
 
 const commands = [
   new SlashCommandBuilder()
-    .setName('init_menus')
+    .setName('меню_создать')
     .setDescription('Инициализировать меню заявок и список участников'),
   new SlashCommandBuilder()
-    .setName('rules')
+    .setName('правила')
     .setDescription('Отправить текущий свод правил в канал правил'),
   new SlashCommandBuilder()
-    .setName('rules_update')
+    .setName('правила_обновить')
     .setDescription('Обновить свод правил'),
   new SlashCommandBuilder()
-    .setName('rules_broadcast')
+    .setName('правила_разослать')
     .setDescription('Разослать свод правил в ЛС — всем в организации или одному человеку')
     .addStringOption((opt) =>
       opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false).setAutocomplete(true),
     ),
   new SlashCommandBuilder()
-    .setName('broadcast_message')
+    .setName('рассылка_сообщение')
     .setDescription('Отправить произвольное сообщение в ЛС от имени бота — всем или одному человеку'),
   new SlashCommandBuilder()
-    .setName('agitation')
+    .setName('агитация')
     .setDescription('Отправить текущую агитацию в канал агитации'),
   new SlashCommandBuilder()
-    .setName('agitation_update')
+    .setName('агитация_обновить')
     .setDescription('Обновить текст агитации'),
   new SlashCommandBuilder()
-    .setName('hr_info')
+    .setName('hr_вакансия')
     .setDescription('Отправить текущее описание вакансии HR-Менеджера в канал'),
   new SlashCommandBuilder()
-    .setName('hr_info_update')
+    .setName('hr_вакансия_обновить')
     .setDescription('Обновить описание вакансии HR-Менеджера'),
   new SlashCommandBuilder()
-    .setName('ping')
+    .setName('пинг')
     .setDescription('Проверить скорость отклика бота (Discord, база данных)'),
   new SlashCommandBuilder()
-    .setName('backfill_profiles')
+    .setName('профили_восстановить')
     .setDescription('Создать каналы-профили для всех, у кого их ещё нет, и заполнить дату вступления'),
   new SlashCommandBuilder()
-    .setName('history')
+    .setName('история')
     .setDescription('Полная история вступлений/увольнений человека')
     .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('contracts_leaderboard')
+    .setName('топ_контракты')
     .setDescription('Топ по контрактам за всё время'),
   new SlashCommandBuilder()
-    .setName('audit_search')
+    .setName('аудит_поиск')
     .setDescription('Поиск по логу аудита')
     .addStringOption((opt) => opt.setName('запрос').setDescription('Текст для поиска в действии/деталях/инициаторе').setRequired(true)),
   new SlashCommandBuilder()
-    .setName('whois')
+    .setName('кто_это')
     .setDescription('Быстрый поиск участника')
     .addStringOption((opt) => opt.setName('запрос').setDescription('№ Паспорта / Discord тег / Имя Фамилия').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('export_stats')
+    .setName('экспорт_статистика')
     .setDescription('Выгрузить статистику текущей недели (контракты/приглашения/заявки) в .csv'),
   new SlashCommandBuilder()
-    .setName('send_report_channels')
+    .setName('каналы_отчётов')
     .setDescription('Отправить в ЛС ссылки на каналы с отчётами — одному человеку или всем в организации')
     .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, отправит всем').setRequired(false).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('org_stats')
+    .setName('статистика_организации')
     .setDescription('Общая сводка по организации: люди, отпуск/AFK, контракты за неделю, очередь заявок'),
   new SlashCommandBuilder()
-    .setName('status')
+    .setName('статус')
     .setDescription('Проверка здоровья бота: БД, доступ к ключевым каналам, время работы'),
   new SlashCommandBuilder()
-    .setName('export_ids')
+    .setName('экспорт_id')
     .setDescription('Выгрузить названия и ID всех каналов и ролей сервера в файл'),
   new SlashCommandBuilder()
-    .setName('giveaway_start')
+    .setName('розыгрыш_старт')
     .setDescription('Запустить розыгрыш')
     .addStringOption((opt) => opt.setName('приз').setDescription('Что разыгрывается').setRequired(true))
     .addStringOption((opt) => opt.setName('длительность').setDescription('Например: 30m, 2h, 1d, 1w').setRequired(true))
     .addIntegerOption((opt) => opt.setName('победителей').setDescription('Сколько победителей').setRequired(true).setMinValue(1))
     .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправить (по умолчанию — этот канал)').setRequired(false)),
   new SlashCommandBuilder()
-    .setName('giveaway_end')
+    .setName('розыгрыш_завершить')
     .setDescription('Досрочно завершить розыгрыш и выбрать победителей')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш завершить').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('giveaway_reroll')
+    .setName('розыгрыш_реролл')
     .setDescription('Выбрать новых победителей уже завершённого розыгрыша')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш перевыбрать').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('giveaway_cancel')
+    .setName('розыгрыш_отменить')
     .setDescription('Отменить розыгрыш без выбора победителей')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш отменить').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('giveaway_participants')
+    .setName('розыгрыш_участники')
     .setDescription('Показать, кто участвует (или участвовал) в розыгрыше')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('config_set')
+    .setName('настройка_изменить')
     .setDescription('Изменить настройку бота (ID канала/роли, число) без правки кода')
     .addStringOption((opt) => opt.setName('ключ').setDescription('Какую настройку менять').setRequired(true).setAutocomplete(true))
     .addStringOption((opt) => opt.setName('значение').setDescription('Новое значение (или "сброс", чтобы вернуть по умолчанию)').setRequired(true)),
   new SlashCommandBuilder()
-    .setName('config_get')
+    .setName('настройка_показать')
     .setDescription('Посмотреть текущее значение настройки')
     .addStringOption((opt) => opt.setName('ключ').setDescription('Какую настройку посмотреть — если пусто, покажет все переопределённые').setRequired(false).setAutocomplete(true)),
   new SlashCommandBuilder()
-    .setName('settings_toggle')
+    .setName('настройка_переключить')
     .setDescription('Включить/выключить приём заявок, контрактов или напоминаний')
     .addStringOption((opt) =>
       opt.setName('функция').setDescription('Что переключить').setRequired(true).addChoices(
@@ -1063,22 +1063,22 @@ const commands = [
       ),
     ),
   new SlashCommandBuilder()
-    .setName('vacation_calendar')
+    .setName('отпуска_календарь')
     .setDescription('Кто сейчас в отпуске и до какого числа'),
   new SlashCommandBuilder()
-    .setName('afk_list')
+    .setName('список_afk')
     .setDescription('Кто сейчас AFK'),
   new SlashCommandBuilder()
-    .setName('invitations_leaderboard')
+    .setName('топ_приглашения')
     .setDescription('Топ по приглашениям за всё время'),
   new SlashCommandBuilder()
-    .setName('backup_now')
+    .setName('бэкап_сейчас')
     .setDescription('Сделать резервную копию БД прямо сейчас'),
   new SlashCommandBuilder()
-    .setName('backup_list')
+    .setName('бэкапы_список')
     .setDescription('Список доступных резервных копий БД'),
   new SlashCommandBuilder()
-    .setName('audit_export')
+    .setName('аудит_экспорт')
     .setDescription('Выгрузить лог аудита в .csv за период')
     .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 30)').setRequired(false).setMinValue(1)),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
@@ -1320,7 +1320,7 @@ async function initMenus(guild) {
 
   await safeInitStep('канал заявки на HR', async () => {
     const hrApplyChannel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
-    const hrText = await getCurrentText('hr_info', DEFAULT_HR_INFO);
+    const hrText = await getCurrentText('hr_вакансия', DEFAULT_HR_INFO);
     await sendOrEditMenu(hrApplyChannel, 'hr_apply_menu_message_id', {
       embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(hrText)],
       components: [row(new ButtonBuilder().setCustomId('hr_apply_submit').setLabel('📝 Подать заявку на HR').setStyle(ButtonStyle.Success))],
@@ -1795,7 +1795,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
     if (interaction.isAutocomplete()) {
-      if (interaction.commandName === 'config_set' || interaction.commandName === 'config_get') {
+      if (interaction.commandName === 'настройка_изменить' || interaction.commandName === 'настройка_показать') {
         const focused = interaction.options.getFocused().toLowerCase();
         const keys = configStore.getSettableKeys().filter((k) => k.toLowerCase().includes(focused));
         const choices = keys.slice(0, 25).map((k) => ({ name: `${k} (сейчас: ${config[k]})`.slice(0, 100), value: k }));
@@ -1805,13 +1805,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel' || interaction.commandName === 'giveaway_reroll' || interaction.commandName === 'giveaway_participants') {
+      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники') {
         const focused = interaction.options.getFocused();
         let statusClause = '';
         let params = [`%${focused}%`];
-        if (interaction.commandName === 'giveaway_reroll') {
+        if (interaction.commandName === 'розыгрыш_реролл') {
           statusClause = "AND status = 'ended'";
-        } else if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel') {
+        } else if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить') {
           statusClause = "AND status = 'active'";
         } // giveaway_participants — любой статус, без фильтра
         const rows = await db.all(
@@ -1829,7 +1829,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const autocompleteCommands = ['history', 'whois', 'rules_broadcast', 'send_report_channels'];
+      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов'];
       if (!autocompleteCommands.includes(interaction.commandName)) return;
 
       const focused = interaction.options.getFocused();
@@ -1857,7 +1857,7 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
 
-      if (cmd === 'ping') {
+      if (cmd === 'пинг') {
         if (!perms.hasBotAccess(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -1889,7 +1889,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'backfill_profiles') {
+      if (cmd === 'профили_восстановить') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -1986,7 +1986,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'history') {
+      if (cmd === 'история') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2015,7 +2015,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'contracts_leaderboard') {
+      if (cmd === 'топ_контракты') {
         if (!perms.canReview(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2034,7 +2034,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'audit_search') {
+      if (cmd === 'аудит_поиск') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2059,7 +2059,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'whois') {
+      if (cmd === 'кто_это') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2090,7 +2090,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'export_stats') {
+      if (cmd === 'экспорт_статистика') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2136,7 +2136,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'send_report_channels') {
+      if (cmd === 'каналы_отчётов') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2190,7 +2190,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'org_stats') {
+      if (cmd === 'статистика_организации') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2249,7 +2249,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'status') {
+      if (cmd === 'статус') {
         if (!perms.hasBotAccess(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2299,7 +2299,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'export_ids') {
+      if (cmd === 'экспорт_id') {
         if (!perms.hasBotAccess(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2410,7 +2410,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'giveaway_start') {
+      if (cmd === 'розыгрыш_старт') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2441,7 +2441,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'giveaway_end') {
+      if (cmd === 'розыгрыш_завершить') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2457,7 +2457,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'giveaway_cancel') {
+      if (cmd === 'розыгрыш_отменить') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2468,7 +2468,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'giveaway_participants') {
+      if (cmd === 'розыгрыш_участники') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2502,7 +2502,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'config_set') {
+      if (cmd === 'настройка_изменить') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2526,7 +2526,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'config_get') {
+      if (cmd === 'настройка_показать') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2557,7 +2557,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'settings_toggle') {
+      if (cmd === 'настройка_переключить') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2571,7 +2571,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'vacation_calendar') {
+      if (cmd === 'отпуска_календарь') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2589,7 +2589,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'afk_list') {
+      if (cmd === 'список_afk') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2607,7 +2607,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'invitations_leaderboard') {
+      if (cmd === 'топ_приглашения') {
         if (!perms.canReview(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2623,7 +2623,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'backup_now') {
+      if (cmd === 'бэкап_сейчас') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2634,7 +2634,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'backup_list') {
+      if (cmd === 'бэкапы_список') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2650,7 +2650,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'audit_export') {
+      if (cmd === 'аудит_экспорт') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2673,7 +2673,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
 
-      if (cmd === 'giveaway_reroll') {
+      if (cmd === 'розыгрыш_реролл') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2689,7 +2689,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'init_menus') {
+      if (cmd === 'меню_создать') {
         if (!perms.hasBotAccess(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2699,11 +2699,11 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'rules' || cmd === 'agitation') {
+      if (cmd === 'правила' || cmd === 'агитация') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        if (cmd === 'rules') {
+        if (cmd === 'правила') {
           const text = await getCurrentText('rules', DEFAULT_RULES);
           const channel = await guild.channels.fetch(config.CHANNEL_RULES);
           await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил').setDescription(text)] });
@@ -2715,17 +2715,17 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: 'Агитация отправлена в канал.', flags: MessageFlags.Ephemeral });
       }
 
-      if (cmd === 'hr_info') {
+      if (cmd === 'hr_вакансия') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        const text = await getCurrentText('hr_info', DEFAULT_HR_INFO);
+        const text = await getCurrentText('hr_вакансия', DEFAULT_HR_INFO);
         const channel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
         await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(text)] });
         return interaction.reply({ content: 'Описание вакансии HR отправлено в канал.', flags: MessageFlags.Ephemeral });
       }
 
-      if (cmd === 'rules_broadcast') {
+      if (cmd === 'правила_разослать') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2763,7 +2763,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'broadcast_message') {
+      if (cmd === 'рассылка_сообщение') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
@@ -2790,11 +2790,11 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (cmd === 'rules_update' || cmd === 'agitation_update' || cmd === 'hr_info_update') {
+      if (cmd === 'правила_обновить' || cmd === 'агитация_обновить' || cmd === 'hr_вакансия_обновить') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        const type = cmd === 'rules_update' ? 'rules' : cmd === 'agitation_update' ? 'agitation' : 'hr_info';
+        const type = cmd === 'правила_обновить' ? 'rules' : cmd === 'агитация_обновить' ? 'agitation' : 'hr_info';
         const defaultText = type === 'rules' ? DEFAULT_RULES : type === 'agitation' ? DEFAULT_AGITATION : DEFAULT_HR_INFO;
         const current = await getCurrentText(type, defaultText);
 
