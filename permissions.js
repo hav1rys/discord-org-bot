@@ -92,8 +92,32 @@ function canManageFaq(member) {
   return member.roles.cache.has(config.ROLE_OWNER);
 }
 
+// Владелец и выше (роли +/./Владелец, либо личный аккаунт владельца бота)
+function isOwnerTier(member) {
+  if (hasBotAccess(member)) return true;
+  return member.roles.cache.has(config.ROLE_OWNER);
+}
+
+// Зам. Владелец и выше
+function isDeputyTier(member) {
+  if (hasBotAccess(member)) return true;
+  if (member.roles.cache.has(config.ROLE_OWNER)) return true;
+  return member.roles.cache.has(config.ROLE_DEPUTY);
+}
+
+// HR-Менеджер и выше
+function isHrTier(member) {
+  if (hasBotAccess(member)) return true;
+  if (member.roles.cache.has(config.ROLE_OWNER)) return true;
+  if (member.roles.cache.has(config.ROLE_DEPUTY)) return true;
+  return member.roles.cache.has(config.ROLE_HR);
+}
+
 module.exports = {
   hasBotAccess,
+  isOwnerTier,
+  isDeputyTier,
+  isHrTier,
   canManageMembersList,
   canManageBlacklist,
   canReview,
