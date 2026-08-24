@@ -333,6 +333,17 @@ const SCHEMA = {
   // "Взял контракт"-скриншот, ожидающий пары со скриншотом итога. Раньше
   // это жило в памяти процесса и терялось при перезапуске/передеплое —
   // теперь переживает рестарт.
+  // Переопределения config.js через /config_set — применяются поверх
+  // значений из кода при каждом запуске, без правки файлов и передеплоя.
+  config_overrides: {
+    columns: {
+      key: 'TEXT PRIMARY KEY',
+      value: 'TEXT',
+      updated_by: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+
   giveaways: {
     columns: {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',

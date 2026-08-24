@@ -118,6 +118,14 @@ async function getInviterAllInvitations(inviterDiscordId) {
   return db.all('SELECT * FROM invitations WHERE inviter_discord_id = ? ORDER BY created_at DESC LIMIT 25', [inviterDiscordId]);
 }
 
+// Топ по приглашениям за всё время — для /invitations_leaderboard
+async function getAllTimeLeaderboard() {
+  return db.all(
+    `SELECT inviter_discord_id, COUNT(*) as cnt FROM invitations WHERE status = 'confirmed'
+     GROUP BY inviter_discord_id ORDER BY cnt DESC`,
+  );
+}
+
 module.exports = {
   resolveInviter,
   hasExistingInvitationRecord,
@@ -130,4 +138,5 @@ module.exports = {
   getInviterInviteesForWeek,
   getActiveInvitersForWeek,
   getInviterAllInvitations,
+  getAllTimeLeaderboard,
 };

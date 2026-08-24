@@ -74,6 +74,10 @@ module.exports = {
   // Роли и статусные роли
   MAX_PASSPORTS_PER_USER: 3,
   INVITATION_MIN_DAYS: 3,
+  APPLICATION_COOLDOWN_HOURS: 6, // сколько часов ждать перед повторной заявкой после отказа
+  BACKUP_RETENTION_DAYS: 14, // сколько дней хранить резервные копии БД
+  VACATION_REMINDER_HOURS: 24, // за сколько часов до конца отпуска слать напоминание
+  HR_REMINDER_INTERVAL_DAYS: 7, // раз во сколько дней напоминать HR о непроверенных заявках
 
   // Роль, выдаваемая при принятии заявки на вступление (самая низкая)
   get ROLE_APPLY() {

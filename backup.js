@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('./db');
+const config = require('./config');
 
-const BACKUP_RETENTION_DAYS = 14;
 const backupsDir = path.join(db.dataDir, 'backups');
 
 if (!fs.existsSync(backupsDir)) {
@@ -43,7 +43,7 @@ function cleanupOldBackups(onError) {
     return;
   }
 
-  const cutoff = Date.now() - BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - config.BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   for (const file of files) {
     if (!file.startsWith('data-') || !file.endsWith('.db')) continue;
     const filePath = path.join(backupsDir, file);
@@ -87,4 +87,28 @@ function scheduleDailyBackup(notifyFn) {
   console.log(`Резервное копирование БД запланировано на 23:59 (через ${Math.round(msUntilNext2359() / 60000)} мин.)`);
 }
 
-module.exports = { backupNow, cleanupOldBackups, scheduleDailyBackup };
+// Список файлов резервных копий с датой изменения и размером — для /backup_list
+function listBackups() {
+  let files;
+  try {
+    files = fs.readdirSync(backupsDir);
+  } catch (err) {
+    console.error('Не удалось прочитать папку резервных копий:', err.message);
+    return [];
+  }
+
+  const result = [];
+  for (const file of files) {
+    if (!file.startsWith('data-') || !file.endsWith('.db')) continue;
+    try {
+      const stat = fs.statSync(path.join(backupsDir, file));
+      result.push({ name: file, size: stat.size, mtime: stat.mtime });
+    } catch (_) {
+      // файл мог исчезнуть между readdirSync и statSync — пропускаем
+    }
+  }
+  result.sort((a, b) => b.mtime - a.mtime);
+  return result;
+}
+
+module.exports = { backupNow, cleanupOldBackups, scheduleDailyBackup, listBackups };

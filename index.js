@@ -41,6 +41,7 @@ const invitations = require('./invitations');
 const history = require('./history');
 const { buildCsv } = require('./csv');
 const giveaways = require('./giveaways');
+const configStore = require('./config_store');
 const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
@@ -61,7 +62,6 @@ const client = new Client({
 const pendingUpdates = new Map(); // key: `${type}:${userId}` -> text
 // причина, указанная в форме "Убрать из ЧС", до подтверждения удаления
 const pendingBlacklistReasons = new Map(); // key: userId -> reason
-const APPLICATION_COOLDOWN_HOURS = 6; // кулдаун на повторную заявку после отказа
 const pendingBroadcasts = new Map(); // key: userId -> { text, targetId? }
 
 // ---------- Утилиты ----------
@@ -92,6 +92,12 @@ async function safeReply(interaction, content) {
     return interaction.followUp(payload);
   }
   return interaction.reply(payload);
+}
+
+// Переключатели /settings_toggle — по умолчанию всё включено, пока явно не выключили
+async function isFeatureEnabled(feature) {
+  const value = await db.getSetting(`feature_${feature}_enabled`);
+  return value !== 'false';
 }
 
 async function resolveGuild(interaction) {
@@ -451,8 +457,8 @@ function buildProfileComponents(discordId) {
 // проверить накопившиеся заявки, если они есть.
 async function checkHrReminder(guild) {
   const lastReminder = await db.getSetting('hr_reminder_last_sent');
-  const weekMs = 7 * 24 * 60 * 60 * 1000;
-  if (lastReminder && Date.now() - new Date(lastReminder).getTime() < weekMs) return;
+  const intervalMs = config.HR_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+  if (lastReminder && Date.now() - new Date(lastReminder).getTime() < intervalMs) return;
 
   const pendingRow = await db.get(`SELECT COUNT(*) as cnt FROM applications WHERE status = 'pending'`);
   const count = pendingRow ? pendingRow.cnt : 0;
@@ -473,7 +479,7 @@ async function checkHrReminder(guild) {
 }
 
 async function checkVacationReminders(guild) {
-  const REMINDER_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const REMINDER_WINDOW_MS = config.VACATION_REMINDER_HOURS * 60 * 60 * 1000;
   const now = Date.now();
 
   const participants = await db.all('SELECT discord_id, static, name, vacation_until FROM participants WHERE vacation_until IS NOT NULL');
@@ -1031,6 +1037,50 @@ const commands = [
     .setName('giveaway_participants')
     .setDescription('Показать, кто участвует (или участвовал) в розыгрыше')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('config_set')
+    .setDescription('Изменить настройку бота (ID канала/роли, число) без правки кода')
+    .addStringOption((opt) => opt.setName('ключ').setDescription('Какую настройку менять').setRequired(true).setAutocomplete(true))
+    .addStringOption((opt) => opt.setName('значение').setDescription('Новое значение (или "сброс", чтобы вернуть по умолчанию)').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('config_get')
+    .setDescription('Посмотреть текущее значение настройки')
+    .addStringOption((opt) => opt.setName('ключ').setDescription('Какую настройку посмотреть — если пусто, покажет все переопределённые').setRequired(false).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('settings_toggle')
+    .setDescription('Включить/выключить приём заявок, контрактов или напоминаний')
+    .addStringOption((opt) =>
+      opt.setName('функция').setDescription('Что переключить').setRequired(true).addChoices(
+        { name: 'Заявки на вступление', value: 'applications' },
+        { name: 'Приём скриншотов контрактов', value: 'contracts' },
+        { name: 'Напоминания (отпуск/HR)', value: 'reminders' },
+      ),
+    )
+    .addStringOption((opt) =>
+      opt.setName('состояние').setDescription('Включить или выключить').setRequired(true).addChoices(
+        { name: 'Включить', value: 'on' },
+        { name: 'Выключить', value: 'off' },
+      ),
+    ),
+  new SlashCommandBuilder()
+    .setName('vacation_calendar')
+    .setDescription('Кто сейчас в отпуске и до какого числа'),
+  new SlashCommandBuilder()
+    .setName('afk_list')
+    .setDescription('Кто сейчас AFK'),
+  new SlashCommandBuilder()
+    .setName('invitations_leaderboard')
+    .setDescription('Топ по приглашениям за всё время'),
+  new SlashCommandBuilder()
+    .setName('backup_now')
+    .setDescription('Сделать резервную копию БД прямо сейчас'),
+  new SlashCommandBuilder()
+    .setName('backup_list')
+    .setDescription('Список доступных резервных копий БД'),
+  new SlashCommandBuilder()
+    .setName('audit_export')
+    .setDescription('Выгрузить лог аудита в .csv за период')
+    .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 30)').setRequired(false).setMinValue(1)),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -1745,6 +1795,16 @@ client.on('interactionCreate', async (interaction) => {
 
     // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
     if (interaction.isAutocomplete()) {
+      if (interaction.commandName === 'config_set' || interaction.commandName === 'config_get') {
+        const focused = interaction.options.getFocused().toLowerCase();
+        const keys = configStore.getSettableKeys().filter((k) => k.toLowerCase().includes(focused));
+        const choices = keys.slice(0, 25).map((k) => ({ name: `${k} (сейчас: ${config[k]})`.slice(0, 100), value: k }));
+        try {
+          await interaction.respond(choices);
+        } catch (_) {}
+        return;
+      }
+
       if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel' || interaction.commandName === 'giveaway_reroll' || interaction.commandName === 'giveaway_participants') {
         const focused = interaction.options.getFocused();
         let statusClause = '';
@@ -2442,6 +2502,177 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (cmd === 'config_set') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const key = interaction.options.getString('ключ');
+        const rawValue = interaction.options.getString('значение');
+        try {
+          if (rawValue.trim().toLowerCase() === 'сброс') {
+            await configStore.clearOverride(key);
+            await logAudit(guild, interaction.user, 'Настройка сброшена', `${key} → значение по умолчанию`);
+            await interaction.editReply(`Настройка «${key}» сброшена на значение по умолчанию: ${config[key]}`);
+            return;
+          }
+          const oldValue = config[key];
+          const newValue = await configStore.setOverride(key, rawValue, interaction.user.id);
+          await logAudit(guild, interaction.user, 'Настройка изменена', `${key}: ${oldValue} → ${newValue}`);
+          await interaction.editReply(`Готово. «${key}» теперь: ${newValue}\n\n(применилось сразу, без перезапуска — но проверьте, что значение корректное, например реальный ID канала/роли)`);
+        } catch (err) {
+          await interaction.editReply(`⛔ ${err.message}`);
+        }
+        return;
+      }
+
+      if (cmd === 'config_get') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const key = interaction.options.getString('ключ');
+        if (key) {
+          const override = await configStore.getOverride(key);
+          const embed = new EmbedBuilder()
+            .setColor(0x5865f2)
+            .setTitle(`Настройка: ${key}`)
+            .addFields(
+              { name: 'Текущее значение', value: String(config[key]), inline: true },
+              { name: 'Переопределено?', value: override ? `Да (кем: <@${override.updated_by}>, ${formatDateTime(new Date(override.updated_at))})` : 'Нет (значение по умолчанию)', inline: true },
+            );
+          await interaction.editReply({ embeds: [embed] });
+          return;
+        }
+        const allOverrides = await db.all('SELECT * FROM config_overrides ORDER BY key');
+        if (allOverrides.length === 0) {
+          await interaction.editReply('Переопределений нет — все настройки используют значения по умолчанию из кода.');
+          return;
+        }
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('Переопределённые настройки')
+          .setDescription(allOverrides.map((o) => `**${o.key}** = ${o.value} (кем: <@${o.updated_by}>, ${formatDateTime(new Date(o.updated_at))})`).join('\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'settings_toggle') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const feature = interaction.options.getString('функция');
+        const state = interaction.options.getString('состояние');
+        const featureLabels = { applications: 'Заявки на вступление', contracts: 'Приём скриншотов контрактов', reminders: 'Напоминания' };
+        await db.setSetting(`feature_${feature}_enabled`, state === 'on' ? 'true' : 'false');
+        await logAudit(guild, interaction.user, 'Переключена функция бота', `${featureLabels[feature]}: ${state === 'on' ? 'включено' : 'выключено'}`);
+        await interaction.editReply(`${featureLabels[feature]}: **${state === 'on' ? 'включено' : 'выключено'}**.`);
+        return;
+      }
+
+      if (cmd === 'vacation_calendar') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const participants = await db.all('SELECT discord_id, name, static, vacation_until FROM participants WHERE vacation_until IS NOT NULL');
+        const extras = await db.all('SELECT discord_id, name, static, vacation_until FROM extra_passports WHERE vacation_until IS NOT NULL');
+        const all = [...participants, ...extras].sort((a, b) => new Date(a.vacation_until) - new Date(b.vacation_until));
+        const embed = new EmbedBuilder().setColor(0xfee75c).setTitle('🏖️ Кто сейчас в отпуске');
+        if (all.length === 0) {
+          embed.setDescription('Сейчас никто не в отпуске.');
+        } else {
+          embed.setDescription(all.map((p) => `<@${p.discord_id}> — ${p.name} (№ ${p.static}) — до ${formatDateTime(new Date(p.vacation_until))}`).join('\n').slice(0, 4000));
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'afk_list') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const participants = await db.all('SELECT discord_id, name, static, afk_since FROM participants WHERE afk_since IS NOT NULL');
+        const extras = await db.all('SELECT discord_id, name, static, afk_since FROM extra_passports WHERE afk_since IS NOT NULL');
+        const all = [...participants, ...extras];
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('💤 Кто сейчас AFK');
+        if (all.length === 0) {
+          embed.setDescription('Сейчас никто не AFK.');
+        } else {
+          embed.setDescription(all.map((p) => `<@${p.discord_id}> — ${p.name} (№ ${p.static}) — с ${p.afk_since}`).join('\n').slice(0, 4000));
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'invitations_leaderboard') {
+        if (!perms.canReview(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const board = await invitations.getAllTimeLeaderboard();
+        if (board.length === 0) {
+          await interaction.editReply('Пока нет подтверждённых приглашений.');
+          return;
+        }
+        const lines = board.slice(0, 25).map((row, i) => `${i + 1}. <@${row.inviter_discord_id}> — ${row.cnt}`);
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🏆 Топ по приглашениям за всё время').setDescription(lines.join('\n'));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'backup_now') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ok = backup.backupNow();
+        await logAudit(guild, interaction.user, 'Резервная копия создана вручную', ok ? 'Успешно' : 'Ошибка — см. консоль/канал аудита');
+        await interaction.editReply(ok ? '✅ Резервная копия создана.' : '⛔ Не удалось создать резервную копию — подробности в консоли.');
+        return;
+      }
+
+      if (cmd === 'backup_list') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const files = backup.listBackups();
+        if (files.length === 0) {
+          await interaction.editReply('Резервных копий пока нет.');
+          return;
+        }
+        const lines = files.map((f) => `${f.name} — ${(f.size / 1024 / 1024).toFixed(2)} МБ — ${formatDateTime(f.mtime)}`);
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('💾 Резервные копии БД').setDescription(lines.join('\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'audit_export') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const days = interaction.options.getInteger('дней') || 30;
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        const rows = await db.all('SELECT * FROM audit_log WHERE at >= ? ORDER BY at ASC', [since]);
+        if (rows.length === 0) {
+          await interaction.editReply(`Записей за последние ${days} дней не найдено.`);
+          return;
+        }
+        const csv = buildCsv(
+          ['дата', 'действие', 'инициатор_тег', 'инициатор_id', 'детали'],
+          rows.map((r) => [r.at, r.action, r.actor_tag, r.actor_id, r.details]),
+        );
+        const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `audit_${days}d.csv` });
+        await logAudit(guild, interaction.user, 'Экспорт аудита', `За последние ${days} дней, записей: ${rows.length}`);
+        await interaction.editReply({ content: `Аудит за последние ${days} дней (${rows.length} записей):`, files: [file] });
+        return;
+      }
+
+
       if (cmd === 'giveaway_reroll') {
         if (!perms.canManageMembersList(interaction.member)) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
@@ -2848,6 +3079,9 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id === 'apply_submit') {
+        if (!(await isFeatureEnabled('applications'))) {
+          return safeReply(interaction, '⛔ Приём заявок на вступление временно приостановлен. Попробуйте позже.');
+        }
         const existing = await db.get('SELECT id FROM participants WHERE discord_id = ?', [interaction.user.id]);
         if (existing) {
           return interaction.showModal(buildPassportRequestModal());
@@ -2858,7 +3092,7 @@ client.on('interactionCreate', async (interaction) => {
           [interaction.user.id],
         );
         if (lastRejected) {
-          const cooldownMs = APPLICATION_COOLDOWN_HOURS * 60 * 60 * 1000;
+          const cooldownMs = config.APPLICATION_COOLDOWN_HOURS * 60 * 60 * 1000;
           const elapsed = Date.now() - new Date(lastRejected.created_at).getTime();
           if (elapsed < cooldownMs) {
             const retryAt = Math.floor((new Date(lastRejected.created_at).getTime() + cooldownMs) / 1000);
@@ -4637,6 +4871,11 @@ client.on('messageCreate', async (message) => {
       return; // считаем только скриншоты владельца профиля
     }
 
+    if (!(await isFeatureEnabled('contracts'))) {
+      await message.react('⏸️').catch(() => {});
+      return;
+    }
+
     const discordId = participant.discord_id;
     const now = message.createdAt.toISOString();
 
@@ -4670,6 +4909,8 @@ client.on('messageCreate', async (message) => {
 client.once('clientReady', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
   await db.init();
+  const overridesCount = await configStore.loadOverrides();
+  if (overridesCount > 0) console.log(`Применено переопределений конфига из БД: ${overridesCount}`);
   await registerCommands();
 
   if (process.env.GUILD_ID) {
@@ -4703,8 +4944,10 @@ client.once('clientReady', async () => {
         const guild = await client.guilds.fetch(process.env.GUILD_ID);
         await invitationsDisplay.safeUpdateInvitations(guild);
         await applicationsDisplay.safeUpdateApplicationsStats(guild);
-        await checkVacationReminders(guild);
-        await checkHrReminder(guild);
+        if (await isFeatureEnabled('reminders')) {
+          await checkVacationReminders(guild);
+          await checkHrReminder(guild);
+        }
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);
