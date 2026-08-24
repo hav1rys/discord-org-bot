@@ -1009,6 +1009,16 @@ async function registerCommands() {
     return;
   }
   if (guildId) {
+    // Если раньше (до того, как появился GUILD_ID) команды успели
+    // зарегистрироваться ГЛОБАЛЬНО — они годами висят рядом с серверными
+    // и дублируются в списке команд. Чистим их сами при каждом старте —
+    // это дешёвая операция (пустой массив), полностью безопасно гонять
+    // на каждом запуске.
+    try {
+      await rest.put(Routes.applicationCommands(clientId), { body: [] });
+    } catch (err) {
+      console.error('Не удалось очистить старые глобальные команды:', err.message);
+    }
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
   } else {
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
