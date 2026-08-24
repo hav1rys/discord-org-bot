@@ -602,6 +602,16 @@ async function createProfileThread(guild, discordId, name, staticValue) {
     const overwrites = [
       { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
       {
+        id: guild.client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+          PermissionFlagsBits.AttachFiles,
+          PermissionFlagsBits.ManageChannels,
+        ],
+      },
+      {
         id: discordId,
         allow: [
           PermissionFlagsBits.ViewChannel,
@@ -623,6 +633,7 @@ async function createProfileThread(guild, discordId, name, staticValue) {
         const channel = await guild.channels.fetch(existing.channel_id);
         await channel.setParent(config.CHANNEL_PROFILES_ACTIVE_CATEGORY, { lockPermissions: false });
         await channel.permissionOverwrites.edit(guild.roles.everyone.id, { ViewChannel: false });
+        await channel.permissionOverwrites.edit(guild.client.user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true, ManageChannels: true });
         await channel.permissionOverwrites.edit(discordId, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true, AttachFiles: true });
         await channel.permissionOverwrites.edit(config.OWNER_USER_ID, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
         for (const roleId of config.ROLES_REVIEW_ALLOWED) {
@@ -1696,6 +1707,16 @@ client.on('interactionCreate', async (interaction) => {
                   if (passport.profile_thread_id !== existingChannel.channel_id) {
                     await passportsLib.setPassportChannel(p.discord_id, passport.static, existingChannel.channel_id);
                   }
+                  // Чиним доступ бота на УЖЕ существующих каналах — эта
+                  // проверка раньше отсутствовала при их создании, из-за
+                  // чего бот не видел сообщения в собственных же каналах.
+                  await ch.permissionOverwrites.edit(guild.client.user.id, {
+                    ViewChannel: true,
+                    SendMessages: true,
+                    ReadMessageHistory: true,
+                    AttachFiles: true,
+                    ManageChannels: true,
+                  });
                 }
               } catch (_) {
                 isActiveAndInPlace = false; // канал не найден вообще — пересоздадим
@@ -4159,17 +4180,25 @@ async function postContractReviewCard(guild, discordId, takenUrl, takenAt, compl
   const contractId = await contracts.recordPendingContract(discordId, replyToMessage.channel.id, replyToMessage.id, completedUrl, completedAt);
   await contracts.setTakenInfo(contractId, takenUrl, takenAt);
 
-  const embed = new EmbedBuilder()
+  // Discord позволяет только одну картинку на embed через setImage —
+  // поэтому вместо ссылок показываем сами скриншоты двумя embed'ами.
+  const infoEmbed = new EmbedBuilder()
     .setColor(0xfee75c)
     .setTitle('Новый контракт на проверку')
-    .addFields(
-      { name: 'Участник', value: `<@${discordId}>` },
-      { name: '1️⃣ Взял контракт', value: `[Скриншот](${takenUrl})`, inline: true },
-      { name: '2️⃣ Итог', value: `[Скриншот](${completedUrl})`, inline: true },
-    );
+    .addFields({ name: 'Участник', value: `<@${discordId}>` });
+
+  const takenEmbed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle('1️⃣ Взял контракт')
+    .setImage(takenUrl);
+
+  const completedEmbed = new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle('2️⃣ Итог')
+    .setImage(completedUrl);
 
   const reviewMsg = await replyToMessage.reply({
-    embeds: [embed],
+    embeds: [infoEmbed, takenEmbed, completedEmbed],
     components: [row(
       new ButtonBuilder().setCustomId(`contract_fulfilled:${contractId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`contract_unfulfilled:${contractId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
@@ -4202,27 +4231,50 @@ client.on('messageDelete', async (message) => {
 client.on('messageCreate', async (message) => {
   try {
     if (message.author.bot) return;
-    if (message.channel.type !== ChannelType.GuildText) return;
+    if (message.channel.type !== ChannelType.GuildText) {
+      return;
+    }
+
+    // Диагностика: логируем КАЖДОЕ сообщение с вложением в любом текстовом
+    // канале, чтобы точно увидеть, доходит ли обработка сюда вообще и на
+    // каком шаге останавливается. Временная мера для отладки — можно
+    // убрать позже, когда проблема будет найдена.
+    if (message.attachments.size > 0) {
+      console.log(`[скриншоты] Сообщение с вложением от ${message.author.tag} (${message.author.id}) в канале #${message.channel.name} (${message.channel.id})`);
+    }
+
     if (message.attachments.size === 0) return;
 
     const imageUrls = [...message.attachments.values()]
       .filter((a) => (a.contentType || '').startsWith('image/'))
       .map((a) => a.url);
-    if (imageUrls.length === 0) return;
+    console.log(`[скриншоты] Всего вложений: ${message.attachments.size}, из них картинок (по contentType): ${imageUrls.length}`);
+    if (imageUrls.length === 0) {
+      console.log('[скриншоты] Ни одно вложение не распознано как изображение — contentType:', [...message.attachments.values()].map((a) => a.contentType));
+      return;
+    }
 
     let participant = await db.get('SELECT * FROM participants WHERE profile_thread_id = ?', [message.channel.id]);
     if (!participant) {
       const extra = await db.get('SELECT discord_id FROM extra_passports WHERE profile_thread_id = ?', [message.channel.id]);
       if (extra) participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [extra.discord_id]);
     }
-    if (!participant) return;
-    if (message.author.id !== participant.discord_id) return; // считаем только скриншоты владельца профиля
+    if (!participant) {
+      console.log(`[скриншоты] Канал ${message.channel.id} НЕ найден ни в participants.profile_thread_id, ни в extra_passports.profile_thread_id — не считается профиль-каналом.`);
+      return;
+    }
+    console.log(`[скриншоты] Канал сопоставлен с участником: ${participant.name} (${participant.discord_id}), паспорт ${participant.static}`);
+    if (message.author.id !== participant.discord_id) {
+      console.log(`[скриншоты] Автор сообщения (${message.author.id}) не совпадает с владельцем профиля (${participant.discord_id}) — пропускаем.`);
+      return; // считаем только скриншоты владельца профиля
+    }
 
     const discordId = participant.discord_id;
     const now = message.createdAt.toISOString();
 
     // Одно сообщение сразу с 2+ скриншотами — считаем первым "взял", вторым "итог"
     if (imageUrls.length >= 2) {
+      console.log('[скриншоты] 2+ картинки в одном сообщении — создаю карточку контракта сразу.');
       await postContractReviewCard(message.guild, discordId, imageUrls[0], now, imageUrls[1], now, message);
       return;
     }
@@ -4230,14 +4282,16 @@ client.on('messageCreate', async (message) => {
     // Одно изображение — либо это "взял" (ждём итог), либо "итог" (если "взял" уже ждал)
     const pending = await db.get('SELECT * FROM pending_contract_shots WHERE discord_id = ?', [discordId]);
     if (!pending) {
+      console.log('[скриншоты] Это первый скриншот ("взял") — ставлю в ожидание пары и реагирую ⏳.');
       await db.run(
         'INSERT INTO pending_contract_shots (discord_id, url, submitted_at) VALUES (?, ?, ?) ON CONFLICT(discord_id) DO UPDATE SET url = excluded.url, submitted_at = excluded.submitted_at',
         [discordId, imageUrls[0], now],
       );
-      await message.react('⏳').catch(() => {});
+      await message.react('⏳').catch((err) => console.log('[скриншоты] Не удалось поставить реакцию ⏳:', err.message));
       return;
     }
 
+    console.log('[скриншоты] Найдена ожидающая пара — создаю карточку контракта.');
     await db.run('DELETE FROM pending_contract_shots WHERE discord_id = ?', [discordId]);
     await postContractReviewCard(message.guild, discordId, pending.url, pending.submitted_at, imageUrls[0], now, message);
   } catch (err) {
