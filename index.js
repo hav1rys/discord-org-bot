@@ -1023,6 +1023,10 @@ const commands = [
     .setName('giveaway_reroll')
     .setDescription('Выбрать новых победителей уже завершённого розыгрыша')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш перевыбрать').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('giveaway_cancel')
+    .setDescription('Отменить розыгрыш без выбора победителей')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш отменить').setRequired(true).setAutocomplete(true)),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -1110,7 +1114,7 @@ function buildGiveawayComponents(giveawayId, ended = false) {
   )];
 }
 
-async function endGiveaway(guild, giveawayId) {
+async function endGiveaway(guild, giveawayId, actor = null) {
   const giveaway = await giveaways.getGiveaway(giveawayId);
   if (!giveaway || giveaway.status !== 'active') return [];
 
@@ -1135,10 +1139,42 @@ async function endGiveaway(guild, giveawayId) {
     console.error('Не удалось объявить итоги розыгрыша:', err.message);
   }
 
+  await logAudit(
+    guild,
+    actor || client.user,
+    actor ? 'Розыгрыш завершён вручную' : 'Розыгрыш завершён (автоматически по таймеру)',
+    `«${giveaway.prize}», участников: ${entries.length}, победителей: ${winners.length}${winners.length > 0 ? ` (${winners.map((w) => `<@${w}>`).join(', ')})` : ''}`,
+  );
+
   return winners;
 }
 
-async function rerollGiveaway(guild, giveawayId) {
+async function cancelGiveaway(guild, giveawayId, actor) {
+  const giveaway = await giveaways.getGiveaway(giveawayId);
+  if (!giveaway || giveaway.status !== 'active') return false;
+
+  await giveaways.setStatus(giveawayId, 'cancelled');
+
+  try {
+    const channel = await guild.channels.fetch(giveaway.channel_id);
+    const embed = new EmbedBuilder()
+      .setColor(0xed4245)
+      .setTitle(`🎉 ${giveaway.prize}`)
+      .setDescription('❌ Розыгрыш отменён.');
+    try {
+      const msg = await channel.messages.fetch(giveaway.message_id);
+      await msg.edit({ embeds: [embed], components: buildGiveawayComponents(giveawayId, true) });
+    } catch (_) {}
+    await channel.send(`❌ Розыгрыш «${giveaway.prize}» отменён.`);
+  } catch (err) {
+    console.error('Не удалось объявить отмену розыгрыша:', err.message);
+  }
+
+  await logAudit(guild, actor || client.user, 'Розыгрыш отменён', `«${giveaway.prize}»`);
+  return true;
+}
+
+async function rerollGiveaway(guild, giveawayId, actor) {
   const giveaway = await giveaways.getGiveaway(giveawayId);
   if (!giveaway || giveaway.status !== 'ended') return [];
 
@@ -1155,6 +1191,13 @@ async function rerollGiveaway(guild, giveawayId) {
   } catch (err) {
     console.error('Не удалось объявить реролл розыгрыша:', err.message);
   }
+
+  await logAudit(
+    guild,
+    actor || client.user,
+    'Розыгрыш перевыбран',
+    `«${giveaway.prize}», новых победителей: ${winners.length}${winners.length > 0 ? ` (${winners.map((w) => `<@${w}>`).join(', ')})` : ''}`,
+  );
 
   return winners;
 }
@@ -1698,8 +1741,8 @@ client.on('interactionCreate', async (interaction) => {
 
     // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
     if (interaction.isAutocomplete()) {
-      if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_reroll') {
-        const status = interaction.commandName === 'giveaway_end' ? 'active' : 'ended';
+      if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_cancel' || interaction.commandName === 'giveaway_reroll') {
+        const status = interaction.commandName === 'giveaway_reroll' ? 'ended' : 'active';
         const focused = interaction.options.getFocused();
         const rows = await db.all(
           `SELECT * FROM giveaways WHERE status = ? AND prize LIKE ? ORDER BY id DESC LIMIT 25`,
@@ -2303,9 +2346,19 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply('⛔ Розыгрыш не найден или уже завершён.');
           return;
         }
-        const winners = await endGiveaway(guild, giveawayId);
-        await logAudit(guild, interaction.user, 'Розыгрыш завершён вручную', `«${giveaway.prize}», победителей: ${winners.length}`);
+        const winners = await endGiveaway(guild, giveawayId, interaction.user);
         await interaction.editReply(`Розыгрыш завершён. Победителей: ${winners.length}.`);
+        return;
+      }
+
+      if (cmd === 'giveaway_cancel') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const cancelled = await cancelGiveaway(guild, giveawayId, interaction.user);
+        await interaction.editReply(cancelled ? 'Розыгрыш отменён.' : '⛔ Розыгрыш не найден или уже завершён.');
         return;
       }
 
@@ -2320,8 +2373,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply('⛔ Розыгрыш не найден или ещё не завершён.');
           return;
         }
-        const winners = await rerollGiveaway(guild, giveawayId);
-        await logAudit(guild, interaction.user, 'Розыгрыш перевыбран', `«${giveaway.prize}», новых победителей: ${winners.length}`);
+        const winners = await rerollGiveaway(guild, giveawayId, interaction.user);
         await interaction.editReply(`Готово. Новых победителей: ${winners.length}.`);
         return;
       }
@@ -3001,6 +3053,7 @@ client.on('interactionCreate', async (interaction) => {
           const msg = await channel.messages.fetch(giveaway.message_id);
           await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
         } catch (_) {}
+        await logAudit(guild, interaction.user, already ? 'Выход из розыгрыша' : 'Участие в розыгрыше', `«${giveaway.prize}»`);
         return safeReply(interaction, already ? '❌ Вы вышли из розыгрыша.' : '✅ Вы участвуете в розыгрыше! Удачи 🍀');
       }
 
@@ -4433,12 +4486,30 @@ client.on('messageDelete', async (message) => {
     if (!message.guild) return;
     if (message.author && message.author.bot) return;
 
-    const contentPreview = message.content ? message.content.slice(0, 300) : '(без текста — вложение/embed)';
+    const contentText = message.content ? message.content : '(без текста)';
+    const imageAttachments = [...message.attachments.values()].filter((a) => (a.contentType || '').startsWith('image/'));
+    const otherAttachments = [...message.attachments.values()].filter((a) => !(a.contentType || '').startsWith('image/'));
+
+    let details = `Канал: <#${message.channel.id}>\nАвтор: ${message.author ? `<@${message.author.id}>` : '—'}\n\nСодержимое:\n${contentText}`;
+    if (otherAttachments.length > 0) {
+      details += `\n\nВложения (не картинки):\n${otherAttachments.map((a) => `[${a.name}](${a.url})`).join('\n')}`;
+    }
+
+    // До 4 картинок показываем прямо в отдельных embed'ах (Discord позволяет
+    // только одну картинку на embed через setImage)
+    const extraEmbeds = imageAttachments.slice(0, 4).map((a) =>
+      new EmbedBuilder().setColor(0x5865f2).setImage(a.url),
+    );
+    if (imageAttachments.length > 4) {
+      details += `\n\n(показаны первые 4 картинки из ${imageAttachments.length})`;
+    }
+
     await logAudit(
       message.guild,
       message.author || { tag: 'неизвестно', id: '0' },
       '🗑️ Сообщение удалено',
-      `Канал: <#${message.channel.id}>\nАвтор: ${message.author ? `<@${message.author.id}>` : '—'}\nСодержимое: ${contentPreview}`,
+      details,
+      extraEmbeds,
     );
   } catch (err) {
     console.error('Ошибка логирования удаления сообщения:', err);
@@ -4520,6 +4591,16 @@ client.once('clientReady', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
   await db.init();
   await registerCommands();
+
+  if (process.env.GUILD_ID) {
+    try {
+      const startupGuild = await client.guilds.fetch(process.env.GUILD_ID);
+      await logAudit(startupGuild, client.user, '🔄 Бот запущен/перезапущен', `${client.user.tag} в сети.`);
+    } catch (err) {
+      console.error('Не удалось залогировать запуск бота в аудит:', err.message);
+    }
+  }
+
   backup.scheduleDailyBackup(async (text) => {
     console.error('Ошибка бэкапа:', text);
     try {

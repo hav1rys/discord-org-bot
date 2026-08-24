@@ -2,7 +2,7 @@ const { EmbedBuilder } = require('discord.js');
 const { CHANNEL_AUDIT } = require('./config');
 const db = require('./db');
 
-async function logAudit(guild, actor, action, details) {
+async function logAudit(guild, actor, action, details, extraEmbeds = []) {
   try {
     await db.run(
       'INSERT INTO audit_log (actor_id, actor_tag, action, details, at) VALUES (?, ?, ?, ?, ?)',
@@ -19,11 +19,11 @@ async function logAudit(guild, actor, action, details) {
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle(action)
-      .setDescription(details)
+      .setDescription(String(details).slice(0, 4000))
       .setFooter({ text: `Инициатор: ${actor.tag} (${actor.id})` })
       .setTimestamp();
 
-    await channel.send({ embeds: [embed] });
+    await channel.send({ embeds: [embed, ...extraEmbeds].slice(0, 10) });
   } catch (err) {
     console.error('Ошибка логирования аудита:', err);
   }
