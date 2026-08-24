@@ -335,6 +335,17 @@ const SCHEMA = {
   // теперь переживает рестарт.
   // Переопределения config.js через /config_set — применяются поверх
   // значений из кода при каждом запуске, без правки файлов и передеплоя.
+  // Переопределения уровня доступа команд через /права_команд — так же,
+  // как config_overrides, но для того, какая роль нужна для команды.
+  command_permission_overrides: {
+    columns: {
+      command_name: 'TEXT PRIMARY KEY',
+      tier: 'TEXT', // admin | owner | deputy | hr
+      updated_by: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+
   config_overrides: {
     columns: {
       key: 'TEXT PRIMARY KEY',

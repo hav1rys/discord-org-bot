@@ -148,20 +148,46 @@ const COMMAND_CATEGORIES = [
   },
 ];
 
-// Уровни доступа — сверены с проверками прав в обработчиках команд
-const PERMISSION_TIERS = {
-  'Все с доступом к боту (роль `+`, Владелец, Admin)': ['пинг', 'меню_создать', 'помощь', 'права_команд'],
-  'Владелец / Зам. Владелец / HR-Менеджер (проверка заявок)': ['топ_приглашения'],
-  'Владелец / Зам. Владелец': [
-    'история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk', 'топ_контракты',
-    'розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники',
-    'правила', 'правила_обновить', 'правила_разослать', 'агитация', 'агитация_обновить',
-    'hr_вакансия', 'hr_вакансия_обновить', 'рассылка_сообщение', 'каналы_отчётов', 'предпросмотр',
-    'профили_восстановить', 'настройка_изменить', 'настройка_показать', 'настройка_переключить',
-    'бэкап_сейчас', 'бэкапы_список', 'статус', 'статистика_организации', 'экспорт_id',
-    'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт',
-  ],
+// Уровни доступа — ключ (короткий, для хранения в БД) + подпись + функция
+// проверки. /права_команд позволяет менять привязку команда→ключ через
+// выпадающий список, без единой правки кода.
+const TIER_INFO = {
+  admin: { label: 'Только роль `+`, `.` (Admin)', check: (m) => perms.hasBotAccess(m) },
+  owner: { label: 'Владелец и выше', check: (m) => perms.isOwnerTier(m) },
+  deputy: { label: 'Зам. Владелец и выше', check: (m) => perms.isDeputyTier(m) },
+  hr: { label: 'HR-Менеджер и выше', check: (m) => perms.isHrTier(m) },
 };
+
+// Уровень по умолчанию для каждой команды (используется, пока никто не
+// поменял его через /права_команд)
+const COMMAND_DEFAULT_TIERS = {
+  настройка_изменить: 'admin', настройка_показать: 'admin', настройка_переключить: 'admin',
+  бэкап_сейчас: 'admin', бэкапы_список: 'admin', экспорт_id: 'admin', права_команд: 'admin', меню_создать: 'admin',
+
+  розыгрыш_старт: 'owner', розыгрыш_завершить: 'owner', розыгрыш_отменить: 'owner', розыгрыш_реролл: 'owner', розыгрыш_участники: 'owner',
+  правила: 'owner', правила_обновить: 'owner', правила_разослать: 'owner', агитация: 'owner', агитация_обновить: 'owner',
+  hr_вакансия: 'owner', hr_вакансия_обновить: 'owner', рассылка_сообщение: 'owner', каналы_отчётов: 'owner', предпросмотр: 'owner',
+  профили_восстановить: 'owner', статус: 'owner', пинг: 'owner',
+
+  экспорт_статистика: 'deputy', аудит_экспорт: 'deputy',
+
+  топ_приглашения: 'hr', паспорт_история: 'hr', отпуска_календарь: 'hr', список_afk: 'hr', топ_контракты: 'hr',
+  статистика_организации: 'hr', аудит_поиск: 'hr', кто_это: 'hr', история: 'hr', помощь: 'hr',
+};
+
+// Эффективный уровень команды — переопределение из БД, если есть, иначе значение по умолчанию
+async function getCommandTier(commandName) {
+  const override = await db.get('SELECT tier FROM command_permission_overrides WHERE command_name = ?', [commandName]);
+  return (override && TIER_INFO[override.tier]) ? override.tier : COMMAND_DEFAULT_TIERS[commandName];
+}
+
+// Единая точка проверки для всех команд — читает текущий (возможно,
+// переопределённый) уровень и сразу применяет соответствующую проверку.
+async function checkCommandAccess(commandName, member) {
+  const tier = await getCommandTier(commandName);
+  const info = TIER_INFO[tier] || TIER_INFO.admin;
+  return info.check(member);
+}
 
 async function getCurrentText(key, fallback) {
   const v = await contentVersions.getLatestVersion(key);
@@ -1948,7 +1974,7 @@ client.on('interactionCreate', async (interaction) => {
       const cmd = interaction.commandName;
 
       if (cmd === 'пинг') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('пинг', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
 
@@ -1980,7 +2006,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'профили_восстановить') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('профили_восстановить', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2077,7 +2103,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'история') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('история', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2106,7 +2132,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'топ_контракты') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('топ_контракты', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2125,7 +2151,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'аудит_поиск') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('аудит_поиск', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2150,7 +2176,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'кто_это') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('кто_это', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2181,7 +2207,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'экспорт_статистика') {
-        if (!perms.isDeputyTier(interaction.member)) {
+        if (!(await checkCommandAccess('экспорт_статистика', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2227,7 +2253,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'каналы_отчётов') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('каналы_отчётов', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2281,7 +2307,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'статистика_организации') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('статистика_организации', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2343,7 +2369,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'статус') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('статус', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2393,7 +2419,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'экспорт_id') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('экспорт_id', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2504,7 +2530,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'розыгрыш_старт') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('розыгрыш_старт', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         const prize = interaction.options.getString('приз');
@@ -2535,7 +2561,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'розыгрыш_завершить') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('розыгрыш_завершить', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2551,7 +2577,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'розыгрыш_отменить') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('розыгрыш_отменить', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2562,7 +2588,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'розыгрыш_участники') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('розыгрыш_участники', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2596,7 +2622,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'настройка_изменить') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('настройка_изменить', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2620,7 +2646,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'настройка_показать') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('настройка_показать', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2651,7 +2677,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'настройка_переключить') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('настройка_переключить', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2665,7 +2691,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'отпуска_календарь') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('отпуска_календарь', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2683,7 +2709,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'список_afk') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('список_afk', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2701,7 +2727,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'топ_приглашения') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('топ_приглашения', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2717,7 +2743,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'бэкап_сейчас') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('бэкап_сейчас', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2728,7 +2754,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'бэкапы_список') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('бэкапы_список', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2744,7 +2770,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'аудит_экспорт') {
-        if (!perms.isDeputyTier(interaction.member)) {
+        if (!(await checkCommandAccess('аудит_экспорт', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2766,7 +2792,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'помощь') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('помощь', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2781,21 +2807,37 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'права_команд') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('права_команд', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔐 Права доступа к командам');
-        for (const [tier, cmdNames] of Object.entries(PERMISSION_TIERS)) {
-          const lines = cmdNames.map((name) => `\`/${name}\``).join(', ');
-          embed.addFields({ name: tier, value: lines.slice(0, 1024) });
+        const overrides = await db.all('SELECT command_name, tier FROM command_permission_overrides');
+        const overrideMap = new Map(overrides.map((o) => [o.command_name, o.tier]));
+
+        const grouped = { admin: [], owner: [], deputy: [], hr: [] };
+        for (const [name, defaultTier] of Object.entries(COMMAND_DEFAULT_TIERS)) {
+          const effectiveTier = overrideMap.has(name) ? overrideMap.get(name) : defaultTier;
+          const mark = overrideMap.has(name) ? ' *' : '';
+          (grouped[effectiveTier] || grouped[defaultTier]).push(`\`/${name}\`${mark}`);
         }
-        await interaction.editReply({ embeds: [embed] });
+
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔐 Права доступа к командам');
+        for (const [tierKey, info] of Object.entries(TIER_INFO)) {
+          embed.addFields({ name: info.label, value: grouped[tierKey].join(', ').slice(0, 1024) || '—' });
+        }
+        if (overrides.length > 0) {
+          embed.setFooter({ text: '* — переопределено вручную (отличается от значения по умолчанию)' });
+        }
+
+        await interaction.editReply({
+          embeds: [embed],
+          components: [row(new ButtonBuilder().setCustomId('perm_edit_start').setLabel('✏️ Изменить право команды').setStyle(ButtonStyle.Primary))],
+        });
         return;
       }
 
       if (cmd === 'паспорт_история') {
-        if (!perms.isHrTier(interaction.member)) {
+        if (!(await checkCommandAccess('паспорт_история', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2836,7 +2878,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'предпросмотр') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('предпросмотр', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2851,7 +2893,7 @@ client.on('interactionCreate', async (interaction) => {
 
 
       if (cmd === 'розыгрыш_реролл') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('розыгрыш_реролл', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2867,7 +2909,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'меню_создать') {
-        if (!perms.hasBotAccess(interaction.member)) {
+        if (!(await checkCommandAccess('меню_создать', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2877,7 +2919,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'правила' || cmd === 'агитация') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess(cmd, interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         if (cmd === 'правила') {
@@ -2893,7 +2935,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'hr_вакансия') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('hr_вакансия', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         const text = await getCurrentText('hr_info', DEFAULT_HR_INFO);
@@ -2903,7 +2945,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'правила_разослать') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('правила_разослать', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -2941,7 +2983,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'рассылка_сообщение') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess('рассылка_сообщение', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.reply({ content: 'Отправьте текст сообщения следующим сообщением в этом канале (10 минут на ответ).', flags: MessageFlags.Ephemeral });
@@ -2968,7 +3010,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (cmd === 'правила_обновить' || cmd === 'агитация_обновить' || cmd === 'hr_вакансия_обновить') {
-        if (!perms.isOwnerTier(interaction.member)) {
+        if (!(await checkCommandAccess(cmd, interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         const type = cmd === 'правила_обновить' ? 'rules' : cmd === 'агитация_обновить' ? 'agitation' : 'hr_info';
@@ -3548,6 +3590,24 @@ client.on('interactionCreate', async (interaction) => {
         return safeReply(interaction, already ? '❌ Вы вышли из розыгрыша.' : '✅ Вы участвуете в розыгрыше! Удачи 🍀');
       }
 
+      if (id === 'perm_edit_start') {
+        if (!(await checkCommandAccess('права_команд', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const allNames = Object.keys(COMMAND_DEFAULT_TIERS).sort();
+        const half = Math.ceil(allNames.length / 2);
+        const chunks = [allNames.slice(0, half), allNames.slice(half)];
+        const components = chunks.map((chunk, i) =>
+          row(
+            new StringSelectMenuBuilder()
+              .setCustomId(`perm_pick_cmd_${i}`)
+              .setPlaceholder(`Выберите команду (${i === 0 ? 'A–' : ''}${i + 1}/${chunks.length})`)
+              .addOptions(chunk.map((name) => new StringSelectMenuOptionBuilder().setLabel(`/${name}`).setValue(name))),
+          ),
+        );
+        return safeReply(interaction, { content: 'Выберите команду, у которой хотите поменять уровень доступа:', components });
+      }
+
       if (id.startsWith('my_profile:')) {
         const discordId = id.split(':')[1];
         const isOwnerOfChannel = interaction.user.id === discordId;
@@ -3842,6 +3902,52 @@ client.on('interactionCreate', async (interaction) => {
             new ButtonBuilder().setCustomId('faq_delete_cancel').setLabel('❌ Отменить').setStyle(ButtonStyle.Secondary),
           )],
         });
+      }
+
+      if (customId === 'perm_pick_cmd_0' || customId === 'perm_pick_cmd_1') {
+        if (!(await checkCommandAccess('права_команд', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const commandName = interaction.values[0];
+        const currentTier = await getCommandTier(commandName);
+        const tierSelect = new StringSelectMenuBuilder()
+          .setCustomId(`perm_set_tier:${commandName}`)
+          .setPlaceholder('Выберите новый уровень доступа')
+          .addOptions(
+            ...Object.entries(TIER_INFO).map(([key, info]) =>
+              new StringSelectMenuOptionBuilder()
+                .setLabel(info.label)
+                .setValue(key)
+                .setDefault(key === currentTier),
+            ),
+            new StringSelectMenuOptionBuilder().setLabel('↩️ Сбросить на значение по умолчанию').setValue('__reset__'),
+          );
+        return safeReply(interaction, { content: `Команда: \`/${commandName}\` — текущий уровень: **${TIER_INFO[currentTier].label}**`, components: [row(tierSelect)] });
+      }
+
+      if (customId.startsWith('perm_set_tier:')) {
+        if (!(await checkCommandAccess('права_команд', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const commandName = customId.split(':')[1];
+        const chosen = interaction.values[0];
+
+        if (chosen === '__reset__') {
+          await db.run('DELETE FROM command_permission_overrides WHERE command_name = ?', [commandName]);
+          const defaultTier = COMMAND_DEFAULT_TIERS[commandName];
+          await logAudit(guild, interaction.user, 'Право команды сброшено', `/${commandName} → ${TIER_INFO[defaultTier].label} (по умолчанию)`);
+          return safeReply(interaction, `Готово. \`/${commandName}\` сброшена на уровень по умолчанию: **${TIER_INFO[defaultTier].label}**.`);
+        }
+
+        if (!TIER_INFO[chosen]) return safeReply(interaction, '⛔ Неизвестный уровень.');
+
+        await db.run(
+          `INSERT INTO command_permission_overrides (command_name, tier, updated_by, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(command_name) DO UPDATE SET tier = excluded.tier, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+          [commandName, chosen, interaction.user.id, new Date().toISOString()],
+        );
+        await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → ${TIER_INFO[chosen].label}`);
+        return safeReply(interaction, `Готово. \`/${commandName}\` теперь требует: **${TIER_INFO[chosen].label}**\n\n(применилось сразу, без перезапуска)`);
       }
 
       if (customId === 'select_data_change_passport') {
