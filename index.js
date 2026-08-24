@@ -2257,11 +2257,36 @@ client.on('interactionCreate', async (interaction) => {
           }
         };
 
+        const formatOverwriteTarget = (overwrite) => {
+          if (overwrite.type === 0) {
+            const role = guild.roles.cache.get(overwrite.id);
+            return role ? `роль «${role.name}»` : `роль ${overwrite.id}`;
+          }
+          const member = guild.members.cache.get(overwrite.id);
+          return member ? `участник ${member.user.tag}` : `участник/бот ${overwrite.id}`;
+        };
+
+        const formatOverwrites = (channel, indent) => {
+          const overwrites = [...channel.permissionOverwrites.cache.values()];
+          if (overwrites.length === 0) return [];
+          const result = [];
+          for (const ow of overwrites) {
+            const target = formatOverwriteTarget(ow);
+            const allow = ow.allow.toArray();
+            const deny = ow.deny.toArray();
+            const parts = [];
+            if (allow.length > 0) parts.push(`разрешено: ${allow.join(', ')}`);
+            if (deny.length > 0) parts.push(`запрещено: ${deny.join(', ')}`);
+            if (parts.length > 0) result.push(`${indent}  ↳ ${target} — ${parts.join(' | ')}`);
+          }
+          return result;
+        };
+
         const lines = [];
         lines.push(`Сервер: ${guild.name} (${guild.id})`);
         lines.push(`Сформировано: ${formatDateTime(new Date())}`);
         lines.push('');
-        lines.push('=== КАТЕГОРИИ И КАНАЛЫ ===');
+        lines.push('=== КАТЕГОРИИ И КАНАЛЫ (с переопределениями прав, если есть) ===');
         lines.push('');
 
         const allChannels = [...guild.channels.cache.values()];
@@ -2271,11 +2296,13 @@ client.on('interactionCreate', async (interaction) => {
 
         for (const cat of categories) {
           lines.push(`[Категория] ${cat.name} — ${cat.id}`);
+          lines.push(...formatOverwrites(cat, ''));
           const children = allChannels
             .filter((c) => c.parentId === cat.id && c.type !== ChannelType.GuildCategory)
             .sort((a, b) => a.position - b.position);
           for (const ch of children) {
             lines.push(`  #${ch.name} (${typeLabel(ch.type)}) — ${ch.id}`);
+            lines.push(...formatOverwrites(ch, '  '));
           }
           lines.push('');
         }
@@ -2287,18 +2314,26 @@ client.on('interactionCreate', async (interaction) => {
           lines.push('[Без категории]');
           for (const ch of noCategory) {
             lines.push(`  #${ch.name} (${typeLabel(ch.type)}) — ${ch.id}`);
+            lines.push(...formatOverwrites(ch, '  '));
           }
           lines.push('');
         }
 
-        lines.push('=== РОЛИ ===');
-        lines.push('(от старшей к младшей)');
+        lines.push('=== РОЛИ (от старшей к младшей, с их правами на сервере) ===');
         lines.push('');
         const roles = [...guild.roles.cache.values()]
           .filter((r) => r.name !== '@everyone')
           .sort((a, b) => b.position - a.position);
         for (const role of roles) {
+          const rolePerms = role.permissions.toArray();
           lines.push(`${role.name} — ${role.id}`);
+          if (role.permissions.has(PermissionFlagsBits.Administrator)) {
+            lines.push('  Права: Administrator (обходит вообще все ограничения каналов)');
+          } else if (rolePerms.length > 0) {
+            lines.push(`  Права: ${rolePerms.join(', ')}`);
+          } else {
+            lines.push('  Права: нет прав на уровне сервера (только то, что разрешено точечно на конкретных каналах)');
+          }
         }
 
         const fileContent = lines.join('\n');
