@@ -991,6 +991,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName('status')
     .setDescription('Проверка здоровья бота: БД, доступ к ключевым каналам, время работы'),
+  new SlashCommandBuilder()
+    .setName('export_ids')
+    .setDescription('Выгрузить названия и ID всех каналов и ролей сервера в файл'),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -1990,6 +1993,77 @@ client.on('interactionCreate', async (interaction) => {
           );
 
         await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'export_ids') {
+        if (!perms.hasBotAccess(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+
+        const typeLabel = (type) => {
+          switch (type) {
+            case ChannelType.GuildText: return 'текст';
+            case ChannelType.GuildVoice: return 'голос';
+            case ChannelType.GuildAnnouncement: return 'анонсы';
+            case ChannelType.GuildForum: return 'форум';
+            case ChannelType.GuildStageVoice: return 'сцена';
+            case ChannelType.GuildCategory: return 'категория';
+            default: return `тип ${type}`;
+          }
+        };
+
+        const lines = [];
+        lines.push(`Сервер: ${guild.name} (${guild.id})`);
+        lines.push(`Сформировано: ${formatDateTime(new Date())}`);
+        lines.push('');
+        lines.push('=== КАТЕГОРИИ И КАНАЛЫ ===');
+        lines.push('');
+
+        const allChannels = [...guild.channels.cache.values()];
+        const categories = allChannels
+          .filter((c) => c.type === ChannelType.GuildCategory)
+          .sort((a, b) => a.position - b.position);
+
+        for (const cat of categories) {
+          lines.push(`[Категория] ${cat.name} — ${cat.id}`);
+          const children = allChannels
+            .filter((c) => c.parentId === cat.id && c.type !== ChannelType.GuildCategory)
+            .sort((a, b) => a.position - b.position);
+          for (const ch of children) {
+            lines.push(`  #${ch.name} (${typeLabel(ch.type)}) — ${ch.id}`);
+          }
+          lines.push('');
+        }
+
+        const noCategory = allChannels
+          .filter((c) => !c.parentId && c.type !== ChannelType.GuildCategory)
+          .sort((a, b) => a.position - b.position);
+        if (noCategory.length > 0) {
+          lines.push('[Без категории]');
+          for (const ch of noCategory) {
+            lines.push(`  #${ch.name} (${typeLabel(ch.type)}) — ${ch.id}`);
+          }
+          lines.push('');
+        }
+
+        lines.push('=== РОЛИ ===');
+        lines.push('(от старшей к младшей)');
+        lines.push('');
+        const roles = [...guild.roles.cache.values()]
+          .filter((r) => r.name !== '@everyone')
+          .sort((a, b) => b.position - a.position);
+        for (const role of roles) {
+          lines.push(`${role.name} — ${role.id}`);
+        }
+
+        const fileContent = lines.join('\n');
+        const safeName = guild.name.replace(/[^a-zA-Zа-яА-Я0-9]+/g, '_');
+        const file = new AttachmentBuilder(Buffer.from(fileContent, 'utf8'), { name: `${safeName}_ids.txt` });
+
+        await logAudit(guild, interaction.user, 'Экспорт ID каналов/ролей', `Каналов: ${allChannels.length - categories.length}, ролей: ${roles.length}`);
+        await interaction.editReply({ content: 'Список каналов и ролей сервера — можно прислать мне этот файл:', files: [file] });
         return;
       }
 
