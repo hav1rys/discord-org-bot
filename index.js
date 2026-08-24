@@ -40,6 +40,7 @@ const contractsDisplay = require('./contracts_display');
 const invitations = require('./invitations');
 const history = require('./history');
 const { buildCsv } = require('./csv');
+const giveaways = require('./giveaways');
 const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
@@ -1007,6 +1008,21 @@ const commands = [
   new SlashCommandBuilder()
     .setName('export_ids')
     .setDescription('Выгрузить названия и ID всех каналов и ролей сервера в файл'),
+  new SlashCommandBuilder()
+    .setName('giveaway_start')
+    .setDescription('Запустить розыгрыш')
+    .addStringOption((opt) => opt.setName('приз').setDescription('Что разыгрывается').setRequired(true))
+    .addStringOption((opt) => opt.setName('длительность').setDescription('Например: 30m, 2h, 1d, 1w').setRequired(true))
+    .addIntegerOption((opt) => opt.setName('победителей').setDescription('Сколько победителей').setRequired(true).setMinValue(1))
+    .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправить (по умолчанию — этот канал)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('giveaway_end')
+    .setDescription('Досрочно завершить розыгрыш и выбрать победителей')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш завершить').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('giveaway_reroll')
+    .setDescription('Выбрать новых победителей уже завершённого розыгрыша')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш перевыбрать').setRequired(true).setAutocomplete(true)),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -1064,6 +1080,85 @@ async function sendFaqManagePanel(guild) {
 
 // Отправляет меню один раз и запоминает его id в settings — при повторном
 // /init_menus редактирует то же сообщение вместо отправки нового (п.1).
+function buildGiveawayEmbed(giveaway, entryCount, ended = false, winners = null) {
+  const endsAtSec = Math.floor(new Date(giveaway.ends_at).getTime() / 1000);
+  const embed = new EmbedBuilder()
+    .setColor(ended ? 0x2b2d31 : 0x57f287)
+    .setTitle(`🎉 ${giveaway.prize}`)
+    .setDescription(
+      ended
+        ? `Розыгрыш завершён.`
+        : `Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${giveaway.host_id}>`,
+    )
+    .addFields(
+      { name: 'Победителей', value: String(giveaway.winners_count), inline: true },
+      { name: 'Участников', value: String(entryCount), inline: true },
+      { name: ended ? 'Завершился' : 'Закончится', value: `<t:${endsAtSec}:R>`, inline: true },
+    );
+  if (ended) {
+    embed.addFields({
+      name: 'Победители',
+      value: winners && winners.length > 0 ? winners.map((w) => `<@${w}>`).join(', ') : 'Никто не участвовал 😔',
+    });
+  }
+  return embed;
+}
+
+function buildGiveawayComponents(giveawayId, ended = false) {
+  return [row(
+    new ButtonBuilder().setCustomId(`giveaway_enter:${giveawayId}`).setLabel('🎉 Участвовать').setStyle(ButtonStyle.Success).setDisabled(ended),
+  )];
+}
+
+async function endGiveaway(guild, giveawayId) {
+  const giveaway = await giveaways.getGiveaway(giveawayId);
+  if (!giveaway || giveaway.status !== 'active') return [];
+
+  const entries = await giveaways.getEntries(giveawayId);
+  const winners = giveaways.pickWinners(entries, giveaway.winners_count);
+  await giveaways.setStatus(giveawayId, 'ended');
+
+  try {
+    const channel = await guild.channels.fetch(giveaway.channel_id);
+    const embed = buildGiveawayEmbed(giveaway, entries.length, true, winners);
+    try {
+      const msg = await channel.messages.fetch(giveaway.message_id);
+      await msg.edit({ embeds: [embed], components: buildGiveawayComponents(giveawayId, true) });
+    } catch (_) {}
+
+    if (winners.length > 0) {
+      await channel.send(`🎉 Поздравляем ${winners.map((w) => `<@${w}>`).join(', ')} — вы выиграли **${giveaway.prize}**!`);
+    } else {
+      await channel.send(`😔 Розыгрыш «${giveaway.prize}» завершён — участников не было.`);
+    }
+  } catch (err) {
+    console.error('Не удалось объявить итоги розыгрыша:', err.message);
+  }
+
+  return winners;
+}
+
+async function rerollGiveaway(guild, giveawayId) {
+  const giveaway = await giveaways.getGiveaway(giveawayId);
+  if (!giveaway || giveaway.status !== 'ended') return [];
+
+  const entries = await giveaways.getEntries(giveawayId);
+  const winners = giveaways.pickWinners(entries, giveaway.winners_count);
+
+  try {
+    const channel = await guild.channels.fetch(giveaway.channel_id);
+    if (winners.length > 0) {
+      await channel.send(`🔁 Новые победители розыгрыша «${giveaway.prize}»: ${winners.map((w) => `<@${w}>`).join(', ')}!`);
+    } else {
+      await channel.send(`🔁 Реролл «${giveaway.prize}» — участников нет.`);
+    }
+  } catch (err) {
+    console.error('Не удалось объявить реролл розыгрыша:', err.message);
+  }
+
+  return winners;
+}
+
 async function sendOrEditMenu(channel, settingKey, payload) {
   const messageId = await db.getSetting(settingKey);
   if (messageId) {
@@ -1603,6 +1698,23 @@ client.on('interactionCreate', async (interaction) => {
 
     // ----- Автодополнение (подсказки при вводе "человек"/"запрос") -----
     if (interaction.isAutocomplete()) {
+      if (interaction.commandName === 'giveaway_end' || interaction.commandName === 'giveaway_reroll') {
+        const status = interaction.commandName === 'giveaway_end' ? 'active' : 'ended';
+        const focused = interaction.options.getFocused();
+        const rows = await db.all(
+          `SELECT * FROM giveaways WHERE status = ? AND prize LIKE ? ORDER BY id DESC LIMIT 25`,
+          [status, `%${focused}%`],
+        );
+        const choices = rows.map((g) => ({
+          name: `${g.prize} (до ${formatDateTime(new Date(g.ends_at))})`.slice(0, 100),
+          value: String(g.id),
+        }));
+        try {
+          await interaction.respond(choices);
+        } catch (_) {}
+        return;
+      }
+
       const autocompleteCommands = ['history', 'whois', 'rules_broadcast', 'send_report_channels'];
       if (!autocompleteCommands.includes(interaction.commandName)) return;
 
@@ -2146,6 +2258,71 @@ client.on('interactionCreate', async (interaction) => {
 
         await logAudit(guild, interaction.user, 'Экспорт ID каналов/ролей', `Каналов: ${allChannels.length - categories.length}, ролей: ${roles.length}`);
         await interaction.editReply({ content: 'Список каналов и ролей сервера — можно прислать мне этот файл:', files: [file] });
+        return;
+      }
+
+      if (cmd === 'giveaway_start') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        const prize = interaction.options.getString('приз');
+        const durationStr = interaction.options.getString('длительность');
+        const winnersCount = interaction.options.getInteger('победителей');
+        const targetChannel = interaction.options.getChannel('канал') || interaction.channel;
+
+        const durationMs = giveaways.parseDuration(durationStr);
+        if (!durationMs) {
+          return interaction.reply({ content: '⛔ Неверный формат длительности. Используйте, например: 30m, 2h, 1d, 1w.', flags: MessageFlags.Ephemeral });
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const endsAt = new Date(Date.now() + durationMs);
+
+        const giveawayId = await giveaways.createGiveaway(targetChannel.id, prize, winnersCount, interaction.user.id, endsAt.toISOString());
+        const embed = buildGiveawayEmbed({ prize, winners_count: winnersCount, ends_at: endsAt.toISOString(), host_id: interaction.user.id }, 0);
+        const sent = await targetChannel.send({
+          content: '🎉 **РОЗЫГРЫШ** 🎉',
+          embeds: [embed],
+          components: buildGiveawayComponents(giveawayId),
+        });
+        await giveaways.setMessageId(giveawayId, sent.id);
+
+        await logAudit(guild, interaction.user, 'Розыгрыш запущен', `«${prize}» в <#${targetChannel.id}>, победителей: ${winnersCount}, до ${formatDateTime(endsAt)}`);
+        await interaction.editReply(`Розыгрыш запущен в <#${targetChannel.id}>.`);
+        return;
+      }
+
+      if (cmd === 'giveaway_end') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway || giveaway.status !== 'active') {
+          await interaction.editReply('⛔ Розыгрыш не найден или уже завершён.');
+          return;
+        }
+        const winners = await endGiveaway(guild, giveawayId);
+        await logAudit(guild, interaction.user, 'Розыгрыш завершён вручную', `«${giveaway.prize}», победителей: ${winners.length}`);
+        await interaction.editReply(`Розыгрыш завершён. Победителей: ${winners.length}.`);
+        return;
+      }
+
+      if (cmd === 'giveaway_reroll') {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway || giveaway.status !== 'ended') {
+          await interaction.editReply('⛔ Розыгрыш не найден или ещё не завершён.');
+          return;
+        }
+        const winners = await rerollGiveaway(guild, giveawayId);
+        await logAudit(guild, interaction.user, 'Розыгрыш перевыбран', `«${giveaway.prize}», новых победителей: ${winners.length}`);
+        await interaction.editReply(`Готово. Новых победителей: ${winners.length}.`);
         return;
       }
 
@@ -2804,6 +2981,27 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.showModal(buildMemberModal('modal_members_add', {}, interaction.user.id === config.OWNER_USER_ID));
         }
         return interaction.showModal(buildPickSearchModal(action));
+      }
+
+      if (id.startsWith('giveaway_enter:')) {
+        const giveawayId = id.split(':')[1];
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway || giveaway.status !== 'active') {
+          return safeReply(interaction, '⛔ Этот розыгрыш уже завершён.');
+        }
+        const already = await giveaways.hasEntry(giveawayId, interaction.user.id);
+        if (already) {
+          await giveaways.removeEntry(giveawayId, interaction.user.id);
+        } else {
+          await giveaways.addEntry(giveawayId, interaction.user.id);
+        }
+        const count = await giveaways.countEntries(giveawayId);
+        try {
+          const channel = await guild.channels.fetch(giveaway.channel_id);
+          const msg = await channel.messages.fetch(giveaway.message_id);
+          await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
+        } catch (_) {}
+        return safeReply(interaction, already ? '❌ Вы вышли из розыгрыша.' : '✅ Вы участвуете в розыгрыше! Удачи 🍀');
       }
 
       if (id.startsWith('my_profile:')) {
@@ -4362,6 +4560,11 @@ client.once('clientReady', async () => {
       await contractsDisplay.checkAndRevertIfExpired(guild);
       await invitationsDisplay.checkAndRevertIfExpired(guild);
       await applicationsDisplay.checkAndRevertIfExpired(guild);
+
+      const expiredGiveaways = await giveaways.getActiveExpired();
+      for (const g of expiredGiveaways) {
+        await endGiveaway(guild, g.id);
+      }
     } catch (err) {
       console.error('Ошибка проверки автовозврата недели статистики:', err);
     }

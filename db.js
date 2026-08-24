@@ -333,6 +333,30 @@ const SCHEMA = {
   // "Взял контракт"-скриншот, ожидающий пары со скриншотом итога. Раньше
   // это жило в памяти процесса и терялось при перезапуске/передеплое —
   // теперь переживает рестарт.
+  giveaways: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      channel_id: 'TEXT',
+      message_id: 'TEXT UNIQUE',
+      prize: 'TEXT',
+      winners_count: 'INTEGER',
+      host_id: 'TEXT',
+      ends_at: 'TEXT',
+      status: "TEXT DEFAULT 'active'", // active | ended
+      created_at: 'TEXT',
+    },
+    indexes: [['status'], ['ends_at']],
+  },
+
+  giveaway_entries: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      giveaway_id: 'INTEGER',
+      discord_id: 'TEXT',
+    },
+    indexes: [['giveaway_id']],
+  },
+
   pending_contract_shots: {
     columns: {
       discord_id: 'TEXT UNIQUE',
