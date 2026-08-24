@@ -1737,8 +1737,26 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
 
-        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', `Создано каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}.`);
-        await interaction.editReply(`Готово. Проверено участников: ${allParticipants.length}. Создано новых каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}.`);
+        // Ищем "осиротевшие" каналы — те, что физически есть в категориях
+        // профилей, но не привязаны ни к одному паспорту в базе (следствие
+        // старого бага с уникальностью, из-за которого повторные попытки
+        // плодили дубликаты).
+        const linkedChannelIds = new Set((await db.all('SELECT channel_id FROM profile_channels')).map((r) => r.channel_id));
+        const orphanChannels = [];
+        for (const categoryId of [config.CHANNEL_PROFILES_ACTIVE_CATEGORY, config.CHANNEL_PROFILES_ARCHIVE_CATEGORY]) {
+          const categoryChannels = guild.channels.cache.filter((c) => c.parentId === categoryId);
+          for (const ch of categoryChannels.values()) {
+            if (!linkedChannelIds.has(ch.id)) orphanChannels.push(ch);
+          }
+        }
+
+        let orphanText = '';
+        if (orphanChannels.length > 0) {
+          orphanText = `\n\n⚠️ Найдено незалинкованных (осиротевших) каналов: **${orphanChannels.length}** — их можно удалить вручную:\n${orphanChannels.map((c) => `<#${c.id}>`).join(', ').slice(0, 1500)}`;
+        }
+
+        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', `Создано каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}. Осиротевших каналов: ${orphanChannels.length}.`);
+        await interaction.editReply(`Готово. Проверено участников: ${allParticipants.length}. Создано новых каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}.${orphanText}`);
         return;
       }
 

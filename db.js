@@ -419,7 +419,37 @@ async function ensureTable(tableName, def) {
   }
 }
 
+// Разовая миграция: раньше profile_channels создавалась с UNIQUE на
+// discord_id (один канал на весь аккаунт). Когда профили переехали на "один
+// канал на каждый паспорт", уникальным должен был стать static — но
+// SQLite не умеет менять ограничения существующей колонки через ALTER
+// TABLE, обычная система миграций (ensureTable) такое не чинит. Из-за
+// этого у людей с несколькими паспортами сохранялся канал только первого
+// паспорта, остальные тихо не записывались в базу при каждой попытке.
+// Пересоздаём таблицу с правильной схемой, перенося все данные.
+async function migrateProfileChannelsUniqueness() {
+  const tableInfo = await get(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'profile_channels'`);
+  if (!tableInfo || !tableInfo.sql) return; // таблицы ещё нет — ensureTable создаст с нуля правильно
+  if (!/discord_id\s+TEXT\s+UNIQUE/i.test(tableInfo.sql)) return; // уже новая схема — ничего делать не нужно
+
+  console.log('Миграция: пересоздаю profile_channels (снимаю устаревшее ограничение UNIQUE с discord_id)...');
+  await run('ALTER TABLE profile_channels RENAME TO profile_channels_old');
+  await run(`CREATE TABLE profile_channels (
+    discord_id TEXT,
+    static TEXT UNIQUE,
+    channel_id TEXT,
+    status TEXT DEFAULT 'active',
+    created_at TEXT,
+    updated_at TEXT
+  )`);
+  await run(`INSERT INTO profile_channels (discord_id, static, channel_id, status, created_at, updated_at)
+             SELECT discord_id, static, channel_id, status, created_at, updated_at FROM profile_channels_old`);
+  await run('DROP TABLE profile_channels_old');
+  console.log('Миграция profile_channels завершена.');
+}
+
 async function init() {
+  await migrateProfileChannelsUniqueness();
   for (const [tableName, def] of Object.entries(SCHEMA)) {
     await ensureTable(tableName, def);
   }
