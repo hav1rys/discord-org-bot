@@ -18,6 +18,7 @@ const {
   StringSelectMenuOptionBuilder,
   ChannelType,
   PermissionFlagsBits,
+  MessageFlags,
   AttachmentBuilder,
 } = require('discord.js');
 
@@ -85,7 +86,7 @@ function getRoleIndex(roleId) {
 }
 
 async function safeReply(interaction, content) {
-  const payload = typeof content === 'string' ? { content, ephemeral: true } : { ephemeral: true, ...content };
+  const payload = typeof content === 'string' ? { content, flags: MessageFlags.Ephemeral } : { flags: MessageFlags.Ephemeral, ...content };
   if (interaction.deferred || interaction.replied) {
     return interaction.followUp(payload);
   }
@@ -1584,10 +1585,10 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'ping') {
         if (!perms.hasBotAccess(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const dbStart = Date.now();
         await db.get('SELECT 1');
@@ -1616,9 +1617,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'backfill_profiles') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const allParticipants = await db.all('SELECT * FROM participants');
         let createdChannels = 0;
         let restoredChannels = 0;
@@ -1685,9 +1686,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'history') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const query = interaction.options.getString('человек');
         const target = await invitations.resolveInviter(query);
         if (!target) {
@@ -1714,9 +1715,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'contracts_leaderboard') {
         if (!perms.canReview(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const board = await contracts.getAllTimeLeaderboard();
         if (board.length === 0) {
           await interaction.editReply('Пока нет обработанных контрактов.');
@@ -1733,9 +1734,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'audit_search') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const query = interaction.options.getString('запрос');
         const q = `%${query}%`;
         const rows = await db.all(
@@ -1758,9 +1759,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'whois') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const query = interaction.options.getString('запрос');
         const q = `%${query}%`;
         const rows = await db.all(
@@ -1789,9 +1790,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'export_stats') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const range = contracts.getWeekRange(0);
         const label = contracts.formatWeekLabel(range).replace(/\./g, '-');
 
@@ -1835,9 +1836,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'send_report_channels') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const query = interaction.options.getString('человек');
         let targets;
@@ -1889,9 +1890,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'org_stats') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const totalPeople = (await db.get('SELECT COUNT(*) as cnt FROM participants')).cnt;
         const onVacation = (await db.get(
@@ -1948,9 +1949,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'status') {
         if (!perms.hasBotAccess(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         let dbStatus = '✅ Подключена';
         try {
@@ -1998,9 +1999,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'export_ids') {
         if (!perms.hasBotAccess(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const typeLabel = (type) => {
           switch (type) {
@@ -2060,7 +2061,12 @@ client.on('interactionCreate', async (interaction) => {
 
         const fileContent = lines.join('\n');
         const safeName = guild.name.replace(/[^a-zA-Zа-яА-Я0-9]+/g, '_');
-        const file = new AttachmentBuilder(Buffer.from(fileContent, 'utf8'), { name: `${safeName}_ids.txt` });
+        // BOM в начале файла — без него некоторые программы (например,
+        // старый Блокнот Windows) не определяют UTF-8 сами и открывают
+        // кириллицу как кракозябры (Windows-1251).
+        const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
+        const fileBuffer = Buffer.concat([bom, Buffer.from(fileContent, 'utf8')]);
+        const file = new AttachmentBuilder(fileBuffer, { name: `${safeName}_ids.txt` });
 
         await logAudit(guild, interaction.user, 'Экспорт ID каналов/ролей', `Каналов: ${allChannels.length - categories.length}, ролей: ${roles.length}`);
         await interaction.editReply({ content: 'Список каналов и ролей сервера — можно прислать мне этот файл:', files: [file] });
@@ -2069,9 +2075,9 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'init_menus') {
         if (!perms.hasBotAccess(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         await initMenus(guild);
         await interaction.editReply('Меню успешно инициализированы.');
         return;
@@ -2079,35 +2085,35 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'rules' || cmd === 'agitation') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         if (cmd === 'rules') {
           const text = await getCurrentText('rules', DEFAULT_RULES);
           const channel = await guild.channels.fetch(config.CHANNEL_RULES);
           await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил').setDescription(text)] });
-          return interaction.reply({ content: 'Правила отправлены в канал.', ephemeral: true });
+          return interaction.reply({ content: 'Правила отправлены в канал.', flags: MessageFlags.Ephemeral });
         }
         const text = await getCurrentText('agitation', DEFAULT_AGITATION);
         const channel = await guild.channels.fetch(config.CHANNEL_AGITATION);
         await channel.send({ content: text, embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription('```\n' + text + '\n```')] });
-        return interaction.reply({ content: 'Агитация отправлена в канал.', ephemeral: true });
+        return interaction.reply({ content: 'Агитация отправлена в канал.', flags: MessageFlags.Ephemeral });
       }
 
       if (cmd === 'hr_info') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         const text = await getCurrentText('hr_info', DEFAULT_HR_INFO);
         const channel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_MENU);
         await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(text)] });
-        return interaction.reply({ content: 'Описание вакансии HR отправлено в канал.', ephemeral: true });
+        return interaction.reply({ content: 'Описание вакансии HR отправлено в канал.', flags: MessageFlags.Ephemeral });
       }
 
       if (cmd === 'rules_broadcast') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const rulesText = await getCurrentText('rules', DEFAULT_RULES);
         const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(rulesText.slice(0, 4000));
 
@@ -2143,16 +2149,16 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'broadcast_message') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
-        await interaction.reply({ content: 'Отправьте текст сообщения следующим сообщением в этом канале (10 минут на ответ).', ephemeral: true });
+        await interaction.reply({ content: 'Отправьте текст сообщения следующим сообщением в этом канале (10 минут на ответ).', flags: MessageFlags.Ephemeral });
 
         const filter = (m) => m.author.id === interaction.user.id;
         let collected;
         try {
           collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 600000, errors: ['time'] });
         } catch (_) {
-          await interaction.followUp({ content: 'Время ожидания истекло, рассылка отменена.', ephemeral: true });
+          await interaction.followUp({ content: 'Время ожидания истекло, рассылка отменена.', flags: MessageFlags.Ephemeral });
           return;
         }
         const text = collected.first().content;
@@ -2170,7 +2176,7 @@ client.on('interactionCreate', async (interaction) => {
 
       if (cmd === 'rules_update' || cmd === 'agitation_update' || cmd === 'hr_info_update') {
         if (!perms.canManageMembersList(interaction.member)) {
-          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', ephemeral: true });
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         const type = cmd === 'rules_update' ? 'rules' : cmd === 'agitation_update' ? 'agitation' : 'hr_info';
         const defaultText = type === 'rules' ? DEFAULT_RULES : type === 'agitation' ? DEFAULT_AGITATION : DEFAULT_HR_INFO;
@@ -2178,12 +2184,12 @@ client.on('interactionCreate', async (interaction) => {
 
         await interaction.reply({
           embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('Текущий текст (копируемая версия — следующим сообщением)').setDescription(current.slice(0, 4000))],
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
-        await interaction.followUp({ content: '```\n' + current.slice(0, 1900) + '\n```', ephemeral: true });
+        await interaction.followUp({ content: '```\n' + current.slice(0, 1900) + '\n```', flags: MessageFlags.Ephemeral });
         await interaction.followUp({
           content: 'Отправьте новый текст следующим сообщением в этом канале (10 минут на ответ).',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
 
         const filter = (m) => m.author.id === interaction.user.id;
@@ -2191,7 +2197,7 @@ client.on('interactionCreate', async (interaction) => {
         try {
           collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 600000, errors: ['time'] });
         } catch (_) {
-          await interaction.followUp({ content: 'Время ожидания истекло, изменение отменено.', ephemeral: true });
+          await interaction.followUp({ content: 'Время ожидания истекло, изменение отменено.', flags: MessageFlags.Ephemeral });
           return;
         }
         const newText = collected.first().content;
@@ -2567,7 +2573,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('data_change_accept:')) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const reqId = id.split(':')[1];
         const reqRow = await db.get('SELECT * FROM data_change_requests WHERE id = ?', [reqId]);
@@ -2607,7 +2613,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('hr_apply_accept:')) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ Принимать заявки на HR может только Владелец/Зам. Владелец.');
         const reqId = id.split(':')[1];
         const reqRow = await db.get('SELECT * FROM hr_applications WHERE id = ?', [reqId]);
@@ -2642,7 +2648,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('passport_request_accept:')) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const reqId = id.split(':')[1];
         const reqRow = await db.get('SELECT * FROM passport_requests WHERE id = ?', [reqId]);
@@ -3408,7 +3414,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Принятие заявки
       if (id.startsWith('modal_apply_accept:')) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const appId = id.split(':')[1];
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
         if (!app || app.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
@@ -3527,7 +3533,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Подтверждение увольнения через заявку
       if (id.startsWith('modal_kick_confirm:')) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k || k.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
@@ -3569,7 +3575,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Добавление участника вручную
       if (id === 'modal_members_add') {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const rawDiscordId = get('discord_id').trim();
         const hasDiscord = rawDiscordId.length > 0;
         const rawStatic = get('static').trim();
@@ -3664,7 +3670,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Увольнение через список участников
       if (id.startsWith('modal_members_kick:')) {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const parts = id.split(':');
         const discordId = parts[1];
         const scope = parts[2] || 'all';
@@ -4190,7 +4196,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
   await db.init();
   await registerCommands();
