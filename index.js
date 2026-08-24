@@ -679,7 +679,8 @@ async function createProfileThread(guild, discordId, name, staticValue) {
     });
 
     await db.run(
-      'INSERT INTO profile_channels (discord_id, static, channel_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+      `INSERT INTO profile_channels (discord_id, static, channel_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(static) DO UPDATE SET discord_id = excluded.discord_id, channel_id = excluded.channel_id, status = 'active', updated_at = excluded.updated_at`,
       [discordId, staticValue, channel.id, 'active', new Date().toISOString(), new Date().toISOString()],
     );
     await passportsLib.setPassportChannel(discordId, staticValue, channel.id);
