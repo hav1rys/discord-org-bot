@@ -3609,6 +3609,20 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, '⛔ AFK по этому паспорту уже снят или не найден.');
         }
 
+        const requestKey = `${discordId}:${staticValue}`;
+        const already = await db.get(
+          'SELECT * FROM afk_return_requests WHERE key = ? AND afk_since = ?',
+          [requestKey, passport.afk_since],
+        );
+        if (already) {
+          return safeReply(interaction, '⛔ Вы уже отправляли это уведомление — дождитесь, пока руководство снимет AFK.');
+        }
+        await db.run(
+          `INSERT INTO afk_return_requests (key, discord_id, static, afk_since, requested_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET afk_since = excluded.afk_since, requested_at = excluded.requested_at`,
+          [requestKey, discordId, staticValue, passport.afk_since, new Date().toISOString()],
+        );
+
         try {
           const membersChannel = await guild.channels.fetch(config.CHANNEL_AFK_RETURN);
           const embed = new EmbedBuilder()
@@ -3628,8 +3642,24 @@ client.on('interactionCreate', async (interaction) => {
           });
         } catch (err) {
           console.error('Не удалось отправить уведомление о возврате из AFK:', err.message);
+          await db.run('DELETE FROM afk_return_requests WHERE key = ?', [requestKey]);
           return safeReply(interaction, '⛔ Не удалось отправить уведомление руководству — сообщите им напрямую.');
         }
+
+        // Отключаем именно эту кнопку в ЛС (остальные, если по другим
+        // паспортам, остаются рабочими) — чтобы нельзя было спамить.
+        try {
+          const newComponents = interaction.message.components.map((r) => {
+            const newRow = ActionRowBuilder.from(r);
+            newRow.components = newRow.components.map((c) => {
+              const btn = ButtonBuilder.from(c);
+              if (c.customId === id) btn.setDisabled(true).setLabel(`✅ Уведомление отправлено`);
+              return btn;
+            });
+            return newRow;
+          });
+          await interaction.message.edit({ components: newComponents });
+        } catch (_) {}
 
         return safeReply(interaction, '✅ Уведомление отправлено руководству, ждите снятия AFK.');
       }
@@ -3647,12 +3677,14 @@ client.on('interactionCreate', async (interaction) => {
 
         await passportsLib.updatePassportFields(discordId, staticValue, { afk_since: null });
         await history.logStatusRevoked('afk', discordId, staticValue, passport.name, interaction.user.id);
+        await db.run('DELETE FROM afk_return_requests WHERE key = ?', [`${discordId}:${staticValue}`]);
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
         await logAudit(guild, interaction.user, 'AFK снят по уведомлению о возврате', `<@${discordId}> (${passport.name}, № ${staticValue})`);
 
         try {
           await interaction.message.edit({
+            content: '',
             embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x2b2d31).setDescription(`✅ AFK снят — <@${interaction.user.id}>, ${formatDateTime(new Date())}`)],
             components: [],
           });

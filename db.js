@@ -379,6 +379,18 @@ const SCHEMA = {
     indexes: [['giveaway_id']],
   },
 
+  // Защита от спама кнопкой "Вошёл(а)" — одно уведомление на один период
+  // AFK (afk_since сверяется, чтобы новая выдача AFK снова разрешила отправить)
+  afk_return_requests: {
+    columns: {
+      key: 'TEXT PRIMARY KEY', // `${discord_id}:${static}`
+      discord_id: 'TEXT',
+      static: 'TEXT',
+      afk_since: 'TEXT',
+      requested_at: 'TEXT',
+    },
+  },
+
   pending_contract_shots: {
     columns: {
       discord_id: 'TEXT UNIQUE',
