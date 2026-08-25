@@ -407,12 +407,20 @@ async function buildProfileEmbeds(guild, discordId) {
     const lines = [];
     for (const v of vacationRows) {
       const link = v.message_id ? `[Заявка](https://discord.com/channels/${guild.id}/${config.CHANNEL_VACATION_REVIEW}/${v.message_id})` : 'Заявка';
-      lines.push(`${link} | ${v.reason || '—'} | ${formatDateOnly(new Date(v.created_at))} | до ${formatDateOnly(new Date(v.until))}`);
+      let who;
+      if (!v.target_statics || v.target_statics === 'all') {
+        who = passports.map((p) => `${p.name} (№ ${p.static})`).join(', ');
+      } else {
+        const statics = v.target_statics.split(',');
+        const matched = passports.filter((p) => statics.includes(p.static));
+        who = matched.length > 0 ? matched.map((p) => `${p.name} (№ ${p.static})`).join(', ') : statics.map((s) => `№ ${s}`).join(', ');
+      }
+      lines.push(`${who} — ${link} | ${v.reason || '—'} | ${formatDateOnly(new Date(v.created_at))} | до ${formatDateOnly(new Date(v.until))}`);
     }
     for (const g of vacationGrants) {
       const label = g.action === 'granted' ? 'Выдан руководством' : 'Снят руководством';
       const extra = g.action === 'granted' && g.until ? ` | до ${formatDateOnly(new Date(g.until))}` : '';
-      lines.push(`${label} | ${g.reason || '—'} | ${formatDateOnly(new Date(g.at))}${extra}`);
+      lines.push(`${g.name} (№ ${g.static}) — ${label} | ${g.reason || '—'} | ${formatDateOnly(new Date(g.at))}${extra}`);
     }
     mainEmbed.addFields({ name: 'Отпуск', value: lines.join('\n').slice(0, 1024) });
   }
@@ -422,7 +430,7 @@ async function buildProfileEmbeds(guild, discordId) {
   if (afkGrants.length > 0) {
     const lines = afkGrants.map((g) => {
       const label = g.action === 'granted' ? 'Выдан' : 'Снят';
-      return `${label} | ${g.reason || '—'} | ${formatDateOnly(new Date(g.at))}`;
+      return `${g.name} (№ ${g.static}) — ${label} | ${g.reason || '—'} | ${formatDateOnly(new Date(g.at))}`;
     });
     mainEmbed.addFields({ name: 'AFK', value: lines.join('\n').slice(0, 1024) });
   }
@@ -3590,6 +3598,70 @@ client.on('interactionCreate', async (interaction) => {
         return safeReply(interaction, already ? '❌ Вы вышли из розыгрыша.' : '✅ Вы участвуете в розыгрыше! Удачи 🍀');
       }
 
+      if (id.startsWith('afk_return:')) {
+        const [, discordId, staticValue] = id.split(':');
+        if (interaction.user.id !== discordId) {
+          return safeReply(interaction, '⛔ Это не ваше уведомление.');
+        }
+        const passports = await passportsLib.getAllPassports(discordId);
+        const passport = passports.find((p) => p.static === staticValue);
+        if (!passport || !passport.afk_since) {
+          return safeReply(interaction, '⛔ AFK по этому паспорту уже снят или не найден.');
+        }
+
+        try {
+          const membersChannel = await guild.channels.fetch(config.CHANNEL_AFK_RETURN);
+          const embed = new EmbedBuilder()
+            .setColor(0x57f287)
+            .setTitle('✅ Возврат из AFK — требуется проверка')
+            .addFields(
+              { name: 'Участник', value: `<@${discordId}>`, inline: true },
+              { name: 'Имя Фамилия', value: passport.name, inline: true },
+              { name: '№ Паспорта', value: passport.static, inline: true },
+            )
+            .setDescription('Сообщил(а), что вернулся(лась) в игру. Проверьте и снимите AFK.');
+          await membersChannel.send({
+            content: perms.mentionManagementRoles(),
+            embeds: [embed],
+            components: [row(new ButtonBuilder().setCustomId(`afk_return_confirm:${discordId}:${staticValue}`).setLabel('✅ Снять AFK').setStyle(ButtonStyle.Success))],
+            ...mentionOpts,
+          });
+        } catch (err) {
+          console.error('Не удалось отправить уведомление о возврате из AFK:', err.message);
+          return safeReply(interaction, '⛔ Не удалось отправить уведомление руководству — сообщите им напрямую.');
+        }
+
+        return safeReply(interaction, '✅ Уведомление отправлено руководству, ждите снятия AFK.');
+      }
+
+      if (id.startsWith('afk_return_confirm:')) {
+        if (!perms.isHrTier(interaction.member)) {
+          return safeReply(interaction, '⛔ Снимать AFK по такому уведомлению может только HR-Менеджер и выше.');
+        }
+        const [, discordId, staticValue] = id.split(':');
+        const passports = await passportsLib.getAllPassports(discordId);
+        const passport = passports.find((p) => p.static === staticValue);
+        if (!passport || !passport.afk_since) {
+          return safeReply(interaction, 'AFK по этому паспорту уже снят.');
+        }
+
+        await passportsLib.updatePassportFields(discordId, staticValue, { afk_since: null });
+        await history.logStatusRevoked('afk', discordId, staticValue, passport.name, interaction.user.id);
+        await syncStatusRoles(guild, discordId);
+        await safeUpdateMembersList(guild);
+        await logAudit(guild, interaction.user, 'AFK снят по уведомлению о возврате', `<@${discordId}> (${passport.name}, № ${staticValue})`);
+
+        try {
+          await interaction.message.edit({
+            embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x2b2d31).setDescription(`✅ AFK снят — <@${interaction.user.id}>, ${formatDateTime(new Date())}`)],
+            components: [],
+          });
+        } catch (_) {}
+
+        await dmUser(guild, discordId, `✅ AFK снят по паспорту № ${staticValue} (${passport.name}). С возвращением!`);
+        return safeReply(interaction, `AFK снят: ${passport.name} (№ ${staticValue}).`);
+      }
+
       if (id === 'perm_edit_start') {
         if (!(await checkCommandAccess('права_команд', interaction.member))) {
           return safeReply(interaction, '⛔ У вас нет прав.');
@@ -4659,6 +4731,10 @@ client.on('interactionCreate', async (interaction) => {
 
         if (participants.length === 0) return safeReply(interaction, 'Совпадений не найдено.');
 
+        if (participants.length === 1) {
+          return handleParticipantAction(interaction, guild, action, participants[0].discord_id, participants[0]);
+        }
+
         const select = new StringSelectMenuBuilder()
           .setCustomId(`select_pick:${action}`)
           .setPlaceholder('Выберите участника')
@@ -4829,11 +4905,21 @@ client.on('interactionCreate', async (interaction) => {
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
         const names = targets.map((p) => `${p.name} | ${p.static}`).join(', ');
-        await dmUser(
-          guild,
-          discordId,
-          `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}.${reason ? ` Причина: ${reason}.` : ''} Пожалуйста, зайдите в игру под именем **${names}**, чтобы статус отобразился.`,
+        const returnButtons = targets.map((p) =>
+          new ButtonBuilder()
+            .setCustomId(`afk_return:${discordId}:${p.static}`)
+            .setLabel(targets.length > 1 ? `✅ Вошёл(а) — ${p.name}` : '✅ Вошёл(а)')
+            .setStyle(ButtonStyle.Success),
         );
+        // Кнопки в один ряд не больше 5 — на случай, если паспортов вдруг больше
+        const buttonRows = [];
+        for (let i = 0; i < returnButtons.length; i += 5) {
+          buttonRows.push(row(...returnButtons.slice(i, i + 5)));
+        }
+        await dmUser(guild, discordId, {
+          content: `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}.${reason ? ` Причина: ${reason}.` : ''} Пожалуйста, зайдите в игру под именем **${names}**, чтобы статус отобразился.\n\nКогда вернётесь — нажмите кнопку ниже, руководство проверит и снимет AFK.`,
+          components: buttonRows,
+        });
         await logAudit(guild, interaction.user, 'AFK выставлен', `<@${discordId}> (${names}) с ${formatDateOnly(date)}`);
         return safeReply(interaction, `Статус AFK выставлен: ${names}.`);
       }
