@@ -1,5 +1,7 @@
 require('dotenv').config();
 const fs = require('fs');
+const path = require('path');
+const zlib = require('zlib');
 const {
   Client,
   GatewayIntentBits,
@@ -15,6 +17,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   StringSelectMenuBuilder,
+  UserSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
   ChannelType,
   PermissionFlagsBits,
@@ -24,7 +27,7 @@ const {
 
 const db = require('./db');
 const config = require('./config');
-const { logAudit } = require('./audit');
+const { logAudit, logSystem } = require('./audit');
 const { updateMembersList, changeMembersPage } = require('./members');
 const { updateBlacklist, changeBlacklistPage } = require('./blacklist');
 const perms = require('./permissions');
@@ -112,7 +115,7 @@ const mentionOpts = { allowedMentions: { roles: config.ROLES_REVIEW_ALLOWED } };
 const COMMAND_CATEGORIES = [
   {
     title: '👤 Участники и паспорта',
-    commands: ['история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk'],
+    commands: ['история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk', 'отпуск_статистика'],
   },
   {
     title: '📄 Контракты и приглашения',
@@ -136,11 +139,11 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '💾 Резервные копии',
-    commands: ['бэкап_сейчас', 'бэкапы_список'],
+    commands: ['бэкап_сейчас', 'бэкапы_список', 'резерв_восстановить'],
   },
   {
     title: '🩺 Диагностика и отчётность',
-    commands: ['пинг', 'статус', 'статистика_организации', 'экспорт_id', 'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт'],
+    commands: ['пинг', 'статус', 'статистика_организации', 'экспорт_id', 'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт', 'сверка_ролей', 'экспорт_бд', 'поиск_везде'],
   },
   {
     title: '❔ Справка',
@@ -173,18 +176,37 @@ const COMMAND_DEFAULT_TIERS = {
 
   топ_приглашения: 'hr', паспорт_история: 'hr', отпуска_календарь: 'hr', список_afk: 'hr', топ_контракты: 'hr',
   статистика_организации: 'hr', аудит_поиск: 'hr', кто_это: 'hr', история: 'hr', помощь: 'hr',
+  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr',
+  экспорт_бд: 'admin', резерв_восстановить: 'admin',
 };
 
-// Эффективный уровень команды — переопределение из БД, если есть, иначе значение по умолчанию
+function isSnowflake(value) {
+  return /^\d{17,20}$/.test(value || '');
+}
+
+function tierLabel(tier) {
+  if (isSnowflake(tier)) return `🔒 Только <@${tier}>`;
+  return (TIER_INFO[tier] || TIER_INFO.admin).label;
+}
+
+// Эффективный уровень команды — переопределение из БД, если есть (роль ИЛИ
+// конкретный Discord ID), иначе значение по умолчанию
 async function getCommandTier(commandName) {
   const override = await db.get('SELECT tier FROM command_permission_overrides WHERE command_name = ?', [commandName]);
-  return (override && TIER_INFO[override.tier]) ? override.tier : COMMAND_DEFAULT_TIERS[commandName];
+  if (override && (TIER_INFO[override.tier] || isSnowflake(override.tier))) {
+    return override.tier;
+  }
+  return COMMAND_DEFAULT_TIERS[commandName];
 }
 
 // Единая точка проверки для всех команд — читает текущий (возможно,
 // переопределённый) уровень и сразу применяет соответствующую проверку.
 async function checkCommandAccess(commandName, member) {
   const tier = await getCommandTier(commandName);
+  if (isSnowflake(tier)) {
+    if (perms.hasBotAccess(member)) return true; // владелец/admin никогда не блокируются полностью
+    return member.id === tier;
+  }
   const info = TIER_INFO[tier] || TIER_INFO.admin;
   return info.check(member);
 }
@@ -545,6 +567,223 @@ function buildProfileComponents(discordId) {
 // отпуск (проверяется по discordId+паспорт+точная дата окончания).
 // Раз в неделю (проверяется из часового таймера) — напоминает HR/руководству
 // проверить накопившиеся заявки, если они есть.
+// Раз в час — если место на диске заполнено на 90%+, предупреждаем один
+// раз (не при каждой проверке), пока не освободится обратно ниже порога.
+// Раз в час — если карточка контракта висит на проверке (никто не нажал
+// Выполнен/Невыполнен/Не контракт) дольше STUCK_CONTRACT_HOURS, напоминаем
+// руководству — но только один раз на конкретный контракт.
+// Раз в сутки (проверяется из часового таймера, сравнивает дату последней
+// отправки) — короткая сводка Владельцу в ЛС: новые заявки, увольнения,
+// просроченные контракты, у кого скоро кончается отпуск.
+async function sendDailyDigest(guild) {
+  const lastSent = await db.getSetting('daily_digest_last_sent');
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastSent === today) return;
+
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+  const newApps = (await db.get(`SELECT COUNT(*) as cnt FROM applications WHERE created_at >= ?`, [yesterday])).cnt;
+  const newKicks = (await db.get(`SELECT COUNT(*) as cnt FROM kicks WHERE created_at >= ?`, [yesterday])).cnt;
+  const pendingApps = (await db.get(`SELECT COUNT(*) as cnt FROM applications WHERE status = 'pending'`)).cnt;
+  const stuckContracts = (await db.get(
+    `SELECT COUNT(*) as cnt FROM contracts WHERE status = 'pending' AND submitted_at <= ?`,
+    [new Date(Date.now() - config.STUCK_CONTRACT_HOURS * 60 * 60 * 1000).toISOString()],
+  )).cnt;
+
+  const vacationCutoff = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  const participantsOnVacation = await db.all(`SELECT discord_id, name, static, vacation_until FROM participants WHERE vacation_until IS NOT NULL AND vacation_until <= ?`, [vacationCutoff]);
+  const extrasOnVacation = await db.all(`SELECT discord_id, name, static, vacation_until FROM extra_passports WHERE vacation_until IS NOT NULL AND vacation_until <= ?`, [vacationCutoff]);
+  const endingSoon = [...participantsOnVacation, ...extrasOnVacation];
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('📋 Ежедневная сводка по организации')
+    .addFields(
+      { name: 'Новых заявок за сутки', value: String(newApps), inline: true },
+      { name: 'Новых увольнений за сутки', value: String(newKicks), inline: true },
+      { name: 'Всего в очереди на рассмотрение', value: String(pendingApps), inline: true },
+      { name: 'Просроченных контрактов', value: String(stuckContracts), inline: true },
+    );
+  if (endingSoon.length > 0) {
+    embed.addFields({
+      name: 'Отпуск заканчивается в течение суток',
+      value: endingSoon.map((p) => `${p.name} (№ ${p.static}) — до ${formatDateTime(new Date(p.vacation_until))}`).join('\n').slice(0, 1024),
+    });
+  }
+
+  await dmUser(guild, config.OWNER_USER_ID, { embeds: [embed] });
+  await db.setSetting('daily_digest_last_sent', today);
+}
+
+// Раз в неделю (7 дней от прошлой отправки) — общая статистика недели
+// Каждый понедельник:
+// — у кого паспорт СЕЙЧАС на ранге "1. Стажер" и 3+ обработанных
+//   (выполнен/невыполнен) контракта за прошедшую неделю — повышается
+//   ровно до "2. Фрилансер". Выше "2. Фрилансер" авто-повышения нет —
+//   это только вручную через список людей.
+// — у кого паспорт СЕЙЧАС на ранге "2. Фрилансер" — понижается до
+//   "1. Стажер" (независимо от контрактов), кроме тех, кто только что
+//   повышен в этом же прогоне.
+async function runWeeklyRankAdjustment(guild) {
+  const now = new Date();
+  const isMonday = now.getDay() === 1;
+  const todayStr = now.toISOString().slice(0, 10);
+  const lastRun = await db.getSetting('weekly_rank_adjustment_last_run');
+  if (!isMonday || lastRun === todayStr) return;
+
+  const stazherRoleId = config.ROLE_IDS[4]; // "1. Стажер"
+  const freelancerRoleId = config.ROLE_IDS[3]; // "2. Фрилансер"
+
+  const range = contracts.getWeekRange(1); // прошедшая полная неделя
+  const contractCounts = await db.all(
+    `SELECT thread_id, COUNT(*) as cnt FROM contracts WHERE status IN ('fulfilled','unfulfilled') AND submitted_at BETWEEN ? AND ? GROUP BY thread_id`,
+    [range.start.toISOString(), range.end.toISOString()],
+  );
+
+  const promotions = [];
+  for (const row of contractCounts) {
+    if (row.cnt < 3) continue;
+
+    let passportInfo = await db.get('SELECT discord_id, static, name, role_id FROM participants WHERE profile_thread_id = ?', [row.thread_id]);
+    if (!passportInfo) {
+      passportInfo = await db.get('SELECT discord_id, static, name, role_id FROM extra_passports WHERE profile_thread_id = ?', [row.thread_id]);
+    }
+    if (!passportInfo || passportInfo.role_id !== stazherRoleId) continue; // повышаем только тех, кто сейчас именно Стажёр
+
+    await passportsLib.updatePassportFields(passportInfo.discord_id, passportInfo.static, { role_id: freelancerRoleId });
+    promotions.push({ discordId: passportInfo.discord_id, name: passportInfo.name, static: passportInfo.static });
+  }
+
+  const promotedStatics = new Set(promotions.map((p) => p.static));
+
+  const freelancerParticipants = await db.all('SELECT discord_id, static, name FROM participants WHERE role_id = ?', [freelancerRoleId]);
+  const freelancerExtras = await db.all('SELECT discord_id, static, name FROM extra_passports WHERE role_id = ?', [freelancerRoleId]);
+  const demotions = [];
+  for (const p of [...freelancerParticipants, ...freelancerExtras]) {
+    if (promotedStatics.has(p.static)) continue; // только что повышен в этом же прогоне — не понижаем следом
+    await passportsLib.updatePassportFields(p.discord_id, p.static, { role_id: stazherRoleId });
+    demotions.push(p);
+  }
+
+  const affectedDiscordIds = new Set([...promotions.map((p) => p.discordId), ...demotions.map((p) => p.discord_id)]);
+  for (const discordId of affectedDiscordIds) {
+    await syncEffectiveIdentity(guild, discordId);
+  }
+  if (affectedDiscordIds.size > 0) {
+    await safeUpdateMembersList(guild);
+  }
+
+  if (promotions.length > 0 || demotions.length > 0) {
+    const lines = [];
+    if (promotions.length > 0) {
+      lines.push('**Повышены до «2. Фрилансер» (3+ обработанных контракта за неделю):**');
+      lines.push(...promotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discordId}>`));
+    }
+    if (demotions.length > 0) {
+      lines.push('**Понижены до «1. Стажер» (были на «2. Фрилансер»):**');
+      lines.push(...demotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discord_id}>`));
+    }
+    await logAudit(guild, client.user, '🔄 Еженедельная авто-корректировка рангов', lines.join('\n').slice(0, 4000));
+  }
+
+  await db.setSetting('weekly_rank_adjustment_last_run', todayStr);
+}
+
+async function sendWeeklyDigest(guild) {
+  const lastSent = await db.getSetting('weekly_digest_last_sent');
+  if (lastSent && Date.now() - new Date(lastSent).getTime() < 7 * 24 * 60 * 60 * 1000) return;
+
+  const range = contracts.getWeekRange(0);
+  const contractRows = await db.all(
+    `SELECT status FROM contracts WHERE status IN ('fulfilled','unfulfilled') AND submitted_at BETWEEN ? AND ?`,
+    [range.start.toISOString(), range.end.toISOString()],
+  );
+  const fulfilled = contractRows.filter((r) => r.status === 'fulfilled').length;
+  const unfulfilled = contractRows.filter((r) => r.status === 'unfulfilled').length;
+
+  const confirmedInvites = (await db.get(
+    `SELECT COUNT(*) as cnt FROM invitations WHERE status = 'confirmed' AND joined_at BETWEEN ? AND ?`,
+    [range.start.toISOString(), range.end.toISOString()],
+  )).cnt;
+
+  const acceptedApps = (await db.get(
+    `SELECT COUNT(*) as cnt FROM applications WHERE status = 'accepted' AND created_at BETWEEN ? AND ?`,
+    [range.start.toISOString(), range.end.toISOString()],
+  )).cnt;
+  const rejectedApps = (await db.get(
+    `SELECT COUNT(*) as cnt FROM applications WHERE status = 'rejected' AND created_at BETWEEN ? AND ?`,
+    [range.start.toISOString(), range.end.toISOString()],
+  )).cnt;
+
+  const kicksThisWeek = (await db.get(
+    `SELECT COUNT(*) as cnt FROM kicks WHERE status = 'accepted' AND created_at BETWEEN ? AND ?`,
+    [range.start.toISOString(), range.end.toISOString()],
+  )).cnt;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`📊 Итоги недели: ${contracts.formatWeekLabel(range)}`)
+    .addFields(
+      { name: 'Контракты', value: `✅ ${fulfilled} / ❌ ${unfulfilled}`, inline: true },
+      { name: 'Подтверждённые приглашения', value: String(confirmedInvites), inline: true },
+      { name: 'Заявки: принято/отклонено', value: `${acceptedApps} / ${rejectedApps}`, inline: true },
+      { name: 'Увольнений за неделю', value: String(kicksThisWeek), inline: true },
+    );
+
+  await dmUser(guild, config.OWNER_USER_ID, { embeds: [embed] });
+  await db.setSetting('weekly_digest_last_sent', new Date().toISOString());
+}
+
+async function checkStuckContracts(guild) {
+  const cutoff = new Date(Date.now() - config.STUCK_CONTRACT_HOURS * 60 * 60 * 1000).toISOString();
+  const stuck = await db.all(
+    `SELECT * FROM contracts WHERE status = 'pending' AND submitted_at <= ? AND stuck_reminder_sent = 0`,
+    [cutoff],
+  );
+  if (stuck.length === 0) return;
+
+  // Группируем по каналу — если у одного человека зависло сразу несколько,
+  // не спамим отдельным сообщением на каждый.
+  const byChannel = new Map();
+  for (const c of stuck) {
+    if (!byChannel.has(c.thread_id)) byChannel.set(c.thread_id, []);
+    byChannel.get(c.thread_id).push(c);
+  }
+
+  for (const [channelId, contractsInChannel] of byChannel) {
+    try {
+      const channel = await guild.channels.fetch(channelId);
+      const lines = contractsInChannel.map((c) => `[Карточка](https://discord.com/channels/${guild.id}/${channelId}/${c.review_message_id}) — с ${formatDateTime(new Date(c.submitted_at))}`);
+      const embed = new EmbedBuilder()
+        .setColor(0xfee75c)
+        .setTitle('⏰ Контракт(ы) зависли на проверке')
+        .setDescription(lines.join('\n').slice(0, 4000));
+      await channel.send({ content: perms.mentionManagementRoles(), embeds: [embed], ...mentionOpts });
+      for (const c of contractsInChannel) {
+        await db.run('UPDATE contracts SET stuck_reminder_sent = 1 WHERE id = ?', [c.id]);
+      }
+    } catch (err) {
+      console.error(`Не удалось отправить напоминание о зависшем контракте в канал ${channelId}:`, err.message);
+    }
+  }
+}
+
+async function checkDiskSpace(guild) {
+  const usedBytes = getDirSize(db.dataDir);
+  const quotaMb = 5000; // 5 ГБ — типовая квота диска на Bothost Basic
+  const percent = (usedBytes / (quotaMb * 1024 * 1024)) * 100;
+
+  const alreadyWarned = (await db.getSetting('disk_warning_sent')) === 'true';
+  if (percent >= 90) {
+    if (!alreadyWarned) {
+      await logSystem(guild, '⚠️ Диск почти заполнен', `Использовано ${(usedBytes / 1024 / 1024).toFixed(1)} МБ из ${quotaMb} МБ (${percent.toFixed(1)}%). Пора почистить старые бэкапы/данные или расширить тариф.`);
+      await db.setSetting('disk_warning_sent', 'true');
+    }
+  } else if (alreadyWarned) {
+    await db.setSetting('disk_warning_sent', 'false');
+  }
+}
+
 async function checkHrReminder(guild) {
   const lastReminder = await db.getSetting('hr_reminder_last_sent');
   const intervalMs = config.HR_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
@@ -1182,6 +1421,25 @@ const commands = [
     .setDescription('История изменений конкретного паспорта (смена Имени Фамилии, вступление/увольнение)')
     .addStringOption((opt) => opt.setName('паспорт').setDescription('№ Паспорта').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
+    .setName('сверка_ролей')
+    .setDescription('Найти расхождения между рангом в базе и реальной ролью на сервере'),
+  new SlashCommandBuilder()
+    .setName('экспорт_бд')
+    .setDescription('Выгрузить все таблицы базы данных в .csv файлы'),
+  new SlashCommandBuilder()
+    .setName('поиск_везде')
+    .setDescription('Поиск текста сразу по всем ключевым таблицам')
+    .addStringOption((opt) => opt.setName('текст').setDescription('Что искать').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('отпуск_статистика')
+    .setDescription('Сколько раз и на сколько суммарно человек уходил в отпуск за период')
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, по всем').setRequired(false).setAutocomplete(true))
+    .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 90)').setRequired(false).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName('резерв_восстановить')
+    .setDescription('⚠️ Откатить базу данных к резервной копии (перезаписывает текущие данные)')
+    .addStringOption((opt) => opt.setName('файл').setDescription('Какую резервную копию восстановить').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
     .setName('предпросмотр')
     .setDescription('Показать себе, как выглядит текущий текст, прежде чем рассылать всем')
     .addStringOption((opt) =>
@@ -1598,6 +1856,114 @@ async function dmUser(guild, discordId, content) {
   }
 }
 
+// Отправляет файл бэкапа в отдельный Discord-канал (п. "чтобы она не
+// потерялась, если сайт умрёт") — используется и ежедневным авто-бэкапом,
+// и командой /бэкап_сейчас.
+const searchQueryCache = new Map(); // короткий id -> текст запроса (для кнопок пагинации)
+const SEARCH_PAGE_SIZE = 10;
+
+function buildGlobalSearchQueries(q) {
+  return [
+    {
+      table: '👤 Участники (participants)',
+      sql: () => `SELECT name, static, discord_tag FROM participants WHERE name LIKE ? OR static LIKE ? OR discord_tag LIKE ? OR discord_id LIKE ? LIMIT ? OFFSET ?`,
+      params: [q, q, q, q],
+      format: (r) => `${r.name} (№ ${r.static}, ${r.discord_tag})`,
+    },
+    {
+      table: '👤 Доп. паспорта (extra_passports)',
+      sql: () => `SELECT name, static FROM extra_passports WHERE name LIKE ? OR static LIKE ? LIMIT ? OFFSET ?`,
+      params: [q, q],
+      format: (r) => `${r.name} (№ ${r.static})`,
+    },
+    {
+      table: '📝 Заявки на вступление (applications)',
+      sql: () => `SELECT id, name, static, discord_tag FROM applications WHERE name LIKE ? OR static LIKE ? OR discord_tag LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      params: [q, q, q],
+      format: (r) => `#${r.id} — ${r.name} (№ ${r.static}, ${r.discord_tag})`,
+    },
+    {
+      table: '🚫 Заявки на увольнение (kicks)',
+      sql: () => `SELECT id, name, target_static, reason FROM kicks WHERE name LIKE ? OR target_static LIKE ? OR reason LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      params: [q, q, q],
+      format: (r) => `#${r.id} — ${r.name} (№ ${r.target_static})${r.reason ? `: ${r.reason.slice(0, 60)}` : ''}`,
+    },
+    {
+      table: '🤡 ЧС (blacklist)',
+      sql: () => `SELECT id, discord_tag, static, reason FROM blacklist WHERE discord_tag LIKE ? OR static LIKE ? OR reason LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      params: [q, q, q],
+      format: (r) => `#${r.id} — ${r.discord_tag || '—'} (№ ${r.static || '—'})${r.reason ? `: ${r.reason.slice(0, 60)}` : ''}`,
+    },
+    {
+      table: '📋 Заявки на роль HR (hr_applications)',
+      sql: () => `SELECT id, discord_tag FROM hr_applications WHERE discord_tag LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      params: [q],
+      format: (r) => `#${r.id} — ${r.discord_tag}`,
+    },
+    {
+      table: '✏️ Изменение данных (data_change_requests)',
+      sql: () => `SELECT id, old_name, new_name, target_static FROM data_change_requests WHERE old_name LIKE ? OR new_name LIKE ? OR target_static LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      params: [q, q, q],
+      format: (r) => `#${r.id} — «${r.old_name}» → «${r.new_name}» (№ ${r.target_static})`,
+    },
+    {
+      table: '📋 Аудит (audit_log)',
+      sql: () => `SELECT id, action, actor_tag, details FROM audit_log WHERE action LIKE ? OR details LIKE ? OR actor_tag LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+      params: [q, q, q],
+      format: (r) => `**${r.action}** — ${r.actor_tag}: ${r.details.slice(0, 80)}`,
+    },
+  ];
+}
+
+// Постранично: запрашиваем на 1 больше, чем помещается — если пришло
+// больше SEARCH_PAGE_SIZE, значит есть следующая страница.
+async function runGlobalSearch(text, page) {
+  const q = `%${text}%`;
+  const searches = buildGlobalSearchQueries(q);
+  const offset = page * SEARCH_PAGE_SIZE;
+
+  const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(`🔍 Поиск: «${text}»${page > 0 ? ` — стр. ${page + 1}` : ''}`);
+  let totalFound = 0;
+  let hasMore = false;
+
+  for (const s of searches) {
+    const rows = await db.all(s.sql(), [...s.params, SEARCH_PAGE_SIZE + 1, offset]);
+    if (rows.length === 0) continue;
+    const pageRows = rows.slice(0, SEARCH_PAGE_SIZE);
+    if (rows.length > SEARCH_PAGE_SIZE) hasMore = true;
+    totalFound += pageRows.length;
+    embed.addFields({ name: `${s.table} (стр. ${page + 1})`, value: pageRows.map(s.format).join('\n').slice(0, 1024) });
+  }
+
+  return { embed, totalFound, hasMore };
+}
+
+function buildSearchComponents(searchId, page, hasMore) {
+  return [row(
+    new ButtonBuilder().setCustomId(`search_page:${searchId}:${page - 1}`).setLabel('◀ Назад').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
+    new ButtonBuilder().setCustomId(`search_page:${searchId}:${page + 1}`).setLabel('Вперёд ▶').setStyle(ButtonStyle.Secondary).setDisabled(!hasMore),
+  )];
+}
+
+async function uploadBackupFile(filePath, reason) {
+  try {
+    const channel = await client.channels.fetch(config.CHANNEL_BACKUPS);
+    const rawBuffer = fs.readFileSync(filePath);
+    // Сжимаем gzip'ом (встроен в Node, никаких доп. зависимостей) — если
+    // база вырастет, это сильно уменьшит размер вложения. Чтобы
+    // восстановить: разархивировать .gz любым архиватором (7-Zip,
+    // WinRAR и т.д. понимают .gz) перед тем, как класть файл боту.
+    const compressed = zlib.gzipSync(rawBuffer);
+    const file = new AttachmentBuilder(compressed, { name: `${path.basename(filePath)}.gz` });
+    await channel.send({
+      content: `💾 Резервная копия БД (${reason}) — ${formatDateTime(new Date())}\nСжато gzip: ${(rawBuffer.length / 1024 / 1024).toFixed(2)} МБ → ${(compressed.length / 1024 / 1024).toFixed(2)} МБ. Перед восстановлением распакуйте.`,
+      files: [file],
+    });
+  } catch (err) {
+    console.error('Не удалось отправить резервную копию в канал:', err.message);
+  }
+}
+
 async function archiveProfileChannel(guild, discordId, channelId) {
   if (!channelId) return;
   try {
@@ -1919,6 +2285,19 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (interaction.commandName === 'резерв_восстановить') {
+        const focused = interaction.options.getFocused().toLowerCase();
+        const files = backup.listBackups().filter((f) => f.name.toLowerCase().includes(focused));
+        const choices = files.slice(0, 25).map((f) => ({
+          name: `${f.name} — ${(f.size / 1024 / 1024).toFixed(2)} МБ — ${formatDateTime(f.mtime)}`.slice(0, 100),
+          value: f.name,
+        }));
+        try {
+          await interaction.respond(choices);
+        } catch (_) {}
+        return;
+      }
+
       if (interaction.commandName === 'настройка_изменить' || interaction.commandName === 'настройка_показать') {
         const focused = interaction.options.getFocused().toLowerCase();
         const keys = configStore.getSettableKeys().filter((k) => k.toLowerCase().includes(focused));
@@ -1953,7 +2332,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов'];
+      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов', 'отпуск_статистика'];
       if (!autocompleteCommands.includes(interaction.commandName)) return;
 
       const focused = interaction.options.getFocused();
@@ -2755,9 +3134,12 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const ok = backup.backupNow();
-        await logAudit(guild, interaction.user, 'Резервная копия создана вручную', ok ? 'Успешно' : 'Ошибка — см. консоль/канал аудита');
-        await interaction.editReply(ok ? '✅ Резервная копия создана.' : '⛔ Не удалось создать резервную копию — подробности в консоли.');
+        const filePath = backup.backupNow();
+        await logAudit(guild, interaction.user, 'Резервная копия создана вручную', filePath ? 'Успешно' : 'Ошибка — см. консоль/канал аудита');
+        if (filePath) {
+          await uploadBackupFile(filePath, `вручную, ${interaction.user.tag}`);
+        }
+        await interaction.editReply(filePath ? '✅ Резервная копия создана и отправлена в канал бэкапов.' : '⛔ Не удалось создать резервную копию — подробности в консоли.');
         return;
       }
 
@@ -2775,6 +3157,35 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('💾 Резервные копии БД').setDescription(lines.join('\n').slice(0, 4000));
         await interaction.editReply({ embeds: [embed] });
         return;
+      }
+
+      if (cmd === 'резерв_восстановить') {
+        if (!(await checkCommandAccess('резерв_восстановить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        const filename = interaction.options.getString('файл');
+        const files2 = backup.listBackups();
+        const target = files2.find((f) => f.name === filename);
+        if (!target) {
+          return interaction.reply({ content: '⛔ Такой резервной копии не существует.', flags: MessageFlags.Ephemeral });
+        }
+
+        const confirmEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('⚠️ Восстановление базы данных')
+          .setDescription(
+            `Вы собираетесь заменить **текущую** базу данных файлом:\n\`${target.name}\` (${(target.size / 1024 / 1024).toFixed(2)} МБ, от ${formatDateTime(target.mtime)}).\n\n` +
+            `**Все данные, добавленные после этой резервной копии, будут потеряны безвозвратно.**\nПеред восстановлением рекомендуется сделать свежий бэкап через \`/бэкап_сейчас\`.\n\n` +
+            `После подтверждения бот нужно будет **вручную перезапустить** (Restart на Bothost), чтобы изменения точно применились.`,
+          );
+        return interaction.reply({
+          embeds: [confirmEmbed],
+          components: [row(
+            new ButtonBuilder().setCustomId(`restore_confirm:${filename}`).setLabel('⚠️ Да, восстановить').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('restore_cancel').setLabel('Отмена').setStyle(ButtonStyle.Secondary),
+          )],
+          flags: MessageFlags.Ephemeral,
+        });
       }
 
       if (cmd === 'аудит_экспорт') {
@@ -2822,16 +3233,23 @@ client.on('interactionCreate', async (interaction) => {
         const overrides = await db.all('SELECT command_name, tier FROM command_permission_overrides');
         const overrideMap = new Map(overrides.map((o) => [o.command_name, o.tier]));
 
-        const grouped = { admin: [], owner: [], deputy: [], hr: [] };
+        const grouped = { admin: [], owner: [], deputy: [], hr: [], specific: [] };
         for (const [name, defaultTier] of Object.entries(COMMAND_DEFAULT_TIERS)) {
           const effectiveTier = overrideMap.has(name) ? overrideMap.get(name) : defaultTier;
           const mark = overrideMap.has(name) ? ' *' : '';
-          (grouped[effectiveTier] || grouped[defaultTier]).push(`\`/${name}\`${mark}`);
+          if (isSnowflake(effectiveTier)) {
+            grouped.specific.push(`\`/${name}\`${mark} → <@${effectiveTier}>`);
+          } else {
+            (grouped[effectiveTier] || grouped[defaultTier]).push(`\`/${name}\`${mark}`);
+          }
         }
 
         const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔐 Права доступа к командам');
         for (const [tierKey, info] of Object.entries(TIER_INFO)) {
           embed.addFields({ name: info.label, value: grouped[tierKey].join(', ').slice(0, 1024) || '—' });
+        }
+        if (grouped.specific.length > 0) {
+          embed.addFields({ name: '🔒 Только конкретный человек', value: grouped.specific.join('\n').slice(0, 1024) });
         }
         if (overrides.length > 0) {
           embed.setFooter({ text: '* — переопределено вручную (отличается от значения по умолчанию)' });
@@ -2882,6 +3300,193 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'сверка_ролей') {
+        if (!(await checkCommandAccess('сверка_ролей', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const allParticipants = await db.all('SELECT discord_id FROM participants');
+        const mismatches = [];
+
+        for (const p of allParticipants) {
+          if (p.discord_id.startsWith('nodiscord-')) continue;
+          const identity = await passportsLib.computeEffectiveIdentity(p.discord_id);
+          if (!identity || !identity.role_id) continue;
+
+          let member;
+          try {
+            member = await guild.members.fetch(p.discord_id);
+          } catch (_) {
+            continue; // человек мог покинуть сервер — тут сверять нечего
+          }
+
+          const expectedRoleId = identity.role_id;
+          const hasExpected = member.roles.cache.has(expectedRoleId);
+          const otherRankRoles = config.ROLE_IDS.filter((r) => r !== expectedRoleId && member.roles.cache.has(r));
+
+          if (!hasExpected || otherRankRoles.length > 0) {
+            let expectedRoleName = expectedRoleId;
+            try {
+              const r = await guild.roles.fetch(expectedRoleId);
+              if (r) expectedRoleName = r.name;
+            } catch (_) {}
+
+            const actualNames = [];
+            for (const rid of config.ROLE_IDS) {
+              if (member.roles.cache.has(rid)) {
+                try {
+                  const r = await guild.roles.fetch(rid);
+                  actualNames.push(r ? r.name : rid);
+                } catch (_) {
+                  actualNames.push(rid);
+                }
+              }
+            }
+
+            mismatches.push(`<@${p.discord_id}> (${identity.name}) — в базе: **${expectedRoleName}**, на сервере: **${actualNames.join(', ') || 'нет ранговой роли'}**`);
+          }
+        }
+
+        if (mismatches.length === 0) {
+          await interaction.editReply('✅ Расхождений не найдено — роли на сервере совпадают с базой у всех.');
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('⚠️ Расхождения роль на сервере ↔ ранг в базе')
+          .setDescription(mismatches.join('\n').slice(0, 4000));
+        if (mismatches.length > 1 || mismatches.join('\n').length > 4000) {
+          embed.setFooter({ text: `Всего расхождений: ${mismatches.length}` });
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'экспорт_бд') {
+        if (!(await checkCommandAccess('экспорт_бд', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const tables = await db.all(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`);
+        const files = [];
+        for (const t of tables) {
+          const rows = await db.all(`SELECT * FROM ${t.name}`);
+          if (rows.length === 0) continue; // пустые таблицы пропускаем
+          const headers = Object.keys(rows[0]);
+          const csv = buildCsv(headers, rows.map((r) => headers.map((h) => r[h])));
+          files.push(new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `${t.name}.csv` }));
+        }
+
+        if (files.length === 0) {
+          await interaction.editReply('В базе пока нет данных для выгрузки.');
+          return;
+        }
+
+        await logAudit(guild, interaction.user, 'Экспорт базы данных', `Таблиц с данными: ${files.length} из ${tables.length}`);
+
+        for (let i = 0; i < files.length; i += 10) {
+          const chunk = files.slice(i, i + 10);
+          if (i === 0) {
+            await interaction.editReply({ content: `Экспорт БД — ${files.length} таблиц с данными (пустые пропущены):`, files: chunk });
+          } else {
+            await interaction.followUp({ files: chunk, flags: MessageFlags.Ephemeral });
+          }
+        }
+        return;
+      }
+
+      if (cmd === 'отпуск_статистика') {
+        if (!(await checkCommandAccess('отпуск_статистика', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const personQuery = interaction.options.getString('человек');
+        const days = interaction.options.getInteger('дней') || 90;
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+        let targetDiscordId = null;
+        if (personQuery) {
+          const target = await invitations.resolveInviter(personQuery);
+          if (!target) {
+            await interaction.editReply('⛔ Человек не найден.');
+            return;
+          }
+          targetDiscordId = target.discord_id;
+        }
+
+        const selfServiceRows = await db.all(
+          `SELECT * FROM vacations WHERE status = 'accepted' AND created_at >= ?${targetDiscordId ? ' AND discord_id = ?' : ''}`,
+          targetDiscordId ? [since.toISOString(), targetDiscordId] : [since.toISOString()],
+        );
+        const grantedRows = await db.all(
+          `SELECT * FROM status_events WHERE type = 'vacation' AND action = 'granted' AND at >= ?${targetDiscordId ? ' AND discord_id = ?' : ''}`,
+          targetDiscordId ? [since.toISOString(), targetDiscordId] : [since.toISOString()],
+        );
+
+        const perPerson = new Map(); // discordId -> {count, days}
+        const addInstance = (discordId, startIso, endIso) => {
+          if (!startIso || !endIso) return;
+          const start = new Date(startIso);
+          const end = new Date(endIso);
+          const durationDays = Math.max(0, Math.round((end - start) / (24 * 60 * 60 * 1000)));
+          const cur = perPerson.get(discordId) || { count: 0, days: 0 };
+          cur.count += 1;
+          cur.days += durationDays;
+          perPerson.set(discordId, cur);
+        };
+
+        for (const r of selfServiceRows) addInstance(r.discord_id, r.created_at, r.until);
+        for (const r of grantedRows) addInstance(r.discord_id, r.at, r.until);
+
+        if (perPerson.size === 0) {
+          await interaction.editReply(`За последние ${days} дней отпусков не найдено${targetDiscordId ? ' у этого человека' : ''}.`);
+          return;
+        }
+
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(`🏖️ Статистика отпусков за последние ${days} дней`);
+        if (targetDiscordId) {
+          const stat = perPerson.get(targetDiscordId);
+          if (!stat) {
+            await interaction.editReply(`За последние ${days} дней у этого человека отпусков не найдено.`);
+            return;
+          }
+          embed.setDescription(`<@${targetDiscordId}> — уходил(а) в отпуск **${stat.count}** раз(а), суммарно **${stat.days}** дней.`);
+        } else {
+          const sorted = [...perPerson.entries()].sort((a, b) => b[1].days - a[1].days).slice(0, 25);
+          embed.setDescription(sorted.map(([id, s], i) => `${i + 1}. <@${id}> — ${s.count} раз(а), ${s.days} дней`).join('\n').slice(0, 4000));
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'поиск_везде') {
+        if (!(await checkCommandAccess('поиск_везде', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const text = interaction.options.getString('текст');
+
+        const { embed, totalFound, hasMore } = await runGlobalSearch(text, 0);
+        if (totalFound === 0) {
+          await interaction.editReply('Ничего не найдено ни в одной из таблиц.');
+          return;
+        }
+
+        const searchId = Math.random().toString(36).slice(2, 10);
+        searchQueryCache.set(searchId, text);
+        // Чистим совсем старые запросы, чтобы Map не рос бесконечно
+        if (searchQueryCache.size > 200) {
+          const oldestKey = searchQueryCache.keys().next().value;
+          searchQueryCache.delete(oldestKey);
+        }
+
+        await interaction.editReply({ embeds: [embed], components: buildSearchComponents(searchId, 0, hasMore) });
         return;
       }
 
@@ -3694,6 +4299,42 @@ client.on('interactionCreate', async (interaction) => {
         return safeReply(interaction, `AFK снят: ${passport.name} (№ ${staticValue}).`);
       }
 
+      if (id.startsWith('restore_confirm:')) {
+        if (!(await checkCommandAccess('резерв_восстановить', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const filename = id.split(':')[1];
+        await interaction.update({ content: '⏳ Восстанавливаю...', embeds: [], components: [] });
+        try {
+          backup.restoreFromBackup(filename);
+          await logAudit(guild, interaction.user, '⚠️ База данных восстановлена из резервной копии', `Файл: ${filename}. Требуется перезапуск бота.`);
+          await interaction.editReply(`✅ База данных восстановлена из \`${filename}\`.\n\n⚠️ **Перезапустите бота вручную (Restart на Bothost) прямо сейчас**, чтобы изменения точно применились.`);
+        } catch (err) {
+          await interaction.editReply(`⛔ Не удалось восстановить: ${err.message}`);
+        }
+        return;
+      }
+
+      if (id === 'restore_cancel') {
+        return interaction.update({ content: '❌ Восстановление отменено.', embeds: [], components: [] });
+      }
+
+      if (id.startsWith('search_page:')) {
+        if (!(await checkCommandAccess('поиск_везде', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const [, searchId, pageStr] = id.split(':');
+        const text = searchQueryCache.get(searchId);
+        if (!text) {
+          return safeReply(interaction, '⛔ Этот поиск устарел — выполните `/поиск_везде` заново.');
+        }
+        const page = parseInt(pageStr, 10);
+        await interaction.deferUpdate();
+        const { embed, hasMore } = await runGlobalSearch(text, page);
+        await interaction.editReply({ embeds: [embed], components: buildSearchComponents(searchId, page, hasMore) });
+        return;
+      }
+
       if (id === 'perm_edit_start') {
         if (!(await checkCommandAccess('права_команд', interaction.member))) {
           return safeReply(interaction, '⛔ У вас нет прав.');
@@ -3866,7 +4507,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     // ----- Select-меню -----
-    if (interaction.isStringSelectMenu()) {
+    if (interaction.isAnySelectMenu()) {
       const customId = interaction.customId;
 
       if (customId.startsWith('select_blacklist_remove:')) {
@@ -4024,9 +4665,10 @@ client.on('interactionCreate', async (interaction) => {
                 .setValue(key)
                 .setDefault(key === currentTier),
             ),
+            new StringSelectMenuOptionBuilder().setLabel('🔒 Только конкретный человек').setValue('__specific_user__').setDefault(isSnowflake(currentTier)),
             new StringSelectMenuOptionBuilder().setLabel('↩️ Сбросить на значение по умолчанию').setValue('__reset__'),
           );
-        return safeReply(interaction, { content: `Команда: \`/${commandName}\` — текущий уровень: **${TIER_INFO[currentTier].label}**`, components: [row(tierSelect)] });
+        return safeReply(interaction, { content: `Команда: \`/${commandName}\` — текущий уровень: **${tierLabel(currentTier)}**`, components: [row(tierSelect)] });
       }
 
       if (customId.startsWith('perm_set_tier:')) {
@@ -4039,8 +4681,15 @@ client.on('interactionCreate', async (interaction) => {
         if (chosen === '__reset__') {
           await db.run('DELETE FROM command_permission_overrides WHERE command_name = ?', [commandName]);
           const defaultTier = COMMAND_DEFAULT_TIERS[commandName];
-          await logAudit(guild, interaction.user, 'Право команды сброшено', `/${commandName} → ${TIER_INFO[defaultTier].label} (по умолчанию)`);
-          return safeReply(interaction, `Готово. \`/${commandName}\` сброшена на уровень по умолчанию: **${TIER_INFO[defaultTier].label}**.`);
+          await logAudit(guild, interaction.user, 'Право команды сброшено', `/${commandName} → ${tierLabel(defaultTier)} (по умолчанию)`);
+          return safeReply(interaction, `Готово. \`/${commandName}\` сброшена на уровень по умолчанию: **${tierLabel(defaultTier)}**.`);
+        }
+
+        if (chosen === '__specific_user__') {
+          const userSelect = new UserSelectMenuBuilder()
+            .setCustomId(`perm_set_user:${commandName}`)
+            .setPlaceholder('Выберите человека');
+          return safeReply(interaction, { content: `Команда: \`/${commandName}\` — выберите единственного человека, кому будет доступна:`, components: [row(userSelect)] });
         }
 
         if (!TIER_INFO[chosen]) return safeReply(interaction, '⛔ Неизвестный уровень.');
@@ -4050,8 +4699,24 @@ client.on('interactionCreate', async (interaction) => {
            ON CONFLICT(command_name) DO UPDATE SET tier = excluded.tier, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
           [commandName, chosen, interaction.user.id, new Date().toISOString()],
         );
-        await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → ${TIER_INFO[chosen].label}`);
-        return safeReply(interaction, `Готово. \`/${commandName}\` теперь требует: **${TIER_INFO[chosen].label}**\n\n(применилось сразу, без перезапуска)`);
+        await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → ${tierLabel(chosen)}`);
+        return safeReply(interaction, `Готово. \`/${commandName}\` теперь требует: **${tierLabel(chosen)}**\n\n(применилось сразу, без перезапуска)`);
+      }
+
+      if (customId.startsWith('perm_set_user:')) {
+        if (!(await checkCommandAccess('права_команд', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const commandName = customId.split(':')[1];
+        const chosenUserId = interaction.values[0];
+
+        await db.run(
+          `INSERT INTO command_permission_overrides (command_name, tier, updated_by, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(command_name) DO UPDATE SET tier = excluded.tier, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+          [commandName, chosenUserId, interaction.user.id, new Date().toISOString()],
+        );
+        await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → только <@${chosenUserId}>`);
+        return safeReply(interaction, `Готово. \`/${commandName}\` теперь доступна только <@${chosenUserId}> (плюс Владелец/Admin по умолчанию).\n\n(применилось сразу, без перезапуска)`);
       }
 
       if (customId === 'select_data_change_passport') {
@@ -5317,22 +5982,27 @@ client.once('clientReady', async () => {
   if (process.env.GUILD_ID) {
     try {
       const startupGuild = await client.guilds.fetch(process.env.GUILD_ID);
-      await logAudit(startupGuild, client.user, '🔄 Бот запущен/перезапущен', `${client.user.tag} в сети.`);
+      await logSystem(startupGuild, '🔄 Бот запущен/перезапущен', `${client.user.tag} в сети.`);
     } catch (err) {
       console.error('Не удалось залогировать запуск бота в аудит:', err.message);
     }
   }
 
-  backup.scheduleDailyBackup(async (text) => {
-    console.error('Ошибка бэкапа:', text);
-    try {
-      if (!process.env.GUILD_ID) return;
-      const guild = await client.guilds.fetch(process.env.GUILD_ID);
-      await logAudit(guild, client.user, '⚠️ Сбой резервного копирования БД', text);
-    } catch (err) {
-      console.error('Не удалось отправить уведомление о сбое бэкапа в аудит:', err.message);
-    }
-  });
+  backup.scheduleDailyBackup(
+    async (text) => {
+      console.error('Ошибка бэкапа:', text);
+      try {
+        if (!process.env.GUILD_ID) return;
+        const guild = await client.guilds.fetch(process.env.GUILD_ID);
+        await logSystem(guild, '⚠️ Сбой резервного копирования БД', text);
+      } catch (err) {
+        console.error('Не удалось отправить уведомление о сбое бэкапа в аудит:', err.message);
+      }
+    },
+    async (filePath) => {
+      await uploadBackupFile(filePath, 'ежедневный автоматический');
+    },
+  );
 
   // Раз в час проверяем, не пробыл ли кто-то из "ожидающих" приглашённых
   // нужный срок, оставаясь в организации (без этого события выхода не было
@@ -5349,6 +6019,11 @@ client.once('clientReady', async () => {
           await checkVacationReminders(guild);
           await checkHrReminder(guild);
         }
+        await checkDiskSpace(guild);
+        await checkStuckContracts(guild);
+        await runWeeklyRankAdjustment(guild);
+        await sendDailyDigest(guild);
+        await sendWeeklyDigest(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);

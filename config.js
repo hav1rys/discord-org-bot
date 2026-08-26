@@ -6,6 +6,8 @@ module.exports = {
   CHANNEL_KICK_REVIEW: '1529613900922749028',
   CHANNEL_MEMBERS: '1529613093204791336',
   CHANNEL_AFK_RETURN: '1541760208542371930',
+  CHANNEL_BACKUPS: '1542258673261224069',
+  CHANNEL_SYSTEM_LOG: '1542266888124366948',
   CHANNEL_AUDIT: '1411466042315903066',
   CHANNEL_BLACKLIST: '1530387432078577774',
   CHANNEL_VACATION_MENU: '1530370708712980511',
@@ -79,6 +81,7 @@ module.exports = {
   BACKUP_RETENTION_DAYS: 14, // сколько дней хранить резервные копии БД
   VACATION_REMINDER_HOURS: 24, // за сколько часов до конца отпуска слать напоминание
   HR_REMINDER_INTERVAL_DAYS: 7, // раз во сколько дней напоминать HR о непроверенных заявках
+  STUCK_CONTRACT_HOURS: 24, // если контракт висит на проверке дольше — напомнить руководству
 
   // Роль, выдаваемая при принятии заявки на вступление (самая низкая)
   get ROLE_APPLY() {

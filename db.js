@@ -180,6 +180,7 @@ const SCHEMA = {
       reviewed_by: 'TEXT',
       reviewed_at: 'TEXT',
       review_message_id: 'TEXT',
+      stuck_reminder_sent: "INTEGER DEFAULT 0",
     },
     indexes: [['discord_id'], ['submitted_at'], ['status']],
   },

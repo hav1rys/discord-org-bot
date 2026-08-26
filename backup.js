@@ -24,11 +24,11 @@ function backupNow(onError) {
   try {
     fs.copyFileSync(db.dbPath, dest);
     console.log(`Резервная копия базы данных сохранена: ${dest}`);
-    return true;
+    return dest;
   } catch (err) {
     console.error('Не удалось создать резервную копию базы данных:', err.message);
     if (onError) onError(`Не удалось создать резервную копию БД: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -61,9 +61,11 @@ function cleanupOldBackups(onError) {
 }
 
 // Планирует запуск в 23:59 каждый день (по времени сервера, где крутится бот).
-// notifyFn(text), если передана, вызывается при сбое — используется, чтобы
-// заодно отправить сообщение в канал аудита (п.8), а не только в консоль.
-function scheduleDailyBackup(notifyFn) {
+// notifyFn(text), если передана, вызывается при сбое.
+// onSuccess(filePath), если передана — вызывается при успехе, с путём к
+// файлу — используется, чтобы отправить копию в отдельный Discord-канал
+// на случай, если сам сайт/сервер бота умрёт (п. "чтобы она не потерялась").
+function scheduleDailyBackup(notifyFn, onSuccess) {
   function msUntilNext2359() {
     const now = new Date();
     const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 0, 0);
@@ -74,10 +76,9 @@ function scheduleDailyBackup(notifyFn) {
   }
 
   function runAndReschedule() {
-    const ok = backupNow(notifyFn);
-    if (ok && notifyFn) {
-      // Успех тоже можно было бы слать, но это шум каждый день — молчим,
-      // как и раньше; в аудит идут только сбои.
+    const filePath = backupNow(notifyFn);
+    if (filePath && onSuccess) {
+      onSuccess(filePath);
     }
     cleanupOldBackups(notifyFn);
     setTimeout(runAndReschedule, 24 * 60 * 60 * 1000);
@@ -111,4 +112,19 @@ function listBackups() {
   return result;
 }
 
-module.exports = { backupNow, cleanupOldBackups, scheduleDailyBackup, listBackups };
+// Восстанавливает базу данных из указанного файла бэкапа (перезаписывает
+// текущий data.db). Имя файла строго проверяется — берём только то, что
+// сами же туда клали, никаких произвольных путей.
+function restoreFromBackup(filename) {
+  if (!/^data-\d{4}-\d{2}-\d{2}\.db$/.test(filename)) {
+    throw new Error('Недопустимое имя файла резервной копии.');
+  }
+  const src = path.join(backupsDir, filename);
+  if (!fs.existsSync(src)) {
+    throw new Error('Файл резервной копии не найден.');
+  }
+  fs.copyFileSync(src, db.dbPath);
+  console.log(`База данных восстановлена из резервной копии: ${filename}`);
+}
+
+module.exports = { backupNow, cleanupOldBackups, scheduleDailyBackup, listBackups, restoreFromBackup };
