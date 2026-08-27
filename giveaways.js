@@ -1,5 +1,7 @@
 const db = require('./db');
 
+const WEEKDAY_NAMES = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
 // "30m", "2h", "1d", "1w" и т.д. -> миллисекунды, либо null при неверном формате
 function parseDuration(input) {
   const match = /^(\d+)\s*(s|m|h|d|w)$/i.exec((input || '').trim());
@@ -10,11 +12,11 @@ function parseDuration(input) {
   return amount * multipliers[unit];
 }
 
-async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso) {
+async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null) {
   const result = await db.run(
-    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, created_at)
-     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?)`,
-    [channelId, prize, winnersCount, hostId, endsAtIso, new Date().toISOString()],
+    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, recurring_rule_id, created_at)
+     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, recurringRuleId, new Date().toISOString()],
   );
   return result.lastID;
 }
@@ -68,7 +70,35 @@ function pickWinners(entries, count) {
   return winners;
 }
 
+// ---------- Повторяющиеся розыгрыши ----------
+
+async function createRecurringRule(channelId, prize, winnersCount, durationMs, weekday, hostId, requiredRoleId = null) {
+  const result = await db.run(
+    `INSERT INTO giveaway_recurring_rules (channel_id, prize, winners_count, duration_ms, weekday, required_role_id, host_id, status, last_run_date, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?)`,
+    [channelId, prize, winnersCount, durationMs, weekday, requiredRoleId, hostId, new Date().toISOString()],
+  );
+  return result.lastID;
+}
+
+async function getRecurringRule(id) {
+  return db.get('SELECT * FROM giveaway_recurring_rules WHERE id = ?', [id]);
+}
+
+async function getActiveRecurringRules() {
+  return db.all(`SELECT * FROM giveaway_recurring_rules WHERE status = 'active'`);
+}
+
+async function setRecurringRuleLastRun(id, dateStr) {
+  await db.run('UPDATE giveaway_recurring_rules SET last_run_date = ? WHERE id = ?', [dateStr, id]);
+}
+
+async function setRecurringRuleStatus(id, status) {
+  await db.run('UPDATE giveaway_recurring_rules SET status = ? WHERE id = ?', [status, id]);
+}
+
 module.exports = {
+  WEEKDAY_NAMES,
   parseDuration,
   createGiveaway,
   setMessageId,
@@ -81,4 +111,9 @@ module.exports = {
   getEntries,
   countEntries,
   pickWinners,
+  createRecurringRule,
+  getRecurringRule,
+  getActiveRecurringRules,
+  setRecurringRuleLastRun,
+  setRecurringRuleStatus,
 };

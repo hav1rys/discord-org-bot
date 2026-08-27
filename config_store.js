@@ -8,10 +8,17 @@ const ORIGINAL_VALUES = { ...config };
 
 // Какие ключи вообще можно менять через /config_set — только простые
 // строковые/числовые поля (ID каналов/ролей, числовые настройки).
-// Списки (ROLE_IDS, ROLES_REVIEW_ALLOWED и т.д.) и методы — исключены
-// автоматически, трогать их через эту команду небезопасно.
+// Списки (ROLE_IDS, ROLES_REVIEW_ALLOWED и т.д.), методы и ВЫЧИСЛЯЕМЫЕ
+// геттеры (например ROLE_APPLY) исключены автоматически — присвоение
+// геттеру без сеттера в JS тихо ничего не делает, а не бросает ошибку,
+// поэтому такие ключи нельзя было пускать в этот список: /config_set
+// рапортовал бы об успехе, реально ничего не меняя.
 function getSettableKeys() {
-  return Object.keys(config).filter((k) => typeof config[k] === 'string' || typeof config[k] === 'number');
+  return Object.keys(config).filter((k) => {
+    const descriptor = Object.getOwnPropertyDescriptor(config, k);
+    if (!descriptor || typeof descriptor.get === 'function') return false;
+    return typeof config[k] === 'string' || typeof config[k] === 'number';
+  });
 }
 
 // Применяет все сохранённые переопределения поверх config в памяти.

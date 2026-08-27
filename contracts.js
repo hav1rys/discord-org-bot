@@ -1,26 +1,32 @@
 const db = require('./db');
-
-function pad(n) {
-  return String(n).padStart(2, '0');
-}
+const dates = require('./dates');
 
 function formatDate(date) {
-  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()}`;
+  return dates.formatDateOnly(date);
 }
 
-// Понедельник 00:00:00 — воскресенье 23:59:59 недели, смещённой на
-// weeksAgo недель назад от текущей (0 = эта неделя).
+// Понедельник 00:00:00 — воскресенье 23:59:59 недели по МОСКОВСКОМУ
+// времени, смещённой на weeksAgo недель назад от текущей (0 = эта неделя).
 function getWeekRange(weeksAgo = 0) {
-  const now = new Date();
-  const day = now.getDay(); // 0=вс..6=сб
+  const now = dates.mskNow(); // сдвинутый Date — читаем через getUTC*()
+  const day = now.getUTCDay(); // 0=вс..6=сб (уже по МСК)
   const diffToMonday = day === 0 ? 6 : day - 1;
-  const monday = new Date(now);
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(monday.getDate() - diffToMonday - weeksAgo * 7);
-  const sunday = new Date(monday);
-  sunday.setDate(sunday.getDate() + 6);
-  sunday.setHours(23, 59, 59, 999);
-  return { start: monday, end: sunday };
+
+  const mondayMsk = new Date(now);
+  mondayMsk.setUTCHours(0, 0, 0, 0);
+  mondayMsk.setUTCDate(mondayMsk.getUTCDate() - diffToMonday - weeksAgo * 7);
+
+  const sundayMsk = new Date(mondayMsk);
+  sundayMsk.setUTCDate(sundayMsk.getUTCDate() + 6);
+  sundayMsk.setUTCHours(23, 59, 59, 999);
+
+  // mondayMsk/sundayMsk сейчас представляют московские Ч:М:С, но как будто
+  // они UTC — переводим обратно в реальный UTC-момент (вычитаем сдвиг),
+  // чтобы дальше сравнивать с датами из БД (которые хранятся в UTC ISO).
+  return {
+    start: new Date(mondayMsk.getTime() - dates.MSK_OFFSET_MS),
+    end: new Date(sundayMsk.getTime() - dates.MSK_OFFSET_MS),
+  };
 }
 
 function formatWeekLabel(range) {
@@ -59,12 +65,15 @@ async function getContractById(id) {
 }
 
 // Ручное добавление контракта (без скриншота в форуме — прямая запись).
-async function recordManualContract(discordId, messageUrl, submittedAt, status, reviewerId) {
+// threadId — канал-профиль конкретного паспорта, если известен (нужен,
+// чтобы контракт учитывался в авто-повышении по контрактам, как и обычные
+// со скриншотом); null, если паспорт не выбирали (например, старый вызов).
+async function recordManualContract(discordId, messageUrl, submittedAt, status, reviewerId, threadId = null) {
   const syntheticMessageId = `manual-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
   const result = await db.run(
     `INSERT INTO contracts (discord_id, thread_id, message_id, message_url, submitted_at, status, reviewed_by, reviewed_at)
-     VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
-    [discordId, syntheticMessageId, messageUrl, submittedAt, status, reviewerId, new Date().toISOString()],
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [discordId, threadId, syntheticMessageId, messageUrl, submittedAt, status, reviewerId, new Date().toISOString()],
   );
   return result.lastID;
 }

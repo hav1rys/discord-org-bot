@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('./db');
 const config = require('./config');
+const dates = require('./dates');
 
 const backupsDir = path.join(db.dataDir, 'backups');
 
@@ -14,8 +15,7 @@ function pad(n) {
 }
 
 function todayStamp() {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return dates.mskDateStr(new Date());
 }
 
 // Копирует текущий data.db в backups/data-ГГГГ-ММ-ДД.db
@@ -60,32 +60,25 @@ function cleanupOldBackups(onError) {
   }
 }
 
-// Планирует запуск в 23:59 каждый день (по времени сервера, где крутится бот).
+// Планирует запуск в 23:59 по московскому времени каждый день (не по
+// времени сервера, где физически крутится бот — так предсказуемее).
 // notifyFn(text), если передана, вызывается при сбое.
 // onSuccess(filePath), если передана — вызывается при успехе, с путём к
 // файлу — используется, чтобы отправить копию в отдельный Discord-канал
 // на случай, если сам сайт/сервер бота умрёт (п. "чтобы она не потерялась").
 function scheduleDailyBackup(notifyFn, onSuccess) {
-  function msUntilNext2359() {
-    const now = new Date();
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 0, 0);
-    if (next.getTime() <= now.getTime()) {
-      next.setDate(next.getDate() + 1);
-    }
-    return next.getTime() - now.getTime();
-  }
-
   function runAndReschedule() {
     const filePath = backupNow(notifyFn);
     if (filePath && onSuccess) {
       onSuccess(filePath);
     }
     cleanupOldBackups(notifyFn);
-    setTimeout(runAndReschedule, 24 * 60 * 60 * 1000);
+    setTimeout(runAndReschedule, dates.nextMskTime(23, 59).getTime() - Date.now());
   }
 
-  setTimeout(runAndReschedule, msUntilNext2359());
-  console.log(`Резервное копирование БД запланировано на 23:59 (через ${Math.round(msUntilNext2359() / 60000)} мин.)`);
+  const msUntil = dates.nextMskTime(23, 59).getTime() - Date.now();
+  setTimeout(runAndReschedule, msUntil);
+  console.log(`Резервное копирование БД запланировано на 23:59 МСК (через ${Math.round(msUntil / 60000)} мин.)`);
 }
 
 // Список файлов резервных копий с датой изменения и размером — для /backup_list

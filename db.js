@@ -365,10 +365,30 @@ const SCHEMA = {
       winners_count: 'INTEGER',
       host_id: 'TEXT',
       ends_at: 'TEXT',
-      status: "TEXT DEFAULT 'active'", // active | ended
+      status: "TEXT DEFAULT 'active'", // active | ended | cancelled
+      required_role_id: 'TEXT', // если задано — участвовать может только эта роль (и роли выше по иерархии)
+      recurring_rule_id: 'INTEGER', // если создан из шаблона повтора — ссылка на giveaway_recurring_rules.id
       created_at: 'TEXT',
     },
     indexes: [['status'], ['ends_at']],
+  },
+
+  // Шаблоны повторяющихся розыгрышей ("каждую пятницу")
+  giveaway_recurring_rules: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      channel_id: 'TEXT',
+      prize: 'TEXT',
+      winners_count: 'INTEGER',
+      duration_ms: 'INTEGER', // сколько длится каждый запуск
+      weekday: 'INTEGER', // 0=вс..6=сб — в какой день недели запускать
+      required_role_id: 'TEXT',
+      host_id: 'TEXT',
+      status: "TEXT DEFAULT 'active'", // active | paused
+      last_run_date: 'TEXT', // ГГГГ-ММ-ДД — чтобы не запустить дважды за один день
+      created_at: 'TEXT',
+    },
+    indexes: [['status']],
   },
 
   giveaway_entries: {

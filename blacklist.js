@@ -6,14 +6,14 @@ const {
 } = require('discord.js');
 const { all, getSetting, setSetting } = require('./db');
 const { CHANNEL_BLACKLIST } = require('./config');
+const { formatDateOnly } = require('./dates');
 
 const FIELD_ID = '№. Упоминание | Тег | ID';
 const FIELD_PASSPORT = '№ Паспорта';
 const FIELD_REASON = 'Причина | Дата внесения';
 
 function formatDate(iso) {
-  const date = new Date(iso);
-  return `${String(date.getDate()).padStart(2, '0')}.${String(date.getMonth() + 1).padStart(2, '0')}.${date.getFullYear()}`;
+  return formatDateOnly(new Date(iso));
 }
 
 // Группирует записи ЧС по discord_id, сохраняя порядок по дате внесения

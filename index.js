@@ -32,7 +32,8 @@ const { updateMembersList, changeMembersPage } = require('./members');
 const { updateBlacklist, changeBlacklistPage } = require('./blacklist');
 const perms = require('./permissions');
 const passportsLib = require('./passports');
-const { parseDeadline, parseDateOnly, formatDateTime, formatDateOnly } = require('./dates');
+const { parseDeadline, parseDateOnly, formatDateTime, formatDateOnly, mskDateStr, mskWeekday } = require('./dates');
+const dates = require('./dates');
 const { DEFAULT_RULES, DEFAULT_AGITATION, DEFAULT_HR_INFO } = require('./content');
 const contentVersions = require('./content_versions');
 const backup = require('./backup');
@@ -115,7 +116,7 @@ const mentionOpts = { allowedMentions: { roles: config.ROLES_REVIEW_ALLOWED } };
 const COMMAND_CATEGORIES = [
   {
     title: '👤 Участники и паспорта',
-    commands: ['история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk', 'отпуск_статистика'],
+    commands: ['история', 'кто_это', 'паспорт_история', 'отпуска_календарь', 'список_afk', 'отпуск_статистика', 'повышения_история', 'команды_человека'],
   },
   {
     title: '📄 Контракты и приглашения',
@@ -123,7 +124,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🎉 Розыгрыши',
-    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники'],
+    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_добавить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить'],
   },
   {
     title: '📢 Тексты и рассылки',
@@ -147,7 +148,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '❔ Справка',
-    commands: ['помощь', 'права_команд'],
+    commands: ['помощь', 'права_команд', 'журнал_прав'],
   },
 ];
 
@@ -168,6 +169,7 @@ const COMMAND_DEFAULT_TIERS = {
   бэкап_сейчас: 'admin', бэкапы_список: 'admin', экспорт_id: 'admin', права_команд: 'admin', меню_создать: 'admin',
 
   розыгрыш_старт: 'owner', розыгрыш_завершить: 'owner', розыгрыш_отменить: 'owner', розыгрыш_реролл: 'owner', розыгрыш_участники: 'owner',
+  розыгрыш_добавить_участника: 'owner', розыгрыш_повтор_создать: 'owner', розыгрыш_повтор_список: 'owner', розыгрыш_повтор_отменить: 'owner',
   правила: 'owner', правила_обновить: 'owner', правила_разослать: 'owner', агитация: 'owner', агитация_обновить: 'owner',
   hr_вакансия: 'owner', hr_вакансия_обновить: 'owner', рассылка_сообщение: 'owner', каналы_отчётов: 'owner', предпросмотр: 'owner',
   профили_восстановить: 'owner', статус: 'owner', пинг: 'owner',
@@ -176,7 +178,8 @@ const COMMAND_DEFAULT_TIERS = {
 
   топ_приглашения: 'hr', паспорт_история: 'hr', отпуска_календарь: 'hr', список_afk: 'hr', топ_контракты: 'hr',
   статистика_организации: 'hr', аудит_поиск: 'hr', кто_это: 'hr', история: 'hr', помощь: 'hr',
-  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr',
+  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr', команды_человека: 'hr',
+  журнал_прав: 'admin',
   экспорт_бд: 'admin', резерв_восстановить: 'admin',
 };
 
@@ -577,7 +580,7 @@ function buildProfileComponents(discordId) {
 // просроченные контракты, у кого скоро кончается отпуск.
 async function sendDailyDigest(guild) {
   const lastSent = await db.getSetting('daily_digest_last_sent');
-  const today = new Date().toISOString().slice(0, 10);
+  const today = dates.mskDateStr(new Date());
   if (lastSent === today) return;
 
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -615,75 +618,75 @@ async function sendDailyDigest(guild) {
   await db.setSetting('daily_digest_last_sent', today);
 }
 
-// Раз в неделю (7 дней от прошлой отправки) — общая статистика недели
-// Каждый понедельник:
-// — у кого паспорт СЕЙЧАС на ранге "1. Стажер" и 3+ обработанных
-//   (выполнен/невыполнен) контракта за прошедшую неделю — повышается
-//   ровно до "2. Фрилансер". Выше "2. Фрилансер" авто-повышения нет —
-//   это только вручную через список людей.
-// — у кого паспорт СЕЙЧАС на ранге "2. Фрилансер" — понижается до
-//   "1. Стажер" (независимо от контрактов), кроме тех, кто только что
-//   повышен в этом же прогоне.
-async function runWeeklyRankAdjustment(guild) {
-  const now = new Date();
-  const isMonday = now.getDay() === 1;
-  const todayStr = now.toISOString().slice(0, 10);
-  const lastRun = await db.getSetting('weekly_rank_adjustment_last_run');
-  if (!isMonday || lastRun === todayStr) return;
-
+// Вызывается сразу после проверки контракта (выполнен/невыполнен) — если
+// у паспорта сейчас ранг "1. Стажер" и в текущей неделе набралось
+// WEEKLY_PROMOTION_CONTRACT_THRESHOLD обработанных контрактов — повышаем
+// сразу же, не дожидаясь понедельника.
+async function checkContractPromotion(guild, threadId) {
+  if (!threadId) return;
   const stazherRoleId = config.ROLE_IDS[4]; // "1. Стажер"
   const freelancerRoleId = config.ROLE_IDS[3]; // "2. Фрилансер"
 
-  const range = contracts.getWeekRange(1); // прошедшая полная неделя
-  const contractCounts = await db.all(
-    `SELECT thread_id, COUNT(*) as cnt FROM contracts WHERE status IN ('fulfilled','unfulfilled') AND submitted_at BETWEEN ? AND ? GROUP BY thread_id`,
-    [range.start.toISOString(), range.end.toISOString()],
-  );
-
-  const promotions = [];
-  for (const row of contractCounts) {
-    if (row.cnt < 3) continue;
-
-    let passportInfo = await db.get('SELECT discord_id, static, name, role_id FROM participants WHERE profile_thread_id = ?', [row.thread_id]);
-    if (!passportInfo) {
-      passportInfo = await db.get('SELECT discord_id, static, name, role_id FROM extra_passports WHERE profile_thread_id = ?', [row.thread_id]);
-    }
-    if (!passportInfo || passportInfo.role_id !== stazherRoleId) continue; // повышаем только тех, кто сейчас именно Стажёр
-
-    await passportsLib.updatePassportFields(passportInfo.discord_id, passportInfo.static, { role_id: freelancerRoleId });
-    promotions.push({ discordId: passportInfo.discord_id, name: passportInfo.name, static: passportInfo.static });
+  let passportInfo = await db.get('SELECT discord_id, static, name, role_id FROM participants WHERE profile_thread_id = ?', [threadId]);
+  if (!passportInfo) {
+    passportInfo = await db.get('SELECT discord_id, static, name, role_id FROM extra_passports WHERE profile_thread_id = ?', [threadId]);
   }
+  if (!passportInfo || passportInfo.role_id !== stazherRoleId) return; // повышаем только тех, кто сейчас именно Стажёр
 
-  const promotedStatics = new Set(promotions.map((p) => p.static));
+  const range = contracts.getWeekRange(0); // текущая неделя
+  const countRow = await db.get(
+    `SELECT COUNT(*) as cnt FROM contracts WHERE thread_id = ? AND status IN ('fulfilled','unfulfilled') AND submitted_at BETWEEN ? AND ?`,
+    [threadId, range.start.toISOString(), range.end.toISOString()],
+  );
+  if (!countRow || countRow.cnt < config.WEEKLY_PROMOTION_CONTRACT_THRESHOLD) return;
+
+  await passportsLib.updatePassportFields(passportInfo.discord_id, passportInfo.static, { role_id: freelancerRoleId });
+  await syncEffectiveIdentity(guild, passportInfo.discord_id);
+  await safeUpdateMembersList(guild);
+  await logAudit(
+    guild,
+    client.user,
+    '⬆️ Авто-повышение по контрактам',
+    `${passportInfo.name} (№ ${passportInfo.static}) — <@${passportInfo.discord_id}> повышен(а) до «2. Фрилансер» (${countRow.cnt} обработанных контрактов за эту неделю).`,
+  );
+}
+
+// Каждый понедельник (или другой день, настраивается через
+// WEEKLY_RANK_ADJUSTMENT_DAY) — у кого паспорт сейчас на ранге
+// "2. Фрилансер", понижается до "1. Стажер". Повышение сюда больше не
+// входит — оно теперь происходит мгновенно при проверке контракта
+// (см. checkContractPromotion).
+async function runWeeklyRankAdjustment(guild) {
+  const now = new Date();
+  const isTargetDay = dates.mskWeekday(now) === config.WEEKLY_RANK_ADJUSTMENT_DAY;
+  const todayStr = dates.mskDateStr(now);
+  const lastRun = await db.getSetting('weekly_rank_adjustment_last_run');
+  if (!isTargetDay || lastRun === todayStr) return;
+
+  const stazherRoleId = config.ROLE_IDS[4]; // "1. Стажер"
+  const freelancerRoleId = config.ROLE_IDS[3]; // "2. Фрилансер"
 
   const freelancerParticipants = await db.all('SELECT discord_id, static, name FROM participants WHERE role_id = ?', [freelancerRoleId]);
   const freelancerExtras = await db.all('SELECT discord_id, static, name FROM extra_passports WHERE role_id = ?', [freelancerRoleId]);
   const demotions = [];
   for (const p of [...freelancerParticipants, ...freelancerExtras]) {
-    if (promotedStatics.has(p.static)) continue; // только что повышен в этом же прогоне — не понижаем следом
     await passportsLib.updatePassportFields(p.discord_id, p.static, { role_id: stazherRoleId });
     demotions.push(p);
   }
 
-  const affectedDiscordIds = new Set([...promotions.map((p) => p.discordId), ...demotions.map((p) => p.discord_id)]);
-  for (const discordId of affectedDiscordIds) {
-    await syncEffectiveIdentity(guild, discordId);
-  }
-  if (affectedDiscordIds.size > 0) {
+  if (demotions.length > 0) {
+    for (const p of demotions) {
+      await syncEffectiveIdentity(guild, p.discord_id);
+    }
     await safeUpdateMembersList(guild);
-  }
 
-  if (promotions.length > 0 || demotions.length > 0) {
-    const lines = [];
-    if (promotions.length > 0) {
-      lines.push('**Повышены до «2. Фрилансер» (3+ обработанных контракта за неделю):**');
-      lines.push(...promotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discordId}>`));
-    }
-    if (demotions.length > 0) {
-      lines.push('**Понижены до «1. Стажер» (были на «2. Фрилансер»):**');
-      lines.push(...demotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discord_id}>`));
-    }
-    await logAudit(guild, client.user, '🔄 Еженедельная авто-корректировка рангов', lines.join('\n').slice(0, 4000));
+    const lines = demotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discord_id}>`);
+    await logAudit(
+      guild,
+      client.user,
+      '⬇️ Еженедельное авто-понижение',
+      `Понижены до «1. Стажер» (были на «2. Фрилансер»):\n${lines.join('\n')}`.slice(0, 4000),
+    );
   }
 
   await db.setSetting('weekly_rank_adjustment_last_run', todayStr);
@@ -1197,11 +1200,11 @@ function buildFaqModal(customId, prefill = {}) {
   return modal;
 }
 
-function buildManualContractModal(status, discordId) {
-  const modal = new ModalBuilder().setCustomId(`modal_contract_manual:${status}:${discordId}`).setTitle('Добавить контракт вручную');
+function buildManualContractModal(status, discordId, staticValue) {
+  const modal = new ModalBuilder().setCustomId(`modal_contract_manual:${status}:${discordId}:${staticValue || ''}`).setTitle('Добавить контракт вручную');
   modal.addComponents(
     row(txt(null, 'link', 'Ссылка на скриншот')),
-    row(txt(null, 'date', 'Дата (ДД.ММ.ГГГГ), пусто = сегодня', { required: false })),
+    row(txt(null, 'date', 'Дата (ДД.ММ[.ГГ]), пусто = сегодня', { required: false })),
   );
   return modal;
 }
@@ -1209,7 +1212,7 @@ function buildManualContractModal(status, discordId) {
 function buildVacationSelfModal() {
   const modal = new ModalBuilder().setCustomId('modal_vacation_apply').setTitle('Заявка на отпуск');
   modal.addComponents(
-    row(txt(null, 'deadline', 'Дата (ДД.ММ.ГГГГ) или срок (7d)')),
+    row(txt(null, 'deadline', 'Дата (ДД.ММ[.ГГ]) или срок (7d)')),
     row(txt(null, 'reason', 'Причина (необязательно)', { required: false, paragraph: true })),
   );
   return modal;
@@ -1219,7 +1222,7 @@ function buildVacationGrantModal(discordId, staticsCsv) {
   const customId = staticsCsv ? `modal_vacation_grant:${discordId}:${staticsCsv}` : `modal_vacation_grant:${discordId}`;
   const modal = new ModalBuilder().setCustomId(customId).setTitle('Выдать отпуск');
   modal.addComponents(
-    row(txt(null, 'deadline', 'Дата (ДД.ММ.ГГГГ) или срок (7d)')),
+    row(txt(null, 'deadline', 'Дата (ДД.ММ[.ГГ]) или срок (7d)')),
     row(txt(null, 'reason', 'Причина', { required: false })),
   );
   return modal;
@@ -1229,7 +1232,7 @@ function buildAfkModal(discordId, staticsCsv) {
   const customId = staticsCsv ? `modal_afk_set:${discordId}:${staticsCsv}` : `modal_afk_set:${discordId}`;
   const modal = new ModalBuilder().setCustomId(customId).setTitle('Указать AFK');
   modal.addComponents(
-    row(txt(null, 'date', 'Дата с которой AFK (ДД.ММ.ГГГГ)')),
+    row(txt(null, 'date', 'Дата с которой AFK (ДД.ММ[.ГГ])')),
     row(txt(null, 'reason', 'Причина', { required: false })),
   );
   return modal;
@@ -1349,7 +1352,39 @@ const commands = [
     .addStringOption((opt) => opt.setName('приз').setDescription('Что разыгрывается').setRequired(true))
     .addStringOption((opt) => opt.setName('длительность').setDescription('Например: 30m, 2h, 1d, 1w').setRequired(true))
     .addIntegerOption((opt) => opt.setName('победителей').setDescription('Сколько победителей').setRequired(true).setMinValue(1))
-    .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправить (по умолчанию — этот канал)').setRequired(false)),
+    .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправить (по умолчанию — этот канал)').setRequired(false))
+    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать (по умолчанию — кто угодно)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_добавить_участника')
+    .setDescription('Вручную добавить человека в розыгрыш')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true))
+    .addUserOption((opt) => opt.setName('человек').setDescription('Кого добавить').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_повтор_создать')
+    .setDescription('Настроить повторяющийся розыгрыш (например, каждую пятницу)')
+    .addStringOption((opt) => opt.setName('приз').setDescription('Что разыгрывается').setRequired(true))
+    .addStringOption((opt) => opt.setName('длительность').setDescription('Сколько длится каждый запуск: 30m, 2h, 1d, 1w').setRequired(true))
+    .addIntegerOption((opt) => opt.setName('победителей').setDescription('Сколько победителей').setRequired(true).setMinValue(1))
+    .addStringOption((opt) =>
+      opt.setName('день_недели').setDescription('В какой день недели запускать').setRequired(true).addChoices(
+        { name: 'Воскресенье', value: '0' },
+        { name: 'Понедельник', value: '1' },
+        { name: 'Вторник', value: '2' },
+        { name: 'Среда', value: '3' },
+        { name: 'Четверг', value: '4' },
+        { name: 'Пятница', value: '5' },
+        { name: 'Суббота', value: '6' },
+      ),
+    )
+    .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправлять (по умолчанию — этот канал)').setRequired(false))
+    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать (по умолчанию — кто угодно)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_повтор_список')
+    .setDescription('Список настроенных повторяющихся розыгрышей'),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_повтор_отменить')
+    .setDescription('Остановить повторяющийся розыгрыш')
+    .addStringOption((opt) => opt.setName('правило').setDescription('Какое правило остановить').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
     .setName('розыгрыш_завершить')
     .setDescription('Досрочно завершить розыгрыш и выбрать победителей')
@@ -1436,6 +1471,17 @@ const commands = [
     .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID — если пусто, по всем').setRequired(false).setAutocomplete(true))
     .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 90)').setRequired(false).setMinValue(1)),
   new SlashCommandBuilder()
+    .setName('повышения_история')
+    .setDescription('История авто-повышений/понижений по контрактам (не ручные действия)')
+    .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 90)').setRequired(false).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName('журнал_прав')
+    .setDescription('История изменений через /права_команд — кто, когда и что поменял'),
+  new SlashCommandBuilder()
+    .setName('команды_человека')
+    .setDescription('Какие команды бота доступны конкретному человеку')
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
     .setName('резерв_восстановить')
     .setDescription('⚠️ Откатить базу данных к резервной копии (перезаписывает текущие данные)')
     .addStringOption((opt) => opt.setName('файл').setDescription('Какую резервную копию восстановить').setRequired(true).setAutocomplete(true)),
@@ -1508,13 +1554,14 @@ async function sendFaqManagePanel(guild) {
 // /init_menus редактирует то же сообщение вместо отправки нового (п.1).
 function buildGiveawayEmbed(giveaway, entryCount, ended = false, winners = null) {
   const endsAtSec = Math.floor(new Date(giveaway.ends_at).getTime() / 1000);
+  const conditionLine = giveaway.required_role_id ? `\nУсловие: только роль <@&${giveaway.required_role_id}>` : '';
   const embed = new EmbedBuilder()
     .setColor(ended ? 0x2b2d31 : 0x57f287)
     .setTitle(`🎉 ${giveaway.prize}`)
     .setDescription(
       ended
         ? `Розыгрыш завершён.`
-        : `Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${giveaway.host_id}>`,
+        : `Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${giveaway.host_id}>${conditionLine}`,
     )
     .addFields(
       { name: 'Победителей', value: String(giveaway.winners_count), inline: true },
@@ -1594,6 +1641,38 @@ async function cancelGiveaway(guild, giveawayId, actor) {
 
   await logAudit(guild, actor || client.user, 'Розыгрыш отменён', `«${giveaway.prize}»`);
   return true;
+}
+
+async function startGiveawayFromRule(guild, rule) {
+  const endsAt = new Date(Date.now() + rule.duration_ms);
+  const channel = await guild.channels.fetch(rule.channel_id);
+  const giveawayId = await giveaways.createGiveaway(rule.channel_id, rule.prize, rule.winners_count, rule.host_id, endsAt.toISOString(), rule.required_role_id, rule.id);
+  const embed = buildGiveawayEmbed({ prize: rule.prize, winners_count: rule.winners_count, ends_at: endsAt.toISOString(), host_id: rule.host_id, required_role_id: rule.required_role_id }, 0);
+  const sent = await channel.send({ content: '🎉 **РОЗЫГРЫШ** 🎉', embeds: [embed], components: buildGiveawayComponents(giveawayId) });
+  await giveaways.setMessageId(giveawayId, sent.id);
+  return giveawayId;
+}
+
+// Раз в день (проверяется из часового таймера) — если сегодня день недели
+// какого-то активного повторяющегося правила и оно ещё не запускалось
+// сегодня, создаёт новый розыгрыш по этому шаблону.
+async function checkRecurringGiveaways(guild) {
+  const rules = await giveaways.getActiveRecurringRules();
+  if (rules.length === 0) return;
+  const now = new Date();
+  const todayStr = dates.mskDateStr(now);
+  const todayWeekday = dates.mskWeekday(now);
+
+  for (const rule of rules) {
+    if (rule.weekday !== todayWeekday || rule.last_run_date === todayStr) continue;
+    try {
+      await startGiveawayFromRule(guild, rule);
+      await giveaways.setRecurringRuleLastRun(rule.id, todayStr);
+      await logAudit(guild, client.user, 'Повторяющийся розыгрыш запущен', `«${rule.prize}» (правило #${rule.id}) в <#${rule.channel_id}>`);
+    } catch (err) {
+      console.error(`Не удалось запустить повторяющийся розыгрыш (правило #${rule.id}):`, err.message);
+    }
+  }
 }
 
 async function rerollGiveaway(guild, giveawayId, actor) {
@@ -2308,13 +2387,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники') {
+      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники' || interaction.commandName === 'розыгрыш_добавить_участника') {
         const focused = interaction.options.getFocused();
         let statusClause = '';
         let params = [`%${focused}%`];
         if (interaction.commandName === 'розыгрыш_реролл') {
           statusClause = "AND status = 'ended'";
-        } else if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить') {
+        } else if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_добавить_участника') {
           statusClause = "AND status = 'active'";
         } // giveaway_participants — любой статус, без фильтра
         const rows = await db.all(
@@ -2332,7 +2411,20 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов', 'отпуск_статистика'];
+      if (interaction.commandName === 'розыгрыш_повтор_отменить') {
+        const focused = interaction.options.getFocused();
+        const rules = await db.all(`SELECT * FROM giveaway_recurring_rules WHERE status = 'active' AND prize LIKE ? ORDER BY id DESC LIMIT 25`, [`%${focused}%`]);
+        const choices = rules.map((r) => ({
+          name: `#${r.id} — ${r.prize} (каждый(ую) ${giveaways.WEEKDAY_NAMES[r.weekday]})`.slice(0, 100),
+          value: String(r.id),
+        }));
+        try {
+          await interaction.respond(choices);
+        } catch (_) {}
+        return;
+      }
+
+      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов', 'отпуск_статистика', 'команды_человека'];
       if (!autocompleteCommands.includes(interaction.commandName)) return;
 
       const focused = interaction.options.getFocused();
@@ -2924,6 +3016,7 @@ client.on('interactionCreate', async (interaction) => {
         const durationStr = interaction.options.getString('длительность');
         const winnersCount = interaction.options.getInteger('победителей');
         const targetChannel = interaction.options.getChannel('канал') || interaction.channel;
+        const requiredRole = interaction.options.getRole('условие');
 
         const durationMs = giveaways.parseDuration(durationStr);
         if (!durationMs) {
@@ -2933,8 +3026,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const endsAt = new Date(Date.now() + durationMs);
 
-        const giveawayId = await giveaways.createGiveaway(targetChannel.id, prize, winnersCount, interaction.user.id, endsAt.toISOString());
-        const embed = buildGiveawayEmbed({ prize, winners_count: winnersCount, ends_at: endsAt.toISOString(), host_id: interaction.user.id }, 0);
+        const giveawayId = await giveaways.createGiveaway(targetChannel.id, prize, winnersCount, interaction.user.id, endsAt.toISOString(), requiredRole ? requiredRole.id : null);
+        const embed = buildGiveawayEmbed({ prize, winners_count: winnersCount, ends_at: endsAt.toISOString(), host_id: interaction.user.id, required_role_id: requiredRole ? requiredRole.id : null }, 0);
         const sent = await targetChannel.send({
           content: '🎉 **РОЗЫГРЫШ** 🎉',
           embeds: [embed],
@@ -2942,8 +3035,110 @@ client.on('interactionCreate', async (interaction) => {
         });
         await giveaways.setMessageId(giveawayId, sent.id);
 
-        await logAudit(guild, interaction.user, 'Розыгрыш запущен', `«${prize}» в <#${targetChannel.id}>, победителей: ${winnersCount}, до ${formatDateTime(endsAt)}`);
+        await logAudit(guild, interaction.user, 'Розыгрыш запущен', `«${prize}» в <#${targetChannel.id}>, победителей: ${winnersCount}, до ${formatDateTime(endsAt)}${requiredRole ? `, условие: роль ${requiredRole.name}` : ''}`);
         await interaction.editReply(`Розыгрыш запущен в <#${targetChannel.id}>.`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_добавить_участника') {
+        if (!(await checkCommandAccess('розыгрыш_добавить_участника', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const targetUser = interaction.options.getUser('человек');
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway || giveaway.status !== 'active') {
+          await interaction.editReply('⛔ Розыгрыш не найден или уже завершён.');
+          return;
+        }
+
+        if (giveaway.required_role_id) {
+          let targetMember;
+          try {
+            targetMember = await guild.members.fetch(targetUser.id);
+          } catch (_) {
+            await interaction.editReply('⛔ Этого человека нет на сервере.');
+            return;
+          }
+          if (!targetMember.roles.cache.has(giveaway.required_role_id)) {
+            await interaction.editReply(`⛔ У этого розыгрыша есть условие участия (роль <@&${giveaway.required_role_id}>) — у выбранного человека её нет. Если всё равно нужно добавить — снимите условие через новый розыгрыш или временно выдайте роль.`);
+            return;
+          }
+        }
+
+        const already = await giveaways.hasEntry(giveawayId, targetUser.id);
+        if (already) {
+          await interaction.editReply('Этот человек уже участвует.');
+          return;
+        }
+        await giveaways.addEntry(giveawayId, targetUser.id);
+        const count = await giveaways.countEntries(giveawayId);
+        try {
+          const channel = await guild.channels.fetch(giveaway.channel_id);
+          const msg = await channel.messages.fetch(giveaway.message_id);
+          await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
+        } catch (_) {}
+
+        await logAudit(guild, interaction.user, 'Участник добавлен в розыгрыш вручную', `«${giveaway.prize}» — <@${targetUser.id}>`);
+        await interaction.editReply(`✅ <@${targetUser.id}> добавлен(а) в розыгрыш «${giveaway.prize}».`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_повтор_создать') {
+        if (!(await checkCommandAccess('розыгрыш_повтор_создать', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        const prize = interaction.options.getString('приз');
+        const durationStr = interaction.options.getString('длительность');
+        const winnersCount = interaction.options.getInteger('победителей');
+        const weekday = parseInt(interaction.options.getString('день_недели'), 10);
+        const targetChannel = interaction.options.getChannel('канал') || interaction.channel;
+        const requiredRole = interaction.options.getRole('условие');
+
+        const durationMs = giveaways.parseDuration(durationStr);
+        if (!durationMs) {
+          return interaction.reply({ content: '⛔ Неверный формат длительности. Используйте, например: 30m, 2h, 1d, 1w.', flags: MessageFlags.Ephemeral });
+        }
+
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ruleId = await giveaways.createRecurringRule(targetChannel.id, prize, winnersCount, durationMs, weekday, interaction.user.id, requiredRole ? requiredRole.id : null);
+
+        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш настроен', `«${prize}» — каждый(ую) ${giveaways.WEEKDAY_NAMES[weekday]} в <#${targetChannel.id}>${requiredRole ? `, условие: роль ${requiredRole.name}` : ''}`);
+        await interaction.editReply(`Готово. Правило #${ruleId}: «${prize}» будет запускаться каждый(ую) ${giveaways.WEEKDAY_NAMES[weekday]} в <#${targetChannel.id}>.`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_повтор_список') {
+        if (!(await checkCommandAccess('розыгрыш_повтор_список', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rules = await giveaways.getActiveRecurringRules();
+        if (rules.length === 0) {
+          await interaction.editReply('Повторяющихся розыгрышей пока не настроено.');
+          return;
+        }
+        const lines = rules.map((r) => `#${r.id} — «${r.prize}», каждый(ую) ${giveaways.WEEKDAY_NAMES[r.weekday]}, в <#${r.channel_id}>, победителей: ${r.winners_count}${r.required_role_id ? `, условие: <@&${r.required_role_id}>` : ''}`);
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔁 Повторяющиеся розыгрыши').setDescription(lines.join('\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'розыгрыш_повтор_отменить') {
+        if (!(await checkCommandAccess('розыгрыш_повтор_отменить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const ruleId = interaction.options.getString('правило');
+        const ruleRow = await giveaways.getRecurringRule(ruleId);
+        if (!ruleRow || ruleRow.status !== 'active') {
+          await interaction.editReply('⛔ Такое правило не найдено или уже остановлено.');
+          return;
+        }
+        await giveaways.setRecurringRuleStatus(ruleId, 'paused');
+        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш остановлен', `«${ruleRow.prize}» (правило #${ruleId})`);
+        await interaction.editReply(`Правило #${ruleId} («${ruleRow.prize}») остановлено — новые розыгрыши по нему создаваться не будут.`);
         return;
       }
 
@@ -3465,6 +3660,88 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (cmd === 'повышения_история') {
+        if (!(await checkCommandAccess('повышения_история', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const days = interaction.options.getInteger('дней') || 90;
+        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        const rows = await db.all(
+          `SELECT * FROM audit_log WHERE action IN ('⬆️ Авто-повышение по контрактам', '⬇️ Еженедельное авто-понижение') AND at >= ? ORDER BY at DESC LIMIT 15`,
+          [since],
+        );
+        if (rows.length === 0) {
+          await interaction.editReply(`За последние ${days} дней авто-корректировок рангов не было.`);
+          return;
+        }
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`🔄 История авто-повышений/понижений (за ${days} дней)`)
+          .setDescription(rows.map((r) => `**${formatDateTime(new Date(r.at))}**\n${r.details.slice(0, 500)}`).join('\n\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'журнал_прав') {
+        if (!(await checkCommandAccess('журнал_прав', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rows = await db.all(
+          `SELECT * FROM audit_log WHERE action IN ('Право команды изменено', 'Право команды сброшено') ORDER BY at DESC LIMIT 20`,
+        );
+        if (rows.length === 0) {
+          await interaction.editReply('Изменений прав команд ещё не было.');
+          return;
+        }
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🔐 Журнал изменений прав команд')
+          .setDescription(rows.map((r) => `**${r.action}** — ${r.actor_tag}, ${formatDateTime(new Date(r.at))}\n${r.details}`).join('\n\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'команды_человека') {
+        if (!(await checkCommandAccess('команды_человека', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const query = interaction.options.getString('человек');
+        const target = await invitations.resolveInviter(query);
+        if (!target) {
+          await interaction.editReply('⛔ Человек не найден.');
+          return;
+        }
+        let member;
+        try {
+          member = await guild.members.fetch(target.discord_id);
+        } catch (_) {
+          await interaction.editReply('⛔ Этого человека нет на сервере — оценить его роли невозможно.');
+          return;
+        }
+
+        const allowed = [];
+        for (const commandName of Object.keys(COMMAND_DEFAULT_TIERS)) {
+          if (await checkCommandAccess(commandName, member)) {
+            allowed.push(commandName);
+          }
+        }
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle(`Команды, доступные: ${target.name} (<@${target.discord_id}>)`);
+        if (allowed.length === 0) {
+          embed.setDescription('Этому человеку не доступна ни одна команда.');
+        } else {
+          embed.setDescription(allowed.map((c) => `\`/${c}\``).join(', ').slice(0, 4000));
+          embed.setFooter({ text: `Всего: ${allowed.length} из ${Object.keys(COMMAND_DEFAULT_TIERS).length}` });
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
       if (cmd === 'поиск_везде') {
         if (!(await checkCommandAccess('поиск_везде', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
@@ -3700,6 +3977,10 @@ client.on('interactionCreate', async (interaction) => {
           `Контракт: ${label}`,
           `<@${contract.discord_id}>: ${contract.message_url}`,
         );
+
+        if (status === 'fulfilled' || status === 'unfulfilled') {
+          await checkContractPromotion(guild, contract.thread_id);
+        }
         return;
       }
 
@@ -3739,7 +4020,18 @@ client.on('interactionCreate', async (interaction) => {
       if (id.startsWith('contract_manual_status:')) {
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const [, status, discordId] = id.split(':');
-        return interaction.showModal(buildManualContractModal(status, discordId));
+        const passports = await passportsLib.getAllPassports(discordId);
+
+        if (passports.length <= 1) {
+          const staticValue = passports.length === 1 ? passports[0].static : '';
+          return interaction.showModal(buildManualContractModal(status, discordId, staticValue));
+        }
+
+        const passportSelect = new StringSelectMenuBuilder()
+          .setCustomId(`select_contract_manual_passport:${status}:${discordId}`)
+          .setPlaceholder('По какому паспорту засчитать контракт?')
+          .addOptions(passports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`).setValue(p.static)));
+        return safeReply(interaction, { content: 'У этого человека несколько паспортов — выберите, по какому засчитать контракт:', components: [row(passportSelect)] });
       }
 
       if (id === 'faq_add') {
@@ -4188,6 +4480,9 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, '⛔ Этот розыгрыш уже завершён.');
         }
         const already = await giveaways.hasEntry(giveawayId, interaction.user.id);
+        if (!already && giveaway.required_role_id && !interaction.member.roles.cache.has(giveaway.required_role_id)) {
+          return safeReply(interaction, `⛔ Участвовать может только роль <@&${giveaway.required_role_id}>.`);
+        }
         if (already) {
           await giveaways.removeEntry(giveawayId, interaction.user.id);
         } else {
@@ -4717,6 +5012,13 @@ client.on('interactionCreate', async (interaction) => {
         );
         await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → только <@${chosenUserId}>`);
         return safeReply(interaction, `Готово. \`/${commandName}\` теперь доступна только <@${chosenUserId}> (плюс Владелец/Admin по умолчанию).\n\n(применилось сразу, без перезапуска)`);
+      }
+
+      if (customId.startsWith('select_contract_manual_passport:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const [, status, discordId] = customId.split(':');
+        const staticValue = interaction.values[0];
+        return interaction.showModal(buildManualContractModal(status, discordId, staticValue));
       }
 
       if (customId === 'select_data_change_passport') {
@@ -5500,23 +5802,35 @@ client.on('interactionCreate', async (interaction) => {
 
       if (id.startsWith('modal_contract_manual:')) {
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
-        const [, status, discordId] = id.split(':');
+        const [, status, discordId, staticValue] = id.split(':');
         const link = get('link').trim();
         const dateInput = get('date').trim();
         let submittedAt;
         if (dateInput) {
           const date = parseDateOnly(dateInput);
-          if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ или оставьте поле пустым.');
+          if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ (или ДД.ММ.ГГ / ДД.ММ) — разделитель точка, пробел или / — либо оставьте поле пустым.');
           submittedAt = date.toISOString();
         } else {
           submittedAt = new Date().toISOString();
         }
 
-        await contracts.recordManualContract(discordId, link, submittedAt, status, interaction.user.id);
+        let threadId = null;
+        if (staticValue) {
+          const passports = await passportsLib.getAllPassports(discordId);
+          const passport = passports.find((p) => p.static === staticValue);
+          threadId = passport ? passport.profile_thread_id : null;
+        }
+
+        await contracts.recordManualContract(discordId, link, submittedAt, status, interaction.user.id, threadId);
         await contractsDisplay.safeUpdateContractsStats(guild);
 
         const label = status === 'fulfilled' ? '✅ Выполнен' : '❌ Невыполнен';
-        await logAudit(guild, interaction.user, 'Контракт добавлен вручную', `<@${discordId}>: ${label} — ${link}`);
+        await logAudit(guild, interaction.user, 'Контракт добавлен вручную', `<@${discordId}>: ${label} — ${link}${staticValue ? ` (паспорт № ${staticValue})` : ''}`);
+
+        if (threadId && (status === 'fulfilled' || status === 'unfulfilled')) {
+          await checkContractPromotion(guild, threadId);
+        }
+
         return safeReply(interaction, `Контракт добавлен (${label}).`);
       }
 
@@ -5524,7 +5838,7 @@ client.on('interactionCreate', async (interaction) => {
       if (id === 'modal_vacation_apply') {
         const deadline = parseDeadline(get('deadline'));
         if (!deadline) {
-          return safeReply(interaction, '⛔ Неверный формат. Используйте ДД.ММ.ГГГГ (будущая дата) или число+d, например 7d.');
+          return safeReply(interaction, '⛔ Неверный формат или дата уже прошла. Используйте ДД.ММ.ГГГГ / ДД.ММ.ГГ / ДД.ММ (год не указан — берётся текущий), разделитель точка/пробел/\/, либо число+d, например 7d.');
         }
         const reason = get('reason') || '';
         const v = {
@@ -5561,7 +5875,7 @@ client.on('interactionCreate', async (interaction) => {
         const deadline = parseDeadline(get('deadline'));
         const reason = get('reason') || '';
         if (!deadline) {
-          return safeReply(interaction, '⛔ Неверный формат. Используйте ДД.ММ.ГГГГ (будущая дата) или число+d, например 7d.');
+          return safeReply(interaction, '⛔ Неверный формат или дата уже прошла. Используйте ДД.ММ.ГГГГ / ДД.ММ.ГГ / ДД.ММ (год не указан — берётся текущий), разделитель точка/пробел/\/, либо число+d, например 7d.');
         }
         const passports = await passportsLib.getAllPassports(discordId);
         const targets = staticsCsv ? passports.filter((p) => staticsCsv.split(',').includes(p.static)) : passports;
@@ -5589,7 +5903,7 @@ client.on('interactionCreate', async (interaction) => {
         const staticsCsv = parts[2];
         const date = parseDateOnly(get('date'));
         const reason = get('reason') || '';
-        if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ.');
+        if (!date) return safeReply(interaction, '⛔ Неверный формат даты. Используйте ДД.ММ.ГГГГ / ДД.ММ.ГГ / ДД.ММ, разделитель точка/пробел/\/.');
 
         const passports = await passportsLib.getAllPassports(discordId);
         const targets = staticsCsv ? passports.filter((p) => staticsCsv.split(',').includes(p.static)) : passports;
@@ -5809,12 +6123,70 @@ client.on('interactionCreate', async (interaction) => {
 
 // ---------- Глобальные обработчики ошибок ----------
 
+client.on('shardDisconnect', (event, shardId) => {
+  // В момент разрыва соединения слать сообщение в Discord бессмысленно —
+  // связи как раз и нет. Логируем в консоль, а факт восстановления
+  // подтверждаем через shardResume ниже.
+  console.warn(`Шард ${shardId} отключился от Discord (код ${event.code}).`);
+});
+
+client.on('shardReconnecting', (shardId) => {
+  console.warn(`Шард ${shardId} переподключается к Discord...`);
+});
+
+client.on('shardResume', async (shardId) => {
+  console.log(`Шард ${shardId} восстановил соединение с Discord.`);
+  try {
+    if (!process.env.GUILD_ID) return;
+    const resumeGuild = await client.guilds.fetch(process.env.GUILD_ID);
+    await logSystem(resumeGuild, '🟢 Соединение восстановлено', `Бот снова на связи (шард ${shardId}).`);
+  } catch (err) {
+    console.error('Не удалось отправить уведомление о восстановлении связи:', err.message);
+  }
+});
+
+client.on('error', (err) => {
+  console.error('Ошибка клиента Discord:', err);
+});
+
+async function notifyShutdown(reason) {
+  try {
+    if (!process.env.GUILD_ID) return;
+    const shutdownGuild = await client.guilds.fetch(process.env.GUILD_ID);
+    await logSystem(shutdownGuild, '🔴 Бот останавливается', reason);
+  } catch (err) {
+    console.error('Не удалось отправить уведомление об остановке:', err.message);
+  }
+}
+
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Получен сигнал ${signal} — завершаю работу...`);
+  await notifyShutdown(`Получен сигнал ${signal} — обычно означает перезапуск/остановку/новый деплой на хостинге.`);
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 process.on('uncaughtException', (err) => {
   console.error('uncaughtException:', err);
+  if (process.env.GUILD_ID) {
+    client.guilds.fetch(process.env.GUILD_ID)
+      .then((crashGuild) => logSystem(crashGuild, '⚠️ Неперехваченная ошибка (uncaughtException)', `${err.message}\n\`\`\`${String(err.stack || '').slice(0, 1500)}\`\`\``))
+      .catch(() => {});
+  }
 });
 
 process.on('unhandledRejection', (err) => {
   console.error('unhandledRejection:', err);
+  if (process.env.GUILD_ID) {
+    client.guilds.fetch(process.env.GUILD_ID)
+      .then((rejectionGuild) => logSystem(rejectionGuild, '⚠️ Необработанный reject (unhandledRejection)', `${err && err.message ? err.message : String(err)}`))
+      .catch(() => {});
+  }
 });
 
 // ---------- Запуск ----------
@@ -5988,6 +6360,69 @@ client.once('clientReady', async () => {
     }
   }
 
+  // Отключение/переподключение к Discord (шард) — best-effort: если бот
+  // реально offline, сообщение может не дойти (это неизбежное ограничение,
+  // отправить сообщение можно только пока есть связь). Используем
+  // guild.cache, а не fetch — не делает лишний сетевой запрос, работает,
+  // даже если гейтвей уже нестабилен.
+  client.on('shardDisconnect', async (event) => {
+    console.warn('Бот отключился от Discord (shardDisconnect):', event && event.code);
+    if (!process.env.GUILD_ID) return;
+    const g = client.guilds.cache.get(process.env.GUILD_ID);
+    if (!g) return;
+    try {
+      await logSystem(g, '🔌 Бот отключился от Discord', `Код: ${event ? event.code : '—'}. Пытается переподключиться автоматически.`);
+    } catch (_) {}
+  });
+
+  client.on('shardReconnecting', async () => {
+    console.warn('Бот переподключается к Discord...');
+    if (!process.env.GUILD_ID) return;
+    const g = client.guilds.cache.get(process.env.GUILD_ID);
+    if (!g) return;
+    try {
+      await logSystem(g, '🔄 Переподключение к Discord', 'Соединение прервалось, бот пытается восстановить связь.');
+    } catch (_) {}
+  });
+
+  client.on('shardResume', async () => {
+    console.log('Соединение с Discord восстановлено.');
+    if (!process.env.GUILD_ID) return;
+    try {
+      const g = await client.guilds.fetch(process.env.GUILD_ID);
+      await logSystem(g, '✅ Соединение с Discord восстановлено', `${client.user.tag} снова в сети.`);
+    } catch (err) {
+      console.error('Не удалось залогировать восстановление соединения:', err.message);
+    }
+  });
+
+  client.on('error', async (err) => {
+    console.error('Ошибка клиента Discord:', err);
+    if (!process.env.GUILD_ID) return;
+    const g = client.guilds.cache.get(process.env.GUILD_ID);
+    if (!g) return;
+    try {
+      await logSystem(g, '❌ Ошибка соединения с Discord', err.message);
+    } catch (_) {}
+  });
+
+  // Остановка процесса (перезапуск/выключение контейнера на Bothost и т.п.)
+  // — пока соединение ещё живо, успеваем уведомить перед выходом.
+  const handleShutdownSignal = (signalName) => async () => {
+    console.log(`Получен сигнал ${signalName} — бот приостанавливается.`);
+    if (process.env.GUILD_ID) {
+      const g = client.guilds.cache.get(process.env.GUILD_ID);
+      if (g) {
+        try {
+          await logSystem(g, '⏸️ Бот приостановлен/выключается', `Сигнал: ${signalName}. ${client.user.tag} уходит из сети.`);
+        } catch (_) {}
+      }
+    }
+    process.exit(0);
+  };
+  process.on('SIGTERM', handleShutdownSignal('SIGTERM'));
+  process.on('SIGINT', handleShutdownSignal('SIGINT'));
+
   backup.scheduleDailyBackup(
     async (text) => {
       console.error('Ошибка бэкапа:', text);
@@ -6022,6 +6457,7 @@ client.once('clientReady', async () => {
         await checkDiskSpace(guild);
         await checkStuckContracts(guild);
         await runWeeklyRankAdjustment(guild);
+        await checkRecurringGiveaways(guild);
         await sendDailyDigest(guild);
         await sendWeeklyDigest(guild);
       }
