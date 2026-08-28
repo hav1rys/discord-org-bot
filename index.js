@@ -6248,8 +6248,13 @@ client.on('shardResume', async (shardId) => {
   }
 });
 
-client.on('error', (err) => {
+client.on('error', async (err) => {
   console.error('Ошибка клиента Discord:', err);
+  try {
+    if (!process.env.GUILD_ID) return;
+    const errGuild = await client.guilds.fetch(process.env.GUILD_ID);
+    await logSystem(errGuild, '❌ Ошибка клиента Discord', err.message);
+  } catch (_) {}
 });
 
 async function notifyShutdown(reason) {
@@ -6462,69 +6467,6 @@ client.once('clientReady', async () => {
       console.error('Не удалось залогировать запуск бота в аудит:', err.message);
     }
   }
-
-  // Отключение/переподключение к Discord (шард) — best-effort: если бот
-  // реально offline, сообщение может не дойти (это неизбежное ограничение,
-  // отправить сообщение можно только пока есть связь). Используем
-  // guild.cache, а не fetch — не делает лишний сетевой запрос, работает,
-  // даже если гейтвей уже нестабилен.
-  client.on('shardDisconnect', async (event) => {
-    console.warn('Бот отключился от Discord (shardDisconnect):', event && event.code);
-    if (!process.env.GUILD_ID) return;
-    const g = client.guilds.cache.get(process.env.GUILD_ID);
-    if (!g) return;
-    try {
-      await logSystem(g, '🔌 Бот отключился от Discord', `Код: ${event ? event.code : '—'}. Пытается переподключиться автоматически.`);
-    } catch (_) {}
-  });
-
-  client.on('shardReconnecting', async () => {
-    console.warn('Бот переподключается к Discord...');
-    if (!process.env.GUILD_ID) return;
-    const g = client.guilds.cache.get(process.env.GUILD_ID);
-    if (!g) return;
-    try {
-      await logSystem(g, '🔄 Переподключение к Discord', 'Соединение прервалось, бот пытается восстановить связь.');
-    } catch (_) {}
-  });
-
-  client.on('shardResume', async () => {
-    console.log('Соединение с Discord восстановлено.');
-    if (!process.env.GUILD_ID) return;
-    try {
-      const g = await client.guilds.fetch(process.env.GUILD_ID);
-      await logSystem(g, '✅ Соединение с Discord восстановлено', `${client.user.tag} снова в сети.`);
-    } catch (err) {
-      console.error('Не удалось залогировать восстановление соединения:', err.message);
-    }
-  });
-
-  client.on('error', async (err) => {
-    console.error('Ошибка клиента Discord:', err);
-    if (!process.env.GUILD_ID) return;
-    const g = client.guilds.cache.get(process.env.GUILD_ID);
-    if (!g) return;
-    try {
-      await logSystem(g, '❌ Ошибка соединения с Discord', err.message);
-    } catch (_) {}
-  });
-
-  // Остановка процесса (перезапуск/выключение контейнера на Bothost и т.п.)
-  // — пока соединение ещё живо, успеваем уведомить перед выходом.
-  const handleShutdownSignal = (signalName) => async () => {
-    console.log(`Получен сигнал ${signalName} — бот приостанавливается.`);
-    if (process.env.GUILD_ID) {
-      const g = client.guilds.cache.get(process.env.GUILD_ID);
-      if (g) {
-        try {
-          await logSystem(g, '⏸️ Бот приостановлен/выключается', `Сигнал: ${signalName}. ${client.user.tag} уходит из сети.`);
-        } catch (_) {}
-      }
-    }
-    process.exit(0);
-  };
-  process.on('SIGTERM', handleShutdownSignal('SIGTERM'));
-  process.on('SIGINT', handleShutdownSignal('SIGINT'));
 
   backup.scheduleDailyBackup(
     async (text) => {
