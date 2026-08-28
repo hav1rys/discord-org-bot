@@ -117,10 +117,16 @@ async function isAuthorized() {
   return !!row;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Ставит права ОДНОЙ команды в самом Discord: только перечисленные
 // role/user ID видят и могут её использовать (плюс те, у кого есть
 // системное право Administrator — Discord всегда даёт им доступ).
-async function setCommandPermissions(guildId, applicationId, commandId, allowedRoleIds, allowedUserIds) {
+// При 429 (превышен лимит запросов) ждёт указанное Discord время и
+// повторяет — этот эндпоинт лимитирует довольно строго.
+async function setCommandPermissions(guildId, applicationId, commandId, allowedRoleIds, allowedUserIds, attempt = 1) {
   const token = await getValidAccessToken();
   if (!token) throw new Error('Авторизация не пройдена или истекла — выполните /discord_права_настроить заново.');
 
@@ -137,6 +143,16 @@ async function setCommandPermissions(guildId, applicationId, commandId, allowedR
     },
     body: JSON.stringify({ permissions }),
   });
+
+  if (res.status === 429 && attempt <= 3) {
+    let waitSeconds = 3;
+    try {
+      const data = await res.json();
+      waitSeconds = data.retry_after || data.retryafter || waitSeconds;
+    } catch (_) {}
+    await sleep(waitSeconds * 1000 + 200);
+    return setCommandPermissions(guildId, applicationId, commandId, allowedRoleIds, allowedUserIds, attempt + 1);
+  }
 
   if (!res.ok) {
     const text = await res.text();

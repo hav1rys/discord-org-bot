@@ -269,7 +269,9 @@ async function syncOneCommandPermissions(guild, commandName) {
 async function syncAllCommandPermissions(guild) {
   const discordCommands = await guild.commands.fetch();
   const result = { ok: 0, failed: [] };
-  for (const commandName of Object.keys(COMMAND_DEFAULT_TIERS)) {
+  const names = Object.keys(COMMAND_DEFAULT_TIERS);
+  for (let i = 0; i < names.length; i++) {
+    const commandName = names[i];
     const discordCommand = discordCommands.find((c) => c.name === commandName);
     if (!discordCommand) continue;
     const tier = await getCommandTier(commandName);
@@ -280,6 +282,7 @@ async function syncAllCommandPermissions(guild) {
     } catch (err) {
       result.failed.push(`/${commandName}: ${err.message}`);
     }
+    if (i < names.length - 1) await new Promise((resolve) => setTimeout(resolve, 700)); // упреждающая пауза — этот эндпоинт лимитирует строго
   }
   return result;
 }
