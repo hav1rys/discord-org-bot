@@ -5324,6 +5324,7 @@ client.on('interactionCreate', async (interaction) => {
         if (targets.length === 0) return safeReply(interaction, 'Паспорт(а) не найдены.');
 
         const updated = [];
+        const updatedRoles = []; // {name, static, oldRoleId, newRoleId} — для структурированного аудита
         const skipped = [];
         for (const p of targets) {
           if (!perms.canActOnRank(interaction.member, p.role_id)) {
@@ -5341,6 +5342,7 @@ client.on('interactionCreate', async (interaction) => {
           }
           await passportsLib.updatePassportFields(discordId, p.static, { role_id: newRoleId });
           updated.push(`${p.name} (№ ${p.static}): <@&${p.role_id}> → <@&${newRoleId}>`);
+          updatedRoles.push({ name: p.name, static: p.static, oldRoleId: p.role_id, newRoleId });
         }
 
         if (updated.length === 0) {
@@ -5349,12 +5351,19 @@ client.on('interactionCreate', async (interaction) => {
 
         await syncEffectiveIdentity(guild, discordId);
         await safeUpdateMembersList(guild);
-        await logAudit(
-          guild,
-          interaction.user,
-          action === 'promote' ? 'Повышение' : 'Понижение',
-          `<@${discordId}> (${participant.name}):\n${updated.join('\n')}`,
-        );
+        const actionLabel = action === 'promote' ? 'Повышение' : 'Понижение';
+        const whoLabel = action === 'promote' ? 'Кто повысил' : 'Кто понизил';
+        const whomLabel = action === 'promote' ? 'Кого повысил' : 'Кого понизил';
+        const beforeLabel = action === 'promote' ? 'Ранг до повышения' : 'Ранг до понижения';
+        const afterLabel = action === 'promote' ? 'Ранг после повышения' : 'Ранг после понижения';
+        for (const r of updatedRoles) {
+          await logAudit(guild, interaction.user, actionLabel, [
+            { name: whoLabel, value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: whomLabel, value: `<@${discordId}> | ${r.name} (№ ${r.static})`, inline: true },
+            { name: beforeLabel, value: `<@&${r.oldRoleId}>`, inline: true },
+            { name: afterLabel, value: `<@&${r.newRoleId}>`, inline: true },
+          ]);
+        }
         return safeReply(
           interaction,
           `Ранг обновлён:\n${updated.join('\n')}${skipped.length ? `\n\nПропущено:\n${skipped.join('\n')}` : ''}`,
@@ -6443,10 +6452,19 @@ client.on('error', async (err) => {
 });
 
 async function notifyShutdown(reason) {
+  if (!process.env.GUILD_ID) return;
+  // guilds.cache вместо .fetch() — это словарь в памяти, без похода в
+  // сеть, что критично именно тут: хостинг обычно даёт процессу лишь
+  // несколько секунд между SIGTERM и принудительным SIGKILL, и если
+  // сеть уже начала отваливаться, лишний сетевой запрос может не успеть.
+  const shutdownGuild = client.guilds.cache.get(process.env.GUILD_ID);
+  if (!shutdownGuild) return;
+
+  // Не ждём отправку сообщения бесконечно — если сеть уже недоступна,
+  // лучше выйти вовремя, чем зависнуть и получить SIGKILL посреди записи в БД.
+  const timeout = new Promise((resolve) => setTimeout(resolve, 4000));
   try {
-    if (!process.env.GUILD_ID) return;
-    const shutdownGuild = await client.guilds.fetch(process.env.GUILD_ID);
-    await logSystem(shutdownGuild, '🔴 Бот останавливается', reason);
+    await Promise.race([logSystem(shutdownGuild, '🔴 Бот останавливается', reason), timeout]);
   } catch (err) {
     console.error('Не удалось отправить уведомление об остановке:', err.message);
   }
@@ -6535,9 +6553,33 @@ client.on('messageDelete', async (message) => {
     const imageAttachments = [...message.attachments.values()].filter((a) => (a.contentType || '').startsWith('image/'));
     const otherAttachments = [...message.attachments.values()].filter((a) => !(a.contentType || '').startsWith('image/'));
 
-    let details = `Канал: <#${message.channel.id}>\nАвтор: ${message.author ? `<@${message.author.id}>` : '—'}\n\nСодержимое:\n${contentText}`;
+    // Discord не пишет в свой аудит-лог самостоятельное удаление (когда
+    // человек стирает своё же сообщение) — только когда стирает МОДЕРАТОР.
+    // Поэтому: если в журнале Discord есть подходящая свежая запись —
+    // инициатор это модератор из неё, иначе считаем, что автор удалил сам.
+    let initiator = message.author || null;
+    try {
+      const auditEntries = await message.guild.fetchAuditLogs({ type: 72 /* MESSAGE_DELETE */, limit: 5 });
+      const match = auditEntries.entries.find((e) =>
+        e.extra && e.extra.channel && e.extra.channel.id === message.channel.id
+        && e.target && e.target.id === (message.author ? message.author.id : null)
+        && Date.now() - e.createdTimestamp < 10000,
+      );
+      if (match) initiator = match.executor;
+    } catch (_) {
+      // нет прав на просмотр аудит-лога Discord или иная ошибка — не критично, останется автор
+    }
+
+    const fields = [
+      { name: 'Канал', value: `<#${message.channel.id}>`, inline: true },
+      { name: 'Автор', value: message.author ? `<@${message.author.id}> | ${message.author.tag}` : '—', inline: true },
+      { name: 'Инициатор', value: initiator ? `<@${initiator.id}> | ${initiator.tag}` : '—', inline: true },
+      { name: 'Содержимое', value: contentText.slice(0, 1024), inline: false },
+    ];
     if (otherAttachments.length > 0) {
-      details += `\n\nВложения (не картинки):\n${otherAttachments.map((a) => `[${a.name}](${a.url})`).join('\n')}`;
+      fields.push({ name: 'Вложение', value: otherAttachments.map((a) => `[${a.name}](${a.url})`).join('\n').slice(0, 1024), inline: false });
+    } else if (imageAttachments.length > 0) {
+      fields.push({ name: 'Вложение', value: `Фото/Эмбед (${imageAttachments.length})`, inline: false });
     }
 
     // До 4 картинок показываем прямо в отдельных embed'ах (Discord позволяет
@@ -6546,14 +6588,14 @@ client.on('messageDelete', async (message) => {
       new EmbedBuilder().setColor(0x5865f2).setImage(a.url),
     );
     if (imageAttachments.length > 4) {
-      details += `\n\n(показаны первые 4 картинки из ${imageAttachments.length})`;
+      fields.push({ name: 'Ещё картинки', value: `Показаны первые 4 из ${imageAttachments.length}`, inline: false });
     }
 
     await logAudit(
       message.guild,
-      message.author || { tag: 'неизвестно', id: '0' },
+      initiator || { tag: 'неизвестно', id: '0' },
       '🗑️ Сообщение удалено',
-      details,
+      fields,
       extraEmbeds,
     );
   } catch (err) {

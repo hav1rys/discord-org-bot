@@ -2,11 +2,19 @@ const { EmbedBuilder } = require('discord.js');
 const { CHANNEL_AUDIT, CHANNEL_SYSTEM_LOG } = require('./config');
 const db = require('./db');
 
+// details может быть либо строкой (как раньше), либо массивом полей вида
+// { name, value, inline } — тогда они лягут отдельными полями embed'а
+// (пример: "Повышение" — Кто повысил | Кого повысил, каждое своей колонкой).
 async function logAudit(guild, actor, action, details, extraEmbeds = []) {
+  const isFields = Array.isArray(details);
+  const detailsForDb = isFields
+    ? details.map((f) => `${f.name}: ${f.value}`).join(' | ')
+    : String(details);
+
   try {
     await db.run(
       'INSERT INTO audit_log (actor_id, actor_tag, action, details, at) VALUES (?, ?, ?, ?, ?)',
-      [actor.id, actor.tag, action, details, new Date().toISOString()],
+      [actor.id, actor.tag, action, detailsForDb.slice(0, 2000), new Date().toISOString()],
     );
   } catch (err) {
     console.error('Не удалось сохранить запись аудита в БД:', err);
@@ -19,9 +27,14 @@ async function logAudit(guild, actor, action, details, extraEmbeds = []) {
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle(action)
-      .setDescription(String(details).slice(0, 4000))
       .setFooter({ text: `Инициатор: ${actor.tag} (${actor.id})` })
       .setTimestamp();
+
+    if (isFields) {
+      embed.addFields(details.slice(0, 25).map((f) => ({ ...f, value: String(f.value).slice(0, 1024) || '—' })));
+    } else {
+      embed.setDescription(String(details).slice(0, 4000));
+    }
 
     await channel.send({ embeds: [embed, ...extraEmbeds].slice(0, 10) });
   } catch (err) {
