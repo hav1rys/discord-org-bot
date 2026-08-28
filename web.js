@@ -5,6 +5,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const dj = require('discord.js');
 const db = require('./db');
 const config = require('./config');
 const perms = require('./permissions');
@@ -15,6 +16,8 @@ const passportsLib = require('./passports');
 const contentVersions = require('./content_versions');
 const content = require('./content');
 const dates = require('./dates');
+
+const OWNER_ID = config.OWNER_USER_ID; // havirys — полный доступ, включая редактор БД
 
 const DISCORD_API = 'https://discord.com/api';
 const SESSION_DAYS = 7;
@@ -180,6 +183,11 @@ tr:last-child td{border-bottom:0}
 .tabs a.on{color:#fff;background:var(--accent);border-color:var(--accent)}
 .pager{display:flex;gap:8px;align-items:center;margin-top:12px}
 pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:13px;color:var(--muted);max-height:280px;overflow:auto}
+.form label{display:block;margin:10px 0;font-size:13.5px;color:#cfcfd8}
+.form input,.form select,.form textarea{display:block;width:100%;margin-top:5px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;color:var(--text);font:inherit}
+.form input:focus,.form select:focus,.form textarea:focus{outline:1px solid var(--accent);border-color:var(--accent)}
+.form input[readonly]{opacity:.5}
+.form button{margin-top:14px}
 `;
 
 function topbar(user, level) {
@@ -188,6 +196,7 @@ function topbar(user, level) {
     return `<div class="top"><div class="left"><a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
   }
   const nav = ['<a href="/me">Мой профиль</a>'];
+  if (LEVELS[level] < LEVELS.member) nav.push('<a href="/apply">Подать заявку</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel">Панель управления</a>');
   return `<div class="top">
     <div class="left nav">${nav.join('')}<a href="/logout">Выйти</a></div>
@@ -235,8 +244,9 @@ async function landingBody(st) {
   <div class="hero">
     <h1>Организация «${esc(config.SITE_BRAND)}»</h1>
     <p>Выполнение контрактов на GTA5RP. Контракты от 50 векселей, возможность брать их самостоятельно, офис в Rockford HilIs ВС и помощь в прокачке навыков.</p>
-    <a class="btn" href="${inv}" target="_blank" rel="noopener">Подать заявку в Discord</a>
+    <a class="btn" href="/apply">Подать заявку на вступление</a>
     <a class="btn ghost" href="/login">Войти через Discord</a>
+    <a class="btn ghost" href="${inv}" target="_blank" rel="noopener">Discord-сервер</a>
   </div>
 
   <div class="card">
@@ -288,7 +298,7 @@ async function meBody(client, user) {
         <b>${esc(user.username)}</b> — вход выполнен, но вы <b>не состоите в организации</b>.
         <div class="muted" style="margin-top:6px">Уровень доступа: ${esc(acc.level)}. Роли на сервере: ${roleTags}</div>
       </div>
-      <a class="btn" href="${esc(config.SITE_DISCORD_INVITE)}" target="_blank" rel="noopener">Подать заявку</a>`;
+      <a class="btn" href="/apply">Подать заявку на вступление</a>`;
   }
 
   const passports = await passportsLib.getAllPassports(did);
@@ -316,7 +326,8 @@ async function meBody(client, user) {
       <span class="badge ok">✅ выполнено ${week.fulfilled.length}</span>
       <span class="badge bad">❌ не выполнено ${week.unfulfilled.length}</span>
     </div>
-    <div class="card"><h2>Приглашения</h2>Подтверждённых за всё время: <b>${invRow ? invRow.c : 0}</b></div>`;
+    <div class="card"><h2>Приглашения</h2>Подтверждённых за всё время: <b>${invRow ? invRow.c : 0}</b></div>
+    ${memberForms(user)}`;
 }
 
 // ---------- Панель управления ----------
@@ -326,13 +337,15 @@ const PANEL_TABS = [
   ['contracts', 'Контракты'],
   ['invites', 'Приглашения'],
   ['giveaways', 'Розыгрыши'],
+  ['blacklist', 'Чёрный список'],
   ['data', 'База данных'],
 ];
 
-async function panelBody(client, acc, tab, pageNum, qtable) {
+async function panelBody(client, acc, user, tab, pageNum, qtable) {
   const canData = acc.rank >= LEVELS.owner;
+  const canBl = acc.rank >= LEVELS.deputy;
   const tabsHtml = PANEL_TABS
-    .filter(([id]) => id !== 'data' || canData)
+    .filter(([id]) => (id !== 'data' || canData) && (id !== 'blacklist' || canBl))
     .map(([id, label]) => `<a class="${id === tab ? 'on' : ''}" href="/panel?tab=${id}">${esc(label)}</a>`).join('');
 
   let body = '';
@@ -340,8 +353,9 @@ async function panelBody(client, acc, tab, pageNum, qtable) {
   else if (tab === 'members') body = await panelMembers(client, pageNum);
   else if (tab === 'contracts') body = await panelContracts();
   else if (tab === 'invites') body = await panelInvites();
-  else if (tab === 'giveaways') body = await panelGiveaways();
-  else if (tab === 'data' && canData) body = await panelData(client, qtable || 'participants', pageNum);
+  else if (tab === 'giveaways') body = await panelGiveaways(client, acc, user);
+  else if (tab === 'blacklist' && canBl) body = await panelBlacklist(client, user);
+  else if (tab === 'data' && canData) body = await panelData(client, qtable || 'participants', pageNum, user);
   else body = '<div class="card">Раздел недоступен.</div>';
 
   return `<h1>Панель управления</h1>
@@ -442,7 +456,34 @@ async function panelInvites() {
     <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Приглашений</th></tr>${rows(all) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
 }
 
-async function panelGiveaways() {
+async function panelGiveaways(client, acc, user) {
+  let manage = '';
+  if (acc && acc.rank >= LEVELS.owner && user) {
+    const active = await db.all("SELECT * FROM giveaways WHERE status='active' ORDER BY id DESC");
+    const activeRows = active.map((g) => `<tr>
+      <td>#${g.id} ${esc(g.prize)}</td>
+      <td class="muted">${fmt(g.ends_at)}</td>
+      <td>
+        <form method="POST" action="/panel/giveaway/end" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${g.id}"><button class="btn ghost sm" type="submit">Завершить сейчас</button></form>
+        <form method="POST" action="/panel/giveaway/cancel" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${g.id}"><button class="btn ghost sm" type="submit">Отменить</button></form>
+      </td>
+    </tr>`).join('');
+    manage = `
+    <div class="card"><h2>Создать розыгрыш</h2>
+      <form method="POST" action="/panel/giveaway/create" class="form">
+        ${csrfField(user)}
+        <label>Приз<input name="prize" required maxlength="200"></label>
+        <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
+        <label>Длительность (например 30m, 1h, 2d, 1w)<input name="duration" required maxlength="10"></label>
+        <label>ID канала для публикации<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
+        <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
+        <button class="btn" type="submit">Создать и опубликовать</button>
+      </form>
+    </div>
+    <div class="card"><h2>Активные розыгрыши</h2>
+      <div class="tablewrap"><table><tr><th>Розыгрыш</th><th>Конец</th><th>Действия</th></tr>${activeRows || '<tr><td colspan="3">—</td></tr>'}</table></div>
+    </div>`;
+  }
   const since = new Date(Date.now() - 90 * 864e5).toISOString();
   const rows = await giveaways.getFinishedSince(since);
   const list = rows.map((g) => `<tr>
@@ -457,6 +498,7 @@ async function panelGiveaways() {
   const top = [...wc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15)
     .map(([w, n], i) => `<tr><td>${i + 1}</td><td>&lt;@${esc(w)}&gt;</td><td>${n}</td></tr>`).join('');
   return `
+  ${manage}
   <div class="card"><h2>Розыгрыши за 90 дней</h2>
     <div class="tablewrap"><table><tr><th>Приз</th><th>Статус</th><th>Дата</th><th>Победители</th></tr>${list || '<tr><td colspan="4">—</td></tr>'}</table></div></div>
   <div class="card"><h2>Чаще всех выигрывали</h2>
@@ -493,10 +535,11 @@ function cell(client, col, val) {
   return esc(s.length > 160 ? s.slice(0, 160) + '…' : s);
 }
 
-async function panelData(client, table, pageNum) {
+async function panelData(client, table, pageNum, user) {
   const def = DATA_TABLES[table];
   if (!def) return '<div class="card">Неизвестная таблица.</div>';
   const [title, cols] = def;
+  const canEdit = !!(user && user.id === OWNER_ID);
   const picker = Object.entries(DATA_TABLES)
     .map(([k, v]) => `<a class="${k === table ? 'on' : ''}" href="/panel?tab=data&table=${k}">${esc(v[0])}</a>`).join('');
   let total = 0;
@@ -506,15 +549,20 @@ async function panelData(client, table, pageNum) {
   } catch (_) {}
   let rows = [];
   try {
-    rows = await db.all(`SELECT * FROM ${table} ORDER BY ROWID DESC LIMIT ? OFFSET ?`, [PAGE_SIZE, pageNum * PAGE_SIZE]);
+    rows = await db.all(`SELECT rowid AS __rid, * FROM ${table} ORDER BY rowid DESC LIMIT ? OFFSET ?`, [PAGE_SIZE, pageNum * PAGE_SIZE]);
   } catch (e) {
     return `<div class="card">Ошибка чтения таблицы: ${esc(e.message)}</div>`;
   }
-  const head = cols.map(([, label]) => `<th>${esc(label)}</th>`).join('');
-  const trs = rows.map((r) => '<tr>' + cols.map(([key]) => `<td>${cell(client, key, r[key])}</td>`).join('') + '</tr>').join('');
+  const head = (canEdit ? '<th></th>' : '') + cols.map(([, label]) => `<th>${esc(label)}</th>`).join('');
+  const trs = rows.map((r) => {
+    const editCell = canEdit ? `<td><a class="btn ghost sm" href="/panel/row?table=${table}&pk=${encodeURIComponent(r.__rid)}">✏️</a></td>` : '';
+    return '<tr>' + editCell + cols.map(([key]) => `<td>${cell(client, key, r[key])}</td>`).join('') + '</tr>';
+  }).join('');
+  const addBtn = canEdit ? `<a class="btn sm" href="/panel/row/new?table=${table}">➕ Добавить строку</a>` : '';
   return `
   <div class="tabs">${picker}</div>
   <div class="card"><h2>${esc(title)} — всего ${total}</h2>
+    ${canEdit ? `<p class="muted" style="margin-bottom:10px">Режим редактирования (havirys): ✏️ — изменить строку. ${addBtn}</p>` : ''}
     <div class="tablewrap"><table><tr>${head}</tr>${trs || '<tr><td>—</td></tr>'}</table></div>
     ${pager(`/panel?tab=data&table=${table}`, pageNum, total)}
   </div>`;
@@ -527,6 +575,499 @@ function pager(baseHref, pageNum, total) {
   const prev = pageNum > 0 ? `<a class="btn ghost sm" href="${baseHref}${sep}page=${pageNum - 1}">← Назад</a>` : '';
   const next = pageNum < pages - 1 ? `<a class="btn ghost sm" href="${baseHref}${sep}page=${pageNum + 1}">Вперёд →</a>` : '';
   return `<div class="pager">${prev}<span class="muted">стр. ${pageNum + 1} из ${pages}</span>${next}</div>`;
+}
+
+// ============ v3: запись через сайт ============
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, ChannelType } = dj;
+
+function guildOf(client) {
+  return client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
+}
+
+// Тело POST-запроса -> URLSearchParams (лимит 1 МБ)
+function readBody(req) {
+  return new Promise((resolve) => {
+    let data = '';
+    let aborted = false;
+    req.on('data', (c) => {
+      data += c;
+      if (data.length > 1e6) { aborted = true; req.destroy(); }
+    });
+    req.on('end', () => resolve(aborted ? new URLSearchParams() : new URLSearchParams(data)));
+    req.on('error', () => resolve(new URLSearchParams()));
+  });
+}
+
+// CSRF-токен, привязанный к id пользователя и подписанный тем же секретом
+function csrfToken(user) {
+  const base = `${user.id}.${Math.floor(Date.now() / 1000)}`;
+  return `${base}.${sign('csrf:' + base)}`;
+}
+function csrfOk(user, token) {
+  if (!user || !token) return false;
+  const p = String(token).split('.');
+  if (p.length !== 3 || p[0] !== user.id) return false;
+  const expected = sign('csrf:' + p[0] + '.' + p[1]);
+  try {
+    if (p[2].length !== expected.length || !crypto.timingSafeEqual(Buffer.from(p[2]), Buffer.from(expected))) return false;
+  } catch (_) { return false; }
+  return (Date.now() / 1000 - Number(p[1])) < 7200; // токен живёт 2 часа
+}
+function csrfField(user) {
+  return `<input type="hidden" name="_csrf" value="${esc(csrfToken(user))}">`;
+}
+
+const REVIEW_MENTION = () => config.ROLES_REVIEW_ALLOWED.map((r) => `<@&${r}>`).join(' ');
+const REVIEW_MENTION_OPTS = { allowedMentions: { roles: config.ROLES_REVIEW_ALLOWED } };
+
+async function postTo(client, channelId, payload) {
+  const g = guildOf(client);
+  if (!g || !channelId) return null;
+  try {
+    const ch = await g.channels.fetch(channelId);
+    return await ch.send(payload);
+  } catch (e) {
+    console.error('[web] postTo', channelId, e.message);
+    return null;
+  }
+}
+
+// Двойной аудит: строка в БД + карточка в канал аудита Discord
+async function webAudit(client, user, action, details) {
+  try {
+    await db.run(
+      'INSERT INTO audit_log (actor_id, actor_tag, action, details, at) VALUES (?, ?, ?, ?, ?)',
+      [user.id, `${user.username || user.id} (сайт)`, action, details || '', new Date().toISOString()],
+    );
+  } catch (e) { console.error('[web] audit', e.message); }
+  await postTo(client, config.CHANNEL_AUDIT, {
+    embeds: [new EmbedBuilder().setColor(0x5b6cff).setTitle('🌐 Действие с сайта').addFields(
+      { name: 'Кто', value: `<@${user.id}> (${String(user.username || user.id).slice(0, 80)})` },
+      { name: 'Действие', value: String(action).slice(0, 1000) },
+      { name: 'Детали', value: String(details || '—').slice(0, 1000) },
+    ).setTimestamp()],
+  });
+}
+
+function flashBanner(u) {
+  const ok = u.searchParams.get('ok');
+  const err = u.searchParams.get('err');
+  if (ok) return `<div class="card" style="border-color:#1f5c43;color:var(--ok)">✅ ${esc(ok)}</div>`;
+  if (err) return `<div class="card" style="border-color:#5c2626;color:var(--bad)">⛔ ${esc(err)}</div>`;
+  return '';
+}
+function qs(obj) {
+  return Object.entries(obj).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+}
+
+// ---------- Карточки рассмотрения (copies из index.js, те же customId) ----------
+function webApplyEmbed(app) {
+  return new EmbedBuilder().setColor(0xfee75c).setTitle(`Заявка на вступление #${app.id}`).addFields(
+    { name: 'Заявитель', value: `<@${app.discord_id}> (${app.discord_tag})` },
+    { name: 'Имя Фамилия', value: app.name || '—', inline: true },
+    { name: '№ Паспорта', value: app.static || '—', inline: true },
+    { name: 'LVL', value: String(app.lvl || '—'), inline: true },
+    { name: 'Кто пригласил', value: app.invited_by || '—', inline: true },
+    { name: 'Навыки', value: app.skills || '—' },
+    { name: 'Статус', value: '🕓 На рассмотрении · подано через сайт' },
+  );
+}
+function webApplyComponents(app) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`apply_edit:${app.id}`).setLabel('✏️ Изменить').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`apply_accept:${app.id}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`apply_reject:${app.id}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`review_claim:application:${app.id}`).setLabel('🙋 Беру на рассмотрение').setStyle(ButtonStyle.Primary),
+    ),
+  ];
+}
+function webVacationEmbed(v) {
+  return new EmbedBuilder().setColor(0xfee75c).setTitle(`Заявка на отпуск #${v.id}`).addFields(
+    { name: 'Заявитель', value: `<@${v.discord_id}> (${v.discord_tag})` },
+    { name: 'До какого числа', value: dates.formatDateTime(new Date(v.until)) },
+    { name: 'Причина', value: v.reason || '—' },
+    { name: 'Статус', value: '🕓 На рассмотрении · подано через сайт' },
+  );
+}
+function webVacationComponents(v) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`vacation_accept:${v.id}`).setLabel('✅ Одобрить').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`vacation_reject:${v.id}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+    ),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`review_claim:vacation:${v.id}`).setLabel('🙋 Беру на рассмотрение').setStyle(ButtonStyle.Primary),
+    ),
+  ];
+}
+
+// ---------- Формы ----------
+function applyBody(user) {
+  return `
+  <h1>Заявка на вступление</h1>
+  <div class="card">
+    <p class="muted">Заполните форму — заявка уйдёт HR-Менеджерам в Discord. Ответ придёт в личные сообщения от бота.</p>
+    <form method="POST" action="/apply" class="form">
+      ${csrfField(user)}
+      <label>Имя Фамилия персонажа<input name="name" required maxlength="60"></label>
+      <label>№ Паспорта (только цифры)<input name="static" required pattern="[0-9]+" maxlength="12"></label>
+      <label>LVL персонажа<input name="lvl" type="number" min="1" max="100" required></label>
+      <label>Навыки / опыт<textarea name="skills" rows="3" maxlength="600"></textarea></label>
+      <label>Кто пригласил (необязательно)<input name="invited_by" maxlength="60"></label>
+      <button class="btn" type="submit">Отправить заявку</button>
+    </form>
+  </div>`;
+}
+
+function memberForms(user) {
+  return `
+  <div class="card"><h2>Запросить отпуск</h2>
+    <form method="POST" action="/me/vacation" class="form">
+      ${csrfField(user)}
+      <label>До какого числа (ДД.ММ.ГГГГ или, например, 7d)<input name="deadline" required maxlength="20"></label>
+      <label>Причина<textarea name="reason" rows="2" maxlength="400"></textarea></label>
+      <button class="btn" type="submit">Отправить на рассмотрение</button>
+    </form>
+  </div>
+  <div class="card"><h2>Открыть тикет в поддержку</h2>
+    <form method="POST" action="/me/ticket" class="form">
+      ${csrfField(user)}
+      <label>Тип обращения
+        <select name="category">
+          <option value="question">Вопрос</option>
+          <option value="complaint">Жалоба</option>
+          <option value="other">Другое</option>
+        </select>
+      </label>
+      <label>Тема<input name="subject" required maxlength="100"></label>
+      <label>Описание<textarea name="description" rows="3" maxlength="1000"></textarea></label>
+      <button class="btn" type="submit">Создать тикет в Discord</button>
+    </form>
+  </div>`;
+}
+
+async function panelBlacklist(client, user) {
+  const rows = await db.all('SELECT * FROM blacklist ORDER BY id DESC LIMIT 100');
+  const list = rows.map((b) => `<tr>
+    <td>${esc(b.discord_id || '—')}</td>
+    <td>${esc(b.static || '—')}</td>
+    <td>${esc(b.reason || '—')}</td>
+    <td class="muted">${b.until ? 'до ' + fmt(b.until) : 'бессрочно'}</td>
+    <td><form method="POST" action="/panel/blacklist/remove" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${b.id}"><button class="btn ghost sm" type="submit">Убрать</button></form></td>
+  </tr>`).join('');
+  return `
+  <div class="card"><h2>Внести в чёрный список</h2>
+    <form method="POST" action="/panel/blacklist/add" class="form">
+      ${csrfField(user)}
+      <label>Discord ID<input name="discord_id" pattern="[0-9]*" maxlength="25"></label>
+      <label>№ Паспорта<input name="static" pattern="[0-9]*" maxlength="12"></label>
+      <label>Причина<input name="reason" required maxlength="300"></label>
+      <label>До какого числа (пусто — бессрочно)<input name="until" maxlength="20"></label>
+      <button class="btn" type="submit">Внести</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Если человек сейчас в организации — его нужно уволить вручную в Discord, сайт только добавляет запись в ЧС.</p>
+  </div>
+  <div class="card"><h2>Записи ЧС (последние 100)</h2>
+    <div class="tablewrap"><table><tr><th>Discord ID</th><th>Паспорт</th><th>Причина</th><th>Срок</th><th></th></tr>${list || '<tr><td colspan="5">—</td></tr>'}</table></div>
+  </div>`;
+}
+
+async function rowEditBody(client, user, table, pk) {
+  const def = DATA_TABLES[table];
+  if (!def) return '<div class="card">Неизвестная таблица.</div>';
+  const info = await db.all(`PRAGMA table_info(${table})`);
+  const rowObj = await db.get(`SELECT rowid AS __rid, * FROM ${table} WHERE rowid = ?`, [pk]);
+  if (!rowObj) return '<div class="card">Строка не найдена.</div>';
+  const fields = info.map((ci) => {
+    const val = rowObj[ci.name];
+    const ro = ci.pk ? ' readonly' : '';
+    return `<label>${esc(ci.name)} <span class="muted">${esc(ci.type)}${ci.pk ? ' · PK' : ''}</span>
+      <input name="f_${esc(ci.name)}" value="${esc(val == null ? '' : val)}"${ro}></label>`;
+  }).join('');
+  return `
+  <h1>${esc(def[0])} — строка (rowid ${esc(pk)})</h1>
+  <p><a href="/panel?tab=data&table=${esc(table)}">← к таблице</a></p>
+  <div class="card">
+    <form method="POST" action="/panel/row/save" class="form">
+      ${csrfField(user)}
+      <input type="hidden" name="table" value="${esc(table)}">
+      <input type="hidden" name="pk" value="${esc(pk)}">
+      ${fields}
+      <button class="btn" type="submit">Сохранить</button>
+    </form>
+  </div>
+  <div class="card">
+    <form method="POST" action="/panel/row/delete" onsubmit="return confirm('Удалить строку безвозвратно?')">
+      ${csrfField(user)}
+      <input type="hidden" name="table" value="${esc(table)}">
+      <input type="hidden" name="pk" value="${esc(pk)}">
+      <button class="btn" style="background:var(--bad)" type="submit">Удалить строку</button>
+    </form>
+  </div>`;
+}
+
+async function rowNewBody(client, user, table) {
+  const def = DATA_TABLES[table];
+  if (!def) return '<div class="card">Неизвестная таблица.</div>';
+  const info = await db.all(`PRAGMA table_info(${table})`);
+  const fields = info.filter((ci) => !(ci.pk && /INT/i.test(ci.type))).map((ci) =>
+    `<label>${esc(ci.name)} <span class="muted">${esc(ci.type)}</span><input name="f_${esc(ci.name)}"></label>`).join('');
+  return `
+  <h1>${esc(def[0])} — новая строка</h1>
+  <p><a href="/panel?tab=data&table=${esc(table)}">← к таблице</a></p>
+  <div class="card"><form method="POST" action="/panel/row/add" class="form">
+    ${csrfField(user)}<input type="hidden" name="table" value="${esc(table)}">
+    ${fields}
+    <button class="btn" type="submit">Добавить</button>
+  </form></div>`;
+}
+
+// ---------- Обработка POST ----------
+async function handlePost(client, pathName, user, body, acc) {
+  if (!user) return '/login';
+  if (!csrfOk(user, body.get('_csrf'))) return '/me?' + qs({ err: 'Сессия формы устарела — откройте форму заново.' });
+  const g = guildOf(client);
+  const uname = user.username || user.id;
+
+  // ===== заявка на вступление =====
+  if (pathName === '/apply') {
+    if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id])) return '/me?' + qs({ err: 'Вы уже участник организации.' });
+    if (await db.get('SELECT id FROM blacklist WHERE discord_id = ?', [user.id])) return '/apply?' + qs({ err: 'Вы в чёрном списке организации.' });
+    const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
+    const stat = (body.get('static') || '').trim();
+    const lvl = parseInt(body.get('lvl'), 10) || 0;
+    const skills = (body.get('skills') || '').trim();
+    const invited = (body.get('invited_by') || '').trim();
+    if (!name || !/^[0-9]+$/.test(stat) || lvl < 1) return '/apply?' + qs({ err: 'Проверьте поля: имя, № паспорта (только цифры), LVL.' });
+    if (await db.get("SELECT id FROM applications WHERE discord_id = ? AND status='pending'", [user.id])) return '/me?' + qs({ err: 'У вас уже есть заявка на рассмотрении.' });
+    const created = new Date().toISOString();
+    const r = await db.run(
+      `INSERT INTO applications (discord_id, discord_tag, name, static, lvl, skills, invited_by, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      [user.id, uname, name, stat, lvl, skills, invited, created],
+    );
+    const app = { id: r.lastID, discord_id: user.id, discord_tag: uname, name, static: stat, lvl, skills, invited_by: invited, status: 'pending', created_at: created };
+    const sent = await postTo(client, config.CHANNEL_APPLY_REVIEW, {
+      content: REVIEW_MENTION() + ' — заявка подана через сайт',
+      embeds: [webApplyEmbed(app)], components: webApplyComponents(app), ...REVIEW_MENTION_OPTS,
+    });
+    if (sent) await db.run('UPDATE applications SET message_id = ? WHERE id = ?', [sent.id, app.id]);
+    await webAudit(client, user, 'Заявка на вступление (сайт)', `#${app.id} — ${name}, № ${stat}, LVL ${lvl}`);
+    return '/me?' + qs({ ok: 'Заявка отправлена на рассмотрение.' });
+  }
+
+  // ===== отпуск =====
+  if (pathName === '/me/vacation') {
+    if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Доступно только участникам организации.' });
+    const deadline = dates.parseDeadline(body.get('deadline') || '');
+    if (!deadline) return '/me?' + qs({ err: 'Неверная дата. Формат ДД.ММ.ГГГГ или число+d (например 7d).' });
+    if (await db.get("SELECT id FROM vacations WHERE discord_id = ? AND status='pending'", [user.id])) return '/me?' + qs({ err: 'У вас уже есть заявка на отпуск на рассмотрении.' });
+    const reason = (body.get('reason') || '').trim();
+    const r = await db.run(
+      'INSERT INTO vacations (discord_id, discord_tag, until, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [user.id, uname, deadline.toISOString(), reason, 'pending', new Date().toISOString()],
+    );
+    const v = { id: r.lastID, discord_id: user.id, discord_tag: uname, until: deadline.toISOString(), reason, status: 'pending' };
+    const sent = await postTo(client, config.CHANNEL_VACATION_REVIEW, {
+      content: REVIEW_MENTION() + ' — отпуск подан через сайт',
+      embeds: [webVacationEmbed(v)], components: webVacationComponents(v), ...REVIEW_MENTION_OPTS,
+    });
+    if (sent) await db.run('UPDATE vacations SET message_id = ? WHERE id = ?', [sent.id, v.id]);
+    await webAudit(client, user, 'Заявка на отпуск (сайт)', `#${v.id} до ${dates.formatDateTime(deadline)}`);
+    return '/me?' + qs({ ok: 'Заявка на отпуск отправлена.' });
+  }
+
+  // ===== тикет =====
+  if (pathName === '/me/ticket') {
+    if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Доступно только участникам организации.' });
+    const CATS = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое' };
+    const cat = body.get('category');
+    if (!CATS[cat]) return '/me?' + qs({ err: 'Неизвестный тип тикета.' });
+    if (!g) return '/me?' + qs({ err: 'Бот сейчас недоступен, попробуйте позже.' });
+    const subject = ((body.get('subject') || '').trim() || 'Без темы').slice(0, 100);
+    const desc = (body.get('description') || '').trim();
+    if (await db.get("SELECT channel_id FROM tickets WHERE opener_id = ? AND status='open' AND (category IS NULL OR category != 'appeal')", [user.id])) {
+      return '/me?' + qs({ err: 'У вас уже есть открытый тикет в Discord.' });
+    }
+    const overwrites = [
+      { id: g.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      { id: g.client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
+      { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
+      { id: config.OWNER_USER_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+    ];
+    for (const roleId of config.ROLES_REVIEW_ALLOWED) {
+      overwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
+    }
+    let channel;
+    try {
+      channel = await g.channels.create({
+        name: (`${CATS[cat].toLowerCase()}-${uname}`).toLowerCase().replace(/[^a-zа-яё0-9-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 90) || `ticket-${Date.now()}`,
+        type: ChannelType.GuildText,
+        parent: config.CHANNEL_TICKETS_ACTIVE_CATEGORY,
+        permissionOverwrites: overwrites,
+        topic: `[${CATS[cat]}] ${subject}`.slice(0, 1000),
+      });
+    } catch (e) {
+      return '/me?' + qs({ err: 'Не удалось создать канал тикета: ' + e.message });
+    }
+    const r = await db.run(
+      "INSERT INTO tickets (channel_id, opener_id, subject, category, status, created_at) VALUES (?, ?, ?, ?, 'open', ?)",
+      [channel.id, user.id, subject, cat, new Date().toISOString()],
+    );
+    await channel.send({
+      content: `${REVIEW_MENTION()} — новый тикет от <@${user.id}> (через сайт)`,
+      embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle(`🎫 ${subject}`).setDescription(desc || '_(без описания)_').addFields(
+        { name: 'Автор', value: `<@${user.id}>`, inline: true },
+        { name: 'Тип', value: CATS[cat], inline: true },
+        { name: 'Открыт', value: dates.formatDateTime(new Date()), inline: true },
+      )],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`ticket_claim:${r.lastID}`).setLabel('🙋 Беру').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`ticket_close:${r.lastID}`).setLabel('🔒 Закрыть тикет').setStyle(ButtonStyle.Danger),
+      )],
+      ...REVIEW_MENTION_OPTS,
+    });
+    await webAudit(client, user, 'Открыт тикет (сайт)', `#${r.lastID} ${CATS[cat]}: ${subject}`);
+    return '/me?' + qs({ ok: 'Тикет создан в Discord.' });
+  }
+
+  // ===== розыгрыши (owner) =====
+  if (pathName.startsWith('/panel/giveaway/')) {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (pathName === '/panel/giveaway/create') {
+      const prize = (body.get('prize') || '').trim().slice(0, 200);
+      const winners = parseInt(body.get('winners'), 10) || 0;
+      const durMs = giveaways.parseDuration((body.get('duration') || '').trim());
+      const channelId = (body.get('channel_id') || '').trim();
+      const roleId = (body.get('role_id') || '').trim() || null;
+      if (!prize || winners < 1 || !durMs || !/^[0-9]+$/.test(channelId)) return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля формы (приз, победители, длительность, ID канала).' });
+      const endsAt = new Date(Date.now() + durMs);
+      const gid = await giveaways.createGiveaway(channelId, prize, winners, user.id, endsAt.toISOString(), roleId, null);
+      const embed = new EmbedBuilder().setColor(0x57f287).setTitle(`🎉 ${prize}`)
+        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}`)
+        .addFields(
+          { name: 'Победителей', value: String(winners), inline: true },
+          { name: 'Участников', value: '0', inline: true },
+          { name: 'Закончится', value: `<t:${Math.floor(endsAt.getTime() / 1000)}:R>`, inline: true },
+        );
+      const sent = await postTo(client, channelId, {
+        content: '🎉 **РОЗЫГРЫШ** 🎉',
+        embeds: [embed],
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`giveaway_enter:${gid}`).setLabel('🎉 Участвовать').setStyle(ButtonStyle.Success),
+        )],
+      });
+      if (!sent) return '/panel?tab=giveaways&' + qs({ err: 'Розыгрыш создан в БД, но опубликовать в канал не удалось — проверьте ID канала.' });
+      await giveaways.setMessageId(gid, sent.id);
+      await webAudit(client, user, 'Создан розыгрыш (сайт)', `#${gid} «${prize}», победителей ${winners}, до ${dates.formatDateTime(endsAt)}`);
+      return '/panel?tab=giveaways&' + qs({ ok: 'Розыгрыш создан и опубликован.' });
+    }
+    const gid = parseInt(body.get('id'), 10) || 0;
+    const gv = await giveaways.getGiveaway(gid);
+    if (!gv || gv.status !== 'active') return '/panel?tab=giveaways&' + qs({ err: 'Розыгрыш не найден или уже завершён.' });
+    if (pathName === '/panel/giveaway/end') {
+      await db.run('UPDATE giveaways SET ends_at = ? WHERE id = ?', [new Date(Date.now() - 1000).toISOString(), gid]);
+      await webAudit(client, user, 'Досрочное завершение розыгрыша (сайт)', `#${gid} «${gv.prize}» — итоги подведёт бот в течение минуты`);
+      return '/panel?tab=giveaways&' + qs({ ok: 'Розыгрыш будет завершён в течение минуты.' });
+    }
+    if (pathName === '/panel/giveaway/cancel') {
+      await giveaways.setStatus(gid, 'cancelled');
+      if (gv.message_id && g) {
+        try {
+          const ch = await g.channels.fetch(gv.channel_id);
+          const msg = await ch.messages.fetch(gv.message_id);
+          await msg.edit({
+            embeds: [new EmbedBuilder().setColor(0xed4245).setTitle(`🎉 ${gv.prize}`).setDescription('❌ Розыгрыш отменён.')],
+            components: [new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId(`giveaway_enter:${gid}`).setLabel('🎉 Участвовать').setStyle(ButtonStyle.Success).setDisabled(true),
+            )],
+          });
+          await ch.send(`❌ Розыгрыш «${gv.prize}» отменён.`);
+        } catch (_) {}
+      }
+      await webAudit(client, user, 'Розыгрыш отменён (сайт)', `#${gid} «${gv.prize}»`);
+      return '/panel?tab=giveaways&' + qs({ ok: 'Розыгрыш отменён.' });
+    }
+    return '/panel?tab=giveaways';
+  }
+
+  // ===== чёрный список (deputy+) =====
+  if (pathName.startsWith('/panel/blacklist/')) {
+    if (acc.rank < LEVELS.deputy) return '/panel?tab=blacklist&' + qs({ err: 'Недостаточно прав.' });
+    if (pathName === '/panel/blacklist/add') {
+      const did = (body.get('discord_id') || '').trim();
+      const stat = (body.get('static') || '').trim();
+      const reason = (body.get('reason') || '').trim().slice(0, 300);
+      if ((!did && !stat) || !reason) return '/panel?tab=blacklist&' + qs({ err: 'Укажите Discord ID или паспорт и причину.' });
+      let untilIso = null;
+      const untilRaw = (body.get('until') || '').trim();
+      if (untilRaw) {
+        const d = dates.parseDeadline(untilRaw);
+        if (!d) return '/panel?tab=blacklist&' + qs({ err: 'Неверный формат даты «до».' });
+        untilIso = d.toISOString();
+      }
+      await db.run(
+        'INSERT INTO blacklist (discord_id, discord_tag, static, reason, added_by, created_at, until, appeal_blocked) VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+        [did || null, null, stat || null, reason, user.id, new Date().toISOString(), untilIso],
+      );
+      await webAudit(client, user, 'Внесение в ЧС (сайт)', `${did ? 'ID ' + did : ''}${stat ? ' № ' + stat : ''} — ${reason}${untilIso ? ' (до ' + dates.formatDateTime(new Date(untilIso)) + ')' : ''}`);
+      return '/panel?tab=blacklist&' + qs({ ok: 'Запись добавлена в чёрный список.' });
+    }
+    if (pathName === '/panel/blacklist/remove') {
+      const id = parseInt(body.get('id'), 10) || 0;
+      const row = await db.get('SELECT * FROM blacklist WHERE id = ?', [id]);
+      if (!row) return '/panel?tab=blacklist&' + qs({ err: 'Запись не найдена.' });
+      await db.run('DELETE FROM blacklist WHERE id = ?', [id]);
+      await webAudit(client, user, 'Удаление из ЧС (сайт)', `#${id} ${row.discord_id ? 'ID ' + row.discord_id : ''} ${row.static ? '№ ' + row.static : ''}`);
+      return '/panel?tab=blacklist&' + qs({ ok: 'Запись удалена из чёрного списка.' });
+    }
+    return '/panel?tab=blacklist';
+  }
+
+  // ===== редактор БД (только havirys) =====
+  if (pathName.startsWith('/panel/row/')) {
+    if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Редактор БД доступен только владельцу (havirys).' });
+    const table = body.get('table');
+    if (!DATA_TABLES[table]) return '/panel?tab=data&' + qs({ err: 'Неизвестная таблица.' });
+    const info = await db.all(`PRAGMA table_info(${table})`);
+    if (pathName === '/panel/row/save') {
+      const pk = body.get('pk');
+      const setCols = info.filter((ci) => !ci.pk);
+      if (!setCols.length) return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ err: 'Нет изменяемых столбцов.' });
+      const sets = setCols.map((ci) => `${ci.name} = ?`).join(', ');
+      const vals = setCols.map((ci) => {
+        const raw = body.get('f_' + ci.name);
+        return raw === '' || raw == null ? null : raw;
+      });
+      await db.run(`UPDATE ${table} SET ${sets} WHERE rowid = ?`, [...vals, pk]);
+      await webAudit(client, user, 'Правка БД (сайт)', `${table} rowid=${pk}: ${setCols.map((c) => c.name).join(', ')}`);
+      return '/panel/row?' + qs({ table, pk, ok: 'Строка сохранена.' });
+    }
+    if (pathName === '/panel/row/delete') {
+      const pk = body.get('pk');
+      await db.run(`DELETE FROM ${table} WHERE rowid = ?`, [pk]);
+      await webAudit(client, user, 'Удаление строки БД (сайт)', `${table} rowid=${pk}`);
+      return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ ok: 'Строка удалена.' });
+    }
+    if (pathName === '/panel/row/add') {
+      const addCols = info.filter((ci) => !(ci.pk && /INT/i.test(ci.type)));
+      const present = addCols.filter((ci) => (body.get('f_' + ci.name) || '') !== '');
+      if (!present.length) return '/panel/row/new?' + qs({ table, err: 'Заполните хотя бы одно поле.' });
+      const placeholders = present.map(() => '?').join(', ');
+      await db.run(
+        `INSERT INTO ${table} (${present.map((c) => c.name).join(', ')}) VALUES (${placeholders})`,
+        present.map((c) => body.get('f_' + c.name)),
+      );
+      await webAudit(client, user, 'Добавление строки БД (сайт)', `${table}: ${present.map((c) => c.name).join(', ')}`);
+      return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ ok: 'Строка добавлена.' });
+    }
+    return '/panel?tab=data&table=' + encodeURIComponent(table);
+  }
+
+  return '/';
 }
 
 // ---------- Сервер ----------
@@ -543,12 +1084,21 @@ function start(client) {
       const path = u.pathname;
       const user = readSession(req.headers.cookie);
       const pageNum = Math.max(0, parseInt(u.searchParams.get('page') || '0', 10) || 0);
+      const flash = flashBanner(u);
 
       if (path === '/healthz') return done(200, { 'Content-Type': 'text/plain' }, 'ok');
 
+      // ----- POST: все действия записи -----
+      if (req.method === 'POST') {
+        const acc = user ? await accessFor(client, user.id) : { rank: 0, level: 'guest' };
+        const body = await readBody(req);
+        const loc = await handlePost(client, path, user, body, acc);
+        return redirect(loc || '/');
+      }
+
       if (path === '/' && req.method === 'GET') {
         const level = user ? (await accessFor(client, user.id)).level : 'guest';
-        return html(200, layout({ title: config.SITE_BRAND, user, level, body: await landingBody(await orgStats()) }));
+        return html(200, layout({ title: config.SITE_BRAND, user, level, body: flash + await landingBody(await orgStats()) }));
       }
 
       if (path === '/login') {
@@ -592,10 +1142,31 @@ function start(client) {
         }
       }
 
+      if (path === '/apply' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const level = (await accessFor(client, user.id)).level;
+        if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id])) return redirect('/me');
+        return html(200, layout({ title: 'Заявка на вступление', user, level, body: flash + applyBody(user) }));
+      }
+
       if (path === '/me') {
         if (!user) return redirect('/login');
         const level = (await accessFor(client, user.id)).level;
-        return html(200, layout({ title: 'Личный кабинет', user, level, body: await meBody(client, user) }));
+        return html(200, layout({ title: 'Личный кабинет', user, level, body: flash + await meBody(client, user) }));
+      }
+
+      if (path === '/panel/row' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (user.id !== OWNER_ID) return html(403, layout({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Доступ запрещён</h1><p class="muted">Редактор БД доступен только владельцу (havirys).</p>' }));
+        return html(200, layout({ title: 'Правка строки', user, level: acc.level, wide: true, body: flash + await rowEditBody(client, user, u.searchParams.get('table'), u.searchParams.get('pk')) }));
+      }
+
+      if (path === '/panel/row/new' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (user.id !== OWNER_ID) return html(403, layout({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Доступ запрещён</h1><p class="muted">Редактор БД доступен только владельцу (havirys).</p>' }));
+        return html(200, layout({ title: 'Новая строка', user, level: acc.level, wide: true, body: flash + await rowNewBody(client, user, u.searchParams.get('table')) }));
       }
 
       if (path === '/panel') {
@@ -605,7 +1176,7 @@ function start(client) {
           return html(403, layout({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Доступ запрещён</h1><p class="muted">Панель управления доступна HR-Менеджеру и выше.</p><a class="btn" href="/me">Мой профиль</a>' }));
         }
         const tab = u.searchParams.get('tab') || 'overview';
-        return html(200, layout({ title: 'Панель управления', user, level: acc.level, wide: true, body: await panelBody(client, acc, tab, pageNum, u.searchParams.get('table')) }));
+        return html(200, layout({ title: 'Панель управления', user, level: acc.level, wide: true, body: flash + await panelBody(client, acc, user, tab, pageNum, u.searchParams.get('table')) }));
       }
 
       return html(404, layout({ title: '404', body: '<h1>404</h1><a class="btn" href="/">На главную</a>' }));
