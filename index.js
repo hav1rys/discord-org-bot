@@ -1768,7 +1768,12 @@ async function startGiveawayFromRule(guild, rule) {
   const channel = await guild.channels.fetch(rule.channel_id);
   const giveawayId = await giveaways.createGiveaway(rule.channel_id, rule.prize, rule.winners_count, rule.host_id, endsAt.toISOString(), rule.required_role_id, rule.id);
   const embed = buildGiveawayEmbed({ prize: rule.prize, winners_count: rule.winners_count, ends_at: endsAt.toISOString(), host_id: rule.host_id, required_role_id: rule.required_role_id }, 0);
-  const sent = await channel.send({ content: '🎉 **РОЗЫГРЫШ** 🎉', embeds: [embed], components: buildGiveawayComponents(giveawayId) });
+  const sent = await channel.send({
+    content: '🎉 **РОЗЫГРЫШ** 🎉\n||@everyone||',
+    embeds: [embed],
+    components: buildGiveawayComponents(giveawayId),
+    allowedMentions: { parse: ['everyone'] },
+  });
   await giveaways.setMessageId(giveawayId, sent.id);
   return giveawayId;
 }
@@ -3187,9 +3192,10 @@ client.on('interactionCreate', async (interaction) => {
         const giveawayId = await giveaways.createGiveaway(targetChannel.id, prize, winnersCount, interaction.user.id, endsAt.toISOString(), requiredRole ? requiredRole.id : null);
         const embed = buildGiveawayEmbed({ prize, winners_count: winnersCount, ends_at: endsAt.toISOString(), host_id: interaction.user.id, required_role_id: requiredRole ? requiredRole.id : null }, 0);
         const sent = await targetChannel.send({
-          content: '🎉 **РОЗЫГРЫШ** 🎉',
+          content: '🎉 **РОЗЫГРЫШ** 🎉\n||@everyone||',
           embeds: [embed],
           components: buildGiveawayComponents(giveawayId),
+          allowedMentions: { parse: ['everyone'] },
         });
         await giveaways.setMessageId(giveawayId, sent.id);
 
