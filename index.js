@@ -126,7 +126,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🎉 Розыгрыши',
-    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_добавить_участника', 'розыгрыш_удалить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить', 'розыгрыш_чс_добавить', 'розыгрыш_чс_убрать', 'розыгрыш_чс_список'],
+    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_участники_экспорт', 'розыгрыш_добавить_участника', 'розыгрыш_удалить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить', 'розыгрыш_чс_добавить', 'розыгрыш_чс_убрать', 'розыгрыш_чс_список'],
   },
   {
     title: '📢 Тексты и рассылки',
@@ -138,7 +138,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🛠️ Настройки бота',
-    commands: ['настройка_изменить', 'настройка_показать', 'настройка_переключить', 'discord_права_настроить', 'discord_права_синхронизировать'],
+    commands: ['настройка_изменить', 'настройка_показать', 'настройка_переключить', 'discord_права_настроить', 'discord_права_синхронизировать', 'discord_права_статус'],
   },
   {
     title: '💾 Резервные копии',
@@ -146,7 +146,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🩺 Диагностика и отчётность',
-    commands: ['пинг', 'статус', 'статистика_организации', 'экспорт_id', 'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт', 'сверка_ролей', 'экспорт_бд', 'поиск_везде'],
+    commands: ['пинг', 'статус', 'статистика_организации', 'экспорт_id', 'экспорт_статистика', 'аудит_поиск', 'аудит_экспорт', 'сверка_ролей', 'экспорт_бд', 'поиск_везде', 'кэш_статистика', 'статус_бд', 'ранги_пересчитать_сейчас'],
   },
   {
     title: '❔ Справка',
@@ -185,7 +185,9 @@ const COMMAND_DEFAULT_TIERS = {
   сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr',
   журнал_прав: 'admin', команды_человека: 'admin', предпросмотр: 'admin',
   розыгрыш_чс_добавить: 'admin', розыгрыш_чс_убрать: 'admin', розыгрыш_чс_список: 'admin',
-  discord_права_настроить: 'owner_account_only', discord_права_синхронизировать: 'owner_account_only',
+  discord_права_настроить: 'owner_account_only', discord_права_синхронизировать: 'owner_account_only', discord_права_статус: 'owner_account_only',
+  кэш_статистика: 'owner', статус_бд: 'owner', розыгрыш_участники_экспорт: 'owner',
+  ранги_пересчитать_сейчас: 'hr',
   экспорт_бд: 'admin', резерв_восстановить: 'admin', резерв_загрузить: 'admin',
 };
 
@@ -260,6 +262,7 @@ async function syncOneCommandPermissions(guild, commandName) {
     const tier = await getCommandTier(commandName);
     const { roleIds, userIds } = resolveTierToDiscordPermissions(tier);
     await commandPermSync.setCommandPermissions(guild.id, client.application.id, discordCommand.id, roleIds, userIds);
+    await db.setSetting('command_perm_last_sync', new Date().toISOString());
   } catch (err) {
     console.error(`Не удалось синхронизировать видимость команды /${commandName} с Discord:`, err.message);
   }
@@ -730,12 +733,12 @@ async function checkContractPromotion(guild, threadId) {
 // "2. Фрилансер", понижается до "1. Стажер". Повышение сюда больше не
 // входит — оно теперь происходит мгновенно при проверке контракта
 // (см. checkContractPromotion).
-async function runWeeklyRankAdjustment(guild) {
+async function runWeeklyRankAdjustment(guild, force = false) {
   const now = new Date();
   const isTargetDay = dates.mskWeekday(now) === config.WEEKLY_RANK_ADJUSTMENT_DAY;
   const todayStr = dates.mskDateStr(now);
   const lastRun = await db.getSetting('weekly_rank_adjustment_last_run');
-  if (!isTargetDay || lastRun === todayStr) return;
+  if (!force && (!isTargetDay || lastRun === todayStr)) return 0;
 
   const stazherRoleId = config.ROLE_IDS[4]; // "1. Стажер"
   const freelancerRoleId = config.ROLE_IDS[3]; // "2. Фрилансер"
@@ -754,16 +757,20 @@ async function runWeeklyRankAdjustment(guild) {
     }
     await safeUpdateMembersList(guild);
 
-    const lines = demotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discord_id}>`);
     await logAudit(
       guild,
       client.user,
       '⬇️ Еженедельное авто-понижение',
-      `Понижены до «1. Стажер» (были на «2. Фрилансер»):\n${lines.join('\n')}`.slice(0, 4000),
+      [
+        { name: 'Запуск', value: force ? 'Вручную (/ранги_пересчитать_сейчас)' : 'По расписанию', inline: true },
+        { name: 'Понижено', value: String(demotions.length), inline: true },
+        { name: 'Кто понижен', value: demotions.map((p) => `${p.name} (№ ${p.static}) — <@${p.discord_id}>`).join('\n').slice(0, 1024), inline: false },
+      ],
     );
   }
 
   await db.setSetting('weekly_rank_adjustment_last_run', todayStr);
+  return demotions.length;
 }
 
 async function sendWeeklyDigest(guild) {
@@ -1483,6 +1490,22 @@ const commands = [
     .setName('discord_права_синхронизировать')
     .setDescription('Заново применить видимость всех команд в Discord (после массовых изменений прав)'),
   new SlashCommandBuilder()
+    .setName('discord_права_статус')
+    .setDescription('Состояние синхронизации видимости команд с Discord'),
+  new SlashCommandBuilder()
+    .setName('кэш_статистика')
+    .setDescription('Сколько места занимает локальный кэш скриншотов'),
+  new SlashCommandBuilder()
+    .setName('ранги_пересчитать_сейчас')
+    .setDescription('Принудительно запустить еженедельную авто-корректировку рангов прямо сейчас'),
+  new SlashCommandBuilder()
+    .setName('статус_бд')
+    .setDescription('Размер базы данных и количество записей в ключевых таблицах'),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_участники_экспорт')
+    .setDescription('Выгрузить список участников розыгрыша в .csv')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
     .setName('розыгрыш_завершить')
     .setDescription('Досрочно завершить розыгрыш и выбрать победителей')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш завершить').setRequired(true).setAutocomplete(true)),
@@ -2159,6 +2182,37 @@ function buildSearchComponents(searchId, page, hasMore) {
   )];
 }
 
+const auditSearchCache = new Map(); // короткий id -> текст запроса (для кнопок пагинации /аудит_поиск)
+const AUDIT_PAGE_SIZE = 10;
+
+async function runAuditSearch(queryText, page) {
+  const q = `%${queryText}%`;
+  const offset = page * AUDIT_PAGE_SIZE;
+  const rows = await db.all(
+    `SELECT * FROM audit_log WHERE action LIKE ? OR details LIKE ? OR actor_tag LIKE ? ORDER BY id DESC LIMIT ? OFFSET ?`,
+    [q, q, q, AUDIT_PAGE_SIZE + 1, offset],
+  );
+  const hasMore = rows.length > AUDIT_PAGE_SIZE;
+  const pageRows = rows.slice(0, AUDIT_PAGE_SIZE);
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`Поиск по аудиту: «${queryText}»${page > 0 ? ` — стр. ${page + 1}` : ''}`)
+    .setDescription(
+      pageRows.length > 0
+        ? pageRows.map((r) => `**${r.action}** — <@${r.actor_id}> — ${formatDateTime(new Date(r.at))}\n${r.details.slice(0, 200)}`).join('\n\n').slice(0, 4000)
+        : 'Ничего не найдено на этой странице.',
+    );
+  return { embed, hasMore, total: pageRows.length };
+}
+
+function buildAuditSearchComponents(searchId, page, hasMore) {
+  return [row(
+    new ButtonBuilder().setCustomId(`audit_search_page:${searchId}:${page - 1}`).setLabel('◀ Назад').setStyle(ButtonStyle.Secondary).setDisabled(page <= 0),
+    new ButtonBuilder().setCustomId(`audit_search_page:${searchId}:${page + 1}`).setLabel('Вперёд ▶').setStyle(ButtonStyle.Secondary).setDisabled(!hasMore),
+  )];
+}
+
 async function uploadBackupFile(filePath, reason) {
   try {
     const channel = await client.channels.fetch(config.CHANNEL_BACKUPS);
@@ -2532,7 +2586,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники' || interaction.commandName === 'розыгрыш_добавить_участника' || interaction.commandName === 'розыгрыш_удалить_участника') {
+      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники' || interaction.commandName === 'розыгрыш_участники_экспорт' || interaction.commandName === 'розыгрыш_добавить_участника' || interaction.commandName === 'розыгрыш_удалить_участника') {
         const focused = interaction.options.getFocused();
         let statusClause = '';
         let params = [`%${focused}%`];
@@ -2787,22 +2841,21 @@ client.on('interactionCreate', async (interaction) => {
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const query = interaction.options.getString('запрос');
-        const q = `%${query}%`;
-        const rows = await db.all(
-          `SELECT * FROM audit_log WHERE action LIKE ? OR details LIKE ? OR actor_tag LIKE ? ORDER BY id DESC LIMIT 15`,
-          [q, q, q],
-        );
-        if (rows.length === 0) {
+
+        const { embed, hasMore, total } = await runAuditSearch(query, 0);
+        if (total === 0) {
           await interaction.editReply('Ничего не найдено.');
           return;
         }
-        const embed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle(`Поиск по аудиту: «${query}»`)
-          .setDescription(
-            rows.map((r) => `**${r.action}** — <@${r.actor_id}> — ${formatDateTime(new Date(r.at))}\n${r.details.slice(0, 200)}`).join('\n\n').slice(0, 4000),
-          );
-        await interaction.editReply({ embeds: [embed] });
+
+        const searchId = Math.random().toString(36).slice(2, 10);
+        auditSearchCache.set(searchId, query);
+        if (auditSearchCache.size > 200) {
+          const oldestKey = auditSearchCache.keys().next().value;
+          auditSearchCache.delete(oldestKey);
+        }
+
+        await interaction.editReply({ embeds: [embed], components: buildAuditSearchComponents(searchId, 0, hasMore) });
         return;
       }
 
@@ -3389,12 +3442,133 @@ client.on('interactionCreate', async (interaction) => {
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const result = await syncAllCommandPermissions(guild);
+        await db.setSetting('command_perm_last_sync', new Date().toISOString());
         await logSystem(guild, 'Видимость команд синхронизирована с Discord', `Инициатор: ${interaction.user.tag} (${interaction.user.id}). Успешно: ${result.ok}${result.failed.length > 0 ? `. Ошибок: ${result.failed.length}` : ''}`);
         let msg = `✅ Синхронизировано команд: ${result.ok}.`;
         if (result.failed.length > 0) {
           msg += `\n\n⚠️ Не удалось (${result.failed.length}):\n${result.failed.slice(0, 10).join('\n')}`;
         }
         await interaction.editReply(msg.slice(0, 2000));
+        return;
+      }
+
+      if (cmd === 'discord_права_статус') {
+        if (!(await checkCommandAccess('discord_права_статус', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const status = await commandPermSync.getStatus();
+        const lastSync = await db.getSetting('command_perm_last_sync');
+
+        const embed = new EmbedBuilder().setColor(status.authorized && status.tokenValid ? 0x57f287 : 0xed4245).setTitle('🔗 Статус синхронизации видимости команд');
+        if (!status.authorized) {
+          embed.setDescription('❌ Авторизация ещё не пройдена. Выполните `/discord_права_настроить`.');
+        } else {
+          embed.addFields(
+            { name: 'Авторизован', value: status.tokenValid ? '✅ Да' : '⚠️ Токен истёк, нужна повторная авторизация', inline: true },
+            { name: 'Кто авторизовал', value: `<@${status.authorizedBy}>`, inline: true },
+            { name: 'Токен действует до', value: formatDateTime(new Date(status.expiresAt)), inline: true },
+            { name: 'Последняя синхронизация', value: lastSync ? formatDateTime(new Date(lastSync)) : 'Ещё не выполнялась', inline: true },
+          );
+          if (!status.tokenValid) {
+            embed.setDescription('⚠️ Токен истёк — синхронизация сейчас не работает. Выполните `/discord_права_настроить` заново.');
+          }
+        }
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'кэш_статистика') {
+        if (!(await checkCommandAccess('кэш_статистика', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        let files = [];
+        try {
+          files = fs.readdirSync(mediaCache.CACHE_DIR);
+        } catch (_) {}
+        let totalSize = 0;
+        for (const f of files) {
+          try {
+            totalSize += fs.statSync(path.join(mediaCache.CACHE_DIR, f)).size;
+          } catch (_) {}
+        }
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('💾 Кэш скриншотов')
+          .addFields(
+            { name: 'Файлов', value: String(files.length), inline: true },
+            { name: 'Занято места', value: `${(totalSize / 1024 / 1024).toFixed(2)} МБ`, inline: true },
+            { name: 'Срок хранения', value: '30 дней', inline: true },
+          );
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'ранги_пересчитать_сейчас') {
+        if (!(await checkCommandAccess('ранги_пересчитать_сейчас', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const demotedCount = await runWeeklyRankAdjustment(guild, true);
+        await interaction.editReply(`✅ Пересчёт выполнен. Понижено паспортов: ${demotedCount}.`);
+        return;
+      }
+
+      if (cmd === 'статус_бд') {
+        if (!(await checkCommandAccess('статус_бд', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        let dbSize = 0;
+        try {
+          dbSize = fs.statSync(db.dbPath).size;
+        } catch (_) {}
+
+        const tables = ['participants', 'extra_passports', 'applications', 'kicks', 'vacations', 'contracts', 'invitations', 'blacklist', 'audit_log', 'giveaways'];
+        const counts = [];
+        for (const t of tables) {
+          try {
+            const r = await db.get(`SELECT COUNT(*) as cnt FROM ${t}`);
+            counts.push(`${t}: ${r.cnt}`);
+          } catch (_) {}
+        }
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🗄️ Статус базы данных')
+          .addFields(
+            { name: 'Размер файла', value: `${(dbSize / 1024 / 1024).toFixed(2)} МБ`, inline: true },
+            { name: 'Записей по таблицам', value: counts.join('\n').slice(0, 1024), inline: false },
+          );
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+
+      if (cmd === 'розыгрыш_участники_экспорт') {
+        if (!(await checkCommandAccess('розыгрыш_участники_экспорт', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway) {
+          await interaction.editReply('⛔ Розыгрыш не найден.');
+          return;
+        }
+        const entries = await giveaways.getEntries(giveawayId);
+        if (entries.length === 0) {
+          await interaction.editReply('Участников пока нет — выгружать нечего.');
+          return;
+        }
+        const csv = buildCsv(['discord_id'], entries.map((id) => [id]));
+        const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `giveaway_${giveawayId}_participants.csv` });
+        await logAudit(guild, interaction.user, 'Экспорт участников розыгрыша', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Приз', value: giveaway.prize, inline: true },
+          { name: 'Участников', value: String(entries.length), inline: true },
+        ]);
+        await interaction.editReply({ content: `Участники розыгрыша «${giveaway.prize}» (${entries.length}):`, files: [file] });
         return;
       }
 
@@ -3551,7 +3725,20 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Было', value: String(oldValue), inline: true },
             { name: 'Стало', value: String(newValue), inline: true },
           ]);
-          await interaction.editReply(`Готово. «${key}» теперь: ${newValue}\n\n(применилось сразу, без перезапуска — но проверьте, что значение корректное, например реальный ID канала/роли)`);
+
+          // Если ключ похож на ID канала/роли — сразу проверяем, существует ли
+          // такой ID на сервере, чтобы не узнать об опечатке только когда
+          // что-то сломается.
+          let existenceWarning = '';
+          if (/CHANNEL/i.test(key) && /^\d{17,20}$/.test(String(newValue))) {
+            const found = guild.channels.cache.get(String(newValue));
+            if (!found) existenceWarning = `\n\n⚠️ Канал с ID \`${newValue}\` не найден на этом сервере — проверьте, не опечатка ли.`;
+          } else if (/ROLE/i.test(key) && /^\d{17,20}$/.test(String(newValue))) {
+            const found = guild.roles.cache.get(String(newValue));
+            if (!found) existenceWarning = `\n\n⚠️ Роль с ID \`${newValue}\` не найдена на этом сервере — проверьте, не опечатка ли.`;
+          }
+
+          await interaction.editReply(`Готово. «${key}» теперь: ${newValue}\n\n(применилось сразу, без перезапуска)${existenceWarning}`);
         } catch (err) {
           await interaction.editReply(`⛔ ${err.message}`);
         }
@@ -5136,6 +5323,22 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (id.startsWith('audit_search_page:')) {
+        if (!(await checkCommandAccess('аудит_поиск', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const [, searchId, pageStr] = id.split(':');
+        const query = auditSearchCache.get(searchId);
+        if (!query) {
+          return safeReply(interaction, '⛔ Этот поиск устарел — выполните `/аудит_поиск` заново.');
+        }
+        const page = parseInt(pageStr, 10);
+        await interaction.deferUpdate();
+        const { embed, hasMore } = await runAuditSearch(query, page);
+        await interaction.editReply({ embeds: [embed], components: buildAuditSearchComponents(searchId, page, hasMore) });
+        return;
+      }
+
       if (id === 'oauth_enter_code') {
         if (!(await checkCommandAccess('discord_права_настроить', interaction.member))) {
           return safeReply(interaction, '⛔ У вас нет прав.');
@@ -6473,6 +6676,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.editReply('✅ Авторизация прошла успешно. Применяю видимость ко всем командам, это может занять минуту...');
 
         const result = await syncAllCommandPermissions(guild);
+        await db.setSetting('command_perm_last_sync', new Date().toISOString());
         let msg = `✅ Готово. Синхронизировано команд: ${result.ok}.`;
         if (result.failed.length > 0) {
           msg += `\n\n⚠️ Не удалось (${result.failed.length}):\n${result.failed.slice(0, 10).join('\n')}`;

@@ -160,6 +160,18 @@ async function setCommandPermissions(guildId, applicationId, commandId, allowedR
   }
 }
 
+async function getStatus() {
+  const row = await db.get('SELECT * FROM oauth_tokens WHERE id = 1');
+  if (!row) return { authorized: false };
+  return {
+    authorized: true,
+    authorizedBy: row.authorized_by,
+    expiresAt: row.expires_at,
+    tokenValid: new Date(row.expires_at).getTime() > Date.now(),
+    updatedAt: row.updated_at,
+  };
+}
+
 module.exports = {
   buildAuthorizeUrl,
   missingEnvMessage,
@@ -167,4 +179,5 @@ module.exports = {
   getValidAccessToken,
   isAuthorized,
   setCommandPermissions,
+  getStatus,
 };
