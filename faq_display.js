@@ -1,6 +1,8 @@
 const {
   EmbedBuilder,
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
 } = require('discord.js');
@@ -9,23 +11,30 @@ const config = require('./config');
 const faq = require('./faq');
 
 function channelFor(category) {
-  return category === 'hr' ? config.CHANNEL_FAQ_HR : config.CHANNEL_FAQ_MEMBERS;
+  if (category === 'hr') return config.CHANNEL_FAQ_HR;
+  if (category === 'public') return config.CHANNEL_FAQ_PUBLIC;
+  return config.CHANNEL_FAQ_MEMBERS;
 }
 
 function titleFor(category) {
-  return category === 'hr' ? '❓ FAQ для HR-Менеджеров' : '❓ FAQ для участников организации';
+  if (category === 'hr') return '❓ FAQ для HR-Менеджеров';
+  if (category === 'public') return '❓ FAQ — общие вопросы (для всех)';
+  return '❓ FAQ для участников организации';
 }
 
 async function buildPayload(category) {
   const entries = await faq.listEntries(category);
   const bannerEmbed = new EmbedBuilder().setColor(0x5865f2).setTitle(titleFor(category));
+  const searchRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('faq_search').setLabel('🔍 Поиск по гайдам').setStyle(ButtonStyle.Secondary),
+  );
 
   if (entries.length === 0) {
     bannerEmbed.setDescription('Пока нет гайдов.');
-    return { embeds: [bannerEmbed], components: [] };
+    return { embeds: [bannerEmbed], components: [searchRow] };
   }
 
-  bannerEmbed.setDescription('Выберите вопрос из списка ниже, чтобы увидеть ответ.');
+  bannerEmbed.setDescription('Выберите вопрос из списка ниже или нажмите «Поиск».');
 
   // Discord позволяет максимум 25 пунктов в одном select-меню
   const select = new StringSelectMenuBuilder()
@@ -41,7 +50,7 @@ async function buildPayload(category) {
       ),
     );
 
-  return { embeds: [bannerEmbed], components: [new ActionRowBuilder().addComponents(select)] };
+  return { embeds: [bannerEmbed], components: [new ActionRowBuilder().addComponents(select), searchRow] };
 }
 
 async function updateFaqChannel(guild, category) {

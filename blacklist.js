@@ -42,7 +42,11 @@ function buildGroupFields(group, index) {
     : `${index}. ${first.discord_tag} | без Discord`;
   const passportValue = group.entries.map((e) => (multi ? `- ${e.static || '—'}` : (e.static || '—'))).join('\n');
   const reasonValue = group.entries
-    .map((e) => (multi ? `- ${e.reason || 'без причины'} | ${formatDate(e.created_at)}` : `${e.reason || 'без причины'} | ${formatDate(e.created_at)}`))
+    .map((e) => {
+      const term = e.until ? ` | до ${formatDate(e.until)}` : '';
+      const line = `${e.reason || 'без причины'} | ${formatDate(e.created_at)}${term}`;
+      return multi ? `- ${line}` : line;
+    })
     .join('\n');
 
   return [

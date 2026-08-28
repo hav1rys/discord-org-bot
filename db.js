@@ -162,6 +162,8 @@ const SCHEMA = {
       reason: 'TEXT',
       added_by: 'TEXT',
       created_at: 'TEXT',
+      until: 'TEXT', // если задано — ЧС временный, снимается автоматически после этой даты
+      appeal_blocked: 'INTEGER DEFAULT 0', // 1 — человеку запрещено подавать апелляцию на ЧС
     },
     indexes: [['discord_id']],
   },
@@ -516,12 +518,39 @@ const SCHEMA = {
       channel_id: 'TEXT UNIQUE',
       opener_id: 'TEXT',
       subject: 'TEXT',
+      category: 'TEXT', // question | complaint | other | appeal
       status: "TEXT DEFAULT 'open'", // open | archived
       created_at: 'TEXT',
       closed_at: 'TEXT',
       closed_by: 'TEXT',
     },
     indexes: [['opener_id'], ['status']],
+  },
+
+  // Шаблоны причин отказа по очередям (application | kick | vacation | ...).
+  // Редактируются командой /причины_отказа. Индекс position задаёт порядок кнопок.
+  reject_reason_templates: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      queue: 'TEXT',
+      text: 'TEXT',
+      position: 'INTEGER',
+      created_at: 'TEXT',
+    },
+    indexes: [['queue']],
+  },
+
+  // Оценка «Помог ли ответ?» под гайдом FAQ. Один голос на человека на гайд
+  // (перезаписывается при повторном голосовании — реализовано в коде).
+  faq_feedback: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      entry_id: 'INTEGER',
+      discord_id: 'TEXT',
+      helpful: 'INTEGER', // 1 — помог, 0 — не помог
+      at: 'TEXT',
+    },
+    indexes: [['entry_id']],
   },
 };
 
