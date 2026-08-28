@@ -386,6 +386,7 @@ const SCHEMA = {
       status: "TEXT DEFAULT 'active'", // active | ended | cancelled
       required_role_id: 'TEXT', // если задано — участвовать может только эта роль (и роли выше по иерархии)
       recurring_rule_id: 'INTEGER', // если создан из шаблона повтора — ссылка на giveaway_recurring_rules.id
+      winners: 'TEXT', // discord id победителей через запятую (для /розыгрыш_история)
       created_at: 'TEXT',
     },
     indexes: [['status'], ['ends_at']],
@@ -510,6 +511,28 @@ const SCHEMA = {
     indexes: [['discord_id']],
   },
 
+  // Отправка кодового слова «контракт» в Weazel News — для всех. Скриншот
+  // кидается в CHANNEL_CODEWORD, Владелец/Зам. подтверждают, в 23:59 МСК
+  // список одобренных за день уходит Владельцу в ЛС для возврата денег.
+  codeword_submissions: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      discord_tag: 'TEXT',
+      name: 'TEXT',
+      static: 'TEXT',
+      screenshot_url: 'TEXT',
+      message_url: 'TEXT',
+      status: "TEXT DEFAULT 'pending'", // pending | approved | rejected
+      reviewed_by: 'TEXT',
+      review_message_id: 'TEXT',
+      counted: 'INTEGER DEFAULT 0', // 1 — уже вошло в ежедневный список на возврат
+      submitted_at: 'TEXT',
+      reviewed_at: 'TEXT',
+    },
+    indexes: [['status'], ['discord_id']],
+  },
+
   // Апелляции на чёрный список — заявка от человека из ЧС, уходит в
   // CHANNEL_APPEAL_REVIEW, решают Владелец/Зам. Владелец (accept = снять из ЧС).
   appeals: {
@@ -538,6 +561,8 @@ const SCHEMA = {
       subject: 'TEXT',
       category: 'TEXT', // question | complaint | other | appeal
       status: "TEXT DEFAULT 'open'", // open | archived
+      rating: 'INTEGER', // 1 = 👍, 0 = 👎, null — не оценивали
+      rated_at: 'TEXT',
       created_at: 'TEXT',
       closed_at: 'TEXT',
       closed_by: 'TEXT',

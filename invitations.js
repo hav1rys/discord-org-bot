@@ -126,6 +126,16 @@ async function getAllTimeLeaderboard() {
   );
 }
 
+// Топ по приглашениям за конкретную неделю (по дате вступления приглашённого)
+async function getWeekLeaderboard(range) {
+  return db.all(
+    `SELECT inviter_discord_id, COUNT(*) as cnt FROM invitations
+     WHERE status = 'confirmed' AND joined_at BETWEEN ? AND ?
+     GROUP BY inviter_discord_id ORDER BY cnt DESC`,
+    [range.start.toISOString(), range.end.toISOString()],
+  );
+}
+
 module.exports = {
   resolveInviter,
   hasExistingInvitationRecord,
@@ -139,4 +149,5 @@ module.exports = {
   getActiveInvitersForWeek,
   getInviterAllInvitations,
   getAllTimeLeaderboard,
+  getWeekLeaderboard,
 };

@@ -133,6 +133,20 @@ async function getAllTimeLeaderboard() {
   );
 }
 
+// Топ по контрактам за конкретную неделю (range из getWeekRange)
+async function getWeekLeaderboard(range) {
+  return db.all(
+    `SELECT discord_id,
+            SUM(CASE WHEN status = 'fulfilled' THEN 1 ELSE 0 END) as fulfilled,
+            SUM(CASE WHEN status = 'unfulfilled' THEN 1 ELSE 0 END) as unfulfilled
+     FROM contracts
+     WHERE status IN ('fulfilled', 'unfulfilled') AND submitted_at BETWEEN ? AND ?
+     GROUP BY discord_id
+     ORDER BY fulfilled DESC, unfulfilled DESC`,
+    [range.start.toISOString(), range.end.toISOString()],
+  );
+}
+
 module.exports = {
   getWeekRange,
   formatWeekLabel,
@@ -149,4 +163,5 @@ module.exports = {
   getActiveDiscordIdsForWeek,
   getUserContractsForWeek,
   getAllTimeLeaderboard,
+  getWeekLeaderboard,
 };

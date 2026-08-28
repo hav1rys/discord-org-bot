@@ -37,6 +37,18 @@ async function setStatus(id, status) {
   await db.run('UPDATE giveaways SET status = ? WHERE id = ?', [status, id]);
 }
 
+async function setWinners(id, winnersCsv) {
+  await db.run('UPDATE giveaways SET winners = ? WHERE id = ?', [winnersCsv, id]);
+}
+
+// Завершённые/отменённые розыгрыши за период (для /розыгрыш_история)
+async function getFinishedSince(sinceIso) {
+  return db.all(
+    `SELECT * FROM giveaways WHERE status IN ('ended', 'cancelled') AND created_at >= ? ORDER BY id DESC LIMIT 25`,
+    [sinceIso],
+  );
+}
+
 async function addEntry(giveawayId, discordId) {
   await db.run('INSERT OR IGNORE INTO giveaway_entries (giveaway_id, discord_id) VALUES (?, ?)', [giveawayId, discordId]);
 }
@@ -128,6 +140,8 @@ module.exports = {
   getGiveaway,
   getActiveExpired,
   setStatus,
+  setWinners,
+  getFinishedSince,
   addEntry,
   removeEntry,
   hasEntry,
