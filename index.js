@@ -7012,19 +7012,23 @@ client.on('messageCreate', async (message) => {
     }
 
     // Одно изображение — либо это "взял" (ждём итог), либо "итог" (если "взял" уже ждал)
-    const pending = await db.get('SELECT * FROM pending_contract_shots WHERE discord_id = ?', [discordId]);
+    // Ключ — канал (thread_id), НЕ discord_id: у одного человека может
+    // быть несколько паспортов/каналов, и пара должна закрываться
+    // независимо в каждом, иначе скриншот "взял" из канала другого
+    // паспорта ошибочно засчитается как итог по этому.
+    const pending = await db.get('SELECT * FROM pending_contract_shots WHERE thread_id = ?', [message.channel.id]);
     if (!pending) {
       console.log('[скриншоты] Это первый скриншот ("взял") — ставлю в ожидание пары и реагирую ⏳.');
       await db.run(
-        'INSERT INTO pending_contract_shots (discord_id, url, submitted_at) VALUES (?, ?, ?) ON CONFLICT(discord_id) DO UPDATE SET url = excluded.url, submitted_at = excluded.submitted_at',
-        [discordId, imageUrls[0], now],
+        'INSERT INTO pending_contract_shots (thread_id, discord_id, url, submitted_at) VALUES (?, ?, ?, ?) ON CONFLICT(thread_id) DO UPDATE SET discord_id = excluded.discord_id, url = excluded.url, submitted_at = excluded.submitted_at',
+        [message.channel.id, discordId, imageUrls[0], now],
       );
       await message.react('⏳').catch((err) => console.log('[скриншоты] Не удалось поставить реакцию ⏳:', err.message));
       return;
     }
 
     console.log('[скриншоты] Найдена ожидающая пара — создаю карточку контракта.');
-    await db.run('DELETE FROM pending_contract_shots WHERE discord_id = ?', [discordId]);
+    await db.run('DELETE FROM pending_contract_shots WHERE thread_id = ?', [message.channel.id]);
     await postContractReviewCard(message.guild, discordId, pending.url, pending.submitted_at, imageUrls[0], now, message);
   } catch (err) {
     console.error('Ошибка обработки скриншота контракта:', err);

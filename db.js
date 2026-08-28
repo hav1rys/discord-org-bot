@@ -441,11 +441,12 @@ const SCHEMA = {
 
   pending_contract_shots: {
     columns: {
-      discord_id: 'TEXT UNIQUE',
+      thread_id: 'TEXT UNIQUE', // канал конкретного паспорта — НЕ discord_id, у одного человека паспортов/каналов может быть несколько, у каждого своя независимая пара
+      discord_id: 'TEXT',
       url: 'TEXT',
       submitted_at: 'TEXT',
     },
-    indexes: [['discord_id']],
+    indexes: [['thread_id']],
   },
 
   status_events: {
@@ -554,8 +555,24 @@ async function migrateProfileChannelsUniqueness() {
   console.log('Миграция profile_channels завершена.');
 }
 
+// Та же проблема, что и с profile_channels: ключ уникальности менялся с
+// discord_id на thread_id, а ALTER TABLE не умеет такое чинить. Тут данные
+// — временное состояние (незакрытая пара скриншотов), поэтому проще и
+// безопаснее пересоздать таблицу с нуля; тем, у кого прямо сейчас висит
+// незавершённая пара, придётся один раз прислать оба скриншота заново.
+async function migratePendingContractShotsSchema() {
+  const tableInfo = await get(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pending_contract_shots'`);
+  if (!tableInfo || !tableInfo.sql) return; // таблицы ещё нет — ensureTable создаст с нуля правильно
+  if (!/discord_id\s+TEXT\s+UNIQUE/i.test(tableInfo.sql)) return; // уже новая схема — ничего делать не нужно
+
+  console.log('Миграция: пересоздаю pending_contract_shots (ключ уникальности меняется с discord_id на thread_id)...');
+  await run('DROP TABLE pending_contract_shots');
+  console.log('Миграция pending_contract_shots завершена.');
+}
+
 async function init() {
   await migrateProfileChannelsUniqueness();
+  await migratePendingContractShotsSchema();
   for (const [tableName, def] of Object.entries(SCHEMA)) {
     await ensureTable(tableName, def);
   }
