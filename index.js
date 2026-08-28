@@ -34,6 +34,7 @@ const perms = require('./permissions');
 const passportsLib = require('./passports');
 const { parseDeadline, parseDateOnly, formatDateTime, formatDateOnly, mskDateStr, mskWeekday } = require('./dates');
 const dates = require('./dates');
+const mediaCache = require('./media_cache');
 const { DEFAULT_RULES, DEFAULT_AGITATION, DEFAULT_HR_INFO } = require('./content');
 const contentVersions = require('./content_versions');
 const backup = require('./backup');
@@ -1717,7 +1718,13 @@ async function endGiveaway(guild, giveawayId, actor = null) {
     guild,
     actor || client.user,
     actor ? 'Розыгрыш завершён вручную' : 'Розыгрыш завершён (автоматически по таймеру)',
-    `«${giveaway.prize}», участников: ${entries.length}, победителей: ${winners.length}${winners.length > 0 ? ` (${winners.map((w) => `<@${w}>`).join(', ')})` : ''}`,
+    [
+      { name: 'Розыгрыш', value: giveaway.message_id ? `[Ссылка на розыгрыш](https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id})` : '—', inline: true },
+      { name: 'Приз', value: giveaway.prize, inline: true },
+      { name: 'Инициатор', value: actor ? `<@${actor.id}> | ${actor.tag}` : 'Автоматически', inline: true },
+      { name: 'Участников', value: String(entries.length), inline: true },
+      { name: 'Победители', value: winners.length > 0 ? winners.map((w) => `<@${w}>`).join(', ') : 'Никто не участвовал', inline: true },
+    ],
   );
 
   return winners;
@@ -1744,7 +1751,11 @@ async function cancelGiveaway(guild, giveawayId, actor) {
     console.error('Не удалось объявить отмену розыгрыша:', err.message);
   }
 
-  await logAudit(guild, actor || client.user, 'Розыгрыш отменён', `«${giveaway.prize}»`);
+  await logAudit(guild, actor || client.user, 'Розыгрыш отменён', [
+    { name: 'Розыгрыш', value: giveaway.message_id ? `[Ссылка на розыгрыш](https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id})` : '—', inline: true },
+    { name: 'Приз', value: giveaway.prize, inline: true },
+    { name: 'Инициатор', value: actor ? `<@${actor.id}> | ${actor.tag}` : 'Автоматически', inline: true },
+  ]);
   return true;
 }
 
@@ -1773,7 +1784,11 @@ async function checkRecurringGiveaways(guild) {
     try {
       await startGiveawayFromRule(guild, rule);
       await giveaways.setRecurringRuleLastRun(rule.id, todayStr);
-      await logAudit(guild, client.user, 'Повторяющийся розыгрыш запущен', `«${rule.prize}» (правило #${rule.id}) в <#${rule.channel_id}>`);
+      await logAudit(guild, client.user, 'Повторяющийся розыгрыш запущен', [
+        { name: 'Приз', value: rule.prize, inline: true },
+        { name: 'Правило', value: `#${rule.id}`, inline: true },
+        { name: 'Канал', value: `<#${rule.channel_id}>`, inline: true },
+      ]);
     } catch (err) {
       console.error(`Не удалось запустить повторяющийся розыгрыш (правило #${rule.id}):`, err.message);
     }
@@ -1802,7 +1817,12 @@ async function rerollGiveaway(guild, giveawayId, actor) {
     guild,
     actor || client.user,
     'Розыгрыш перевыбран',
-    `«${giveaway.prize}», новых победителей: ${winners.length}${winners.length > 0 ? ` (${winners.map((w) => `<@${w}>`).join(', ')})` : ''}`,
+    [
+      { name: 'Розыгрыш', value: giveaway.message_id ? `[Ссылка на розыгрыш](https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id})` : '—', inline: true },
+      { name: 'Приз', value: giveaway.prize, inline: true },
+      { name: 'Инициатор', value: actor ? `<@${actor.id}> | ${actor.tag}` : 'Автоматически', inline: true },
+      { name: 'Новые победители', value: winners.length > 0 ? winners.map((w) => `<@${w}>`).join(', ') : 'Никто не участвовал', inline: false },
+    ],
   );
 
   return winners;
@@ -2314,7 +2334,11 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
             return safeReply(interaction, `⛔ ${err.message}`);
           }
           await invitationsDisplay.safeUpdateInvitations(guild);
-          await logAudit(guild, interaction.user, 'Приглашение добавлено вручную', `<@${inviterId}> пригласил(а) <@${discordId}>`);
+          await logAudit(guild, interaction.user, 'Приглашение добавлено вручную', [
+          { name: 'Кто добавил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Пригласитель', value: `<@${inviterId}>`, inline: true },
+          { name: 'Приглашённый', value: `<@${discordId}>`, inline: true },
+        ]);
           return safeReply(interaction, `Приглашение добавлено: <@${inviterId}> → <@${discordId}>.`);
         }
 
@@ -2372,7 +2396,10 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
             await history.logStatusRevoked('vacation', discordId, onVacation[0].static, onVacation[0].name, interaction.user.id);
             await syncStatusRoles(guild, discordId);
             await safeUpdateMembersList(guild);
-            await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}> (${onVacation[0].name}, № ${onVacation[0].static})`);
+            await logAudit(guild, interaction.user, 'Отпуск снят', [
+              { name: 'Кто снял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+              { name: 'У кого', value: `<@${discordId}> | ${onVacation[0].name} (№ ${onVacation[0].static})`, inline: true },
+            ]);
             await dmUser(guild, discordId, `📢 Ваш отпуск (${onVacation[0].name}) был досрочно завершён администрацией.`);
             return safeReply(interaction, `Отпуск ${onVacation[0].name} снят.`);
           }
@@ -2409,7 +2436,10 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
             await history.logStatusRevoked('afk', discordId, onAfk[0].static, onAfk[0].name, interaction.user.id);
             await syncStatusRoles(guild, discordId);
             await safeUpdateMembersList(guild);
-            await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}> (${onAfk[0].name}, № ${onAfk[0].static})`);
+            await logAudit(guild, interaction.user, 'AFK снят', [
+              { name: 'Кто снял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+              { name: 'У кого', value: `<@${discordId}> | ${onAfk[0].name} (№ ${onAfk[0].static})`, inline: true },
+            ]);
             return safeReply(interaction, `Статус AFK ${onAfk[0].name} снят.`);
           }
 
@@ -2681,7 +2711,14 @@ client.on('interactionCreate', async (interaction) => {
           orphanText = `\n\n⚠️ Найдено незалинкованных (осиротевших) каналов: **${orphanChannels.length}** — их можно удалить вручную:\n${orphanChannels.map((c) => `<#${c.id}>`).join(', ').slice(0, 1500)}`;
         }
 
-        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', `Создано каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}. Осиротевших каналов: ${orphanChannels.length}.`);
+        await logAudit(guild, interaction.user, 'Backfill профилей выполнен', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Создано каналов', value: String(createdChannels), inline: true },
+          { name: 'Восстановлено из архива', value: String(restoredChannels), inline: true },
+          { name: 'Записей о вступлении', value: String(loggedJoins), inline: true },
+          { name: 'Исправлено рангов', value: String(fixedRanks), inline: true },
+          { name: 'Осиротевших каналов', value: String(orphanChannels.length), inline: true },
+        ]);
         await interaction.editReply(`Готово. Проверено участников: ${allParticipants.length}. Создано новых каналов: ${createdChannels}. Восстановлено из архива: ${restoredChannels}. Добавлено записей о вступлении: ${loggedJoins}. Исправлено паспортов без ранга: ${fixedRanks}.${orphanText}`);
         return;
       }
@@ -2831,7 +2868,10 @@ client.on('interactionCreate', async (interaction) => {
           new AttachmentBuilder(Buffer.from(applicationsCsv, 'utf8'), { name: `applications_${label}.csv` }),
         ];
 
-        await logAudit(guild, interaction.user, 'Экспорт статистики', `Выгружена неделя ${contracts.formatWeekLabel(range)}`);
+        await logAudit(guild, interaction.user, 'Экспорт статистики', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Неделя', value: contracts.formatWeekLabel(range), inline: true },
+        ]);
         await interaction.editReply({ content: `Статистика за ${contracts.formatWeekLabel(range)}:`, files });
         return;
       }
@@ -2885,7 +2925,11 @@ client.on('interactionCreate', async (interaction) => {
           await sleep(500);
         }
 
-        await logAudit(guild, interaction.user, 'Рассылка ссылок на каналы с отчётами', query ? `Одному: ${targets[0].name}` : `Всем участникам (${sent}/${targets.length}, пропущено: ${skipped})`);
+        await logAudit(guild, interaction.user, 'Рассылка ссылок на каналы с отчётами', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: query ? `Одному: ${targets[0].name}` : 'Всем участникам', inline: true },
+          { name: 'Отправлено', value: query ? '1/1' : `${sent}/${targets.length} (пропущено: ${skipped})`, inline: true },
+        ]);
         await interaction.editReply(query ? `Отправлено ${targets[0].name}.` : `Отправлено ${sent} из ${targets.length} (пропущено: ${skipped} — нет Discord или каналов).`);
         return;
       }
@@ -3108,7 +3152,11 @@ client.on('interactionCreate', async (interaction) => {
         const fileBuffer = Buffer.concat([bom, Buffer.from(fileContent, 'utf8')]);
         const file = new AttachmentBuilder(fileBuffer, { name: `${safeName}_ids.txt` });
 
-        await logAudit(guild, interaction.user, 'Экспорт ID каналов/ролей', `Каналов: ${allChannels.length - categories.length}, ролей: ${roles.length}`);
+        await logAudit(guild, interaction.user, 'Экспорт ID каналов/ролей', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Каналов', value: String(allChannels.length - categories.length), inline: true },
+          { name: 'Ролей', value: String(roles.length), inline: true },
+        ]);
         await interaction.editReply({ content: 'Список каналов и ролей сервера — можно прислать мне этот файл:', files: [file] });
         return;
       }
@@ -3140,7 +3188,14 @@ client.on('interactionCreate', async (interaction) => {
         });
         await giveaways.setMessageId(giveawayId, sent.id);
 
-        await logAudit(guild, interaction.user, 'Розыгрыш запущен', `«${prize}» в <#${targetChannel.id}>, победителей: ${winnersCount}, до ${formatDateTime(endsAt)}${requiredRole ? `, условие: роль ${requiredRole.name}` : ''}`);
+        await logAudit(guild, interaction.user, 'Розыгрыш запущен', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Приз', value: prize, inline: true },
+          { name: 'Канал', value: `<#${targetChannel.id}>`, inline: true },
+          { name: 'Победителей', value: String(winnersCount), inline: true },
+          { name: 'До какого времени', value: formatDateTime(endsAt), inline: true },
+          { name: 'Условие', value: requiredRole ? requiredRole.name : 'нет', inline: true },
+        ]);
         await interaction.editReply(`Розыгрыш запущен в <#${targetChannel.id}>.`);
         return;
       }
@@ -3190,7 +3245,12 @@ client.on('interactionCreate', async (interaction) => {
           await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
         } catch (_) {}
 
-        await logAudit(guild, interaction.user, 'Участник добавлен в розыгрыш вручную', `«${giveaway.prize}» — <@${targetUser.id}>`);
+        await logAudit(guild, interaction.user, 'Участник добавлен в розыгрыш вручную', [
+          { name: 'Розыгрыш', value: giveaway.message_id ? `[Ссылка на розыгрыш](https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id})` : '—', inline: true },
+          { name: 'Приз', value: giveaway.prize, inline: true },
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого добавили', value: `<@${targetUser.id}> | ${targetUser.tag}`, inline: true },
+        ]);
         await interaction.editReply(`✅ <@${targetUser.id}> добавлен(а) в розыгрыш «${giveaway.prize}».`);
         return;
       }
@@ -3221,7 +3281,12 @@ client.on('interactionCreate', async (interaction) => {
           await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
         } catch (_) {}
 
-        await logAudit(guild, interaction.user, 'Участник удалён из розыгрыша вручную', `«${giveaway.prize}» — <@${targetUser.id}>`);
+        await logAudit(guild, interaction.user, 'Участник удалён из розыгрыша вручную', [
+          { name: 'Розыгрыш', value: giveaway.message_id ? `[Ссылка на розыгрыш](https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id})` : '—', inline: true },
+          { name: 'Приз', value: giveaway.prize, inline: true },
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого удалили', value: `<@${targetUser.id}> | ${targetUser.tag}`, inline: true },
+        ]);
         await interaction.editReply(`✅ <@${targetUser.id}> удалён(а) из розыгрыша «${giveaway.prize}».`);
         return;
       }
@@ -3234,7 +3299,11 @@ client.on('interactionCreate', async (interaction) => {
         const targetUser = interaction.options.getUser('человек');
         const reason = interaction.options.getString('причина') || '';
         await giveaways.addToBlacklist(targetUser.id, reason, interaction.user.id);
-        await logAudit(guild, interaction.user, 'Добавлен в ЧС розыгрышей', `<@${targetUser.id}>${reason ? `: ${reason}` : ''}`);
+        await logAudit(guild, interaction.user, 'Добавлен в ЧС розыгрышей', [
+          { name: 'Кто добавил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого добавил', value: `<@${targetUser.id}> | ${targetUser.tag}`, inline: true },
+          { name: 'Причина', value: reason || '—', inline: false },
+        ]);
         await interaction.editReply(`✅ <@${targetUser.id}> добавлен(а) в ЧС розыгрышей.`);
         return;
       }
@@ -3250,7 +3319,10 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply('Этого человека и так не было в ЧС розыгрышей.');
           return;
         }
-        await logAudit(guild, interaction.user, 'Убран из ЧС розыгрышей', `<@${targetUser.id}>`);
+        await logAudit(guild, interaction.user, 'Убран из ЧС розыгрышей', [
+          { name: 'Кто убрал', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого убрал', value: `<@${targetUser.id}> | ${targetUser.tag}`, inline: true },
+        ]);
         await interaction.editReply(`✅ <@${targetUser.id}> убран(а) из ЧС розыгрышей.`);
         return;
       }
@@ -3334,7 +3406,13 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const ruleId = await giveaways.createRecurringRule(targetChannel.id, prize, winnersCount, durationMs, weekday, interaction.user.id, requiredRole ? requiredRole.id : null);
 
-        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш настроен', `«${prize}» — каждый(ую) ${giveaways.WEEKDAY_NAMES[weekday]} в <#${targetChannel.id}>${requiredRole ? `, условие: роль ${requiredRole.name}` : ''}`);
+        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш настроен', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Приз', value: prize, inline: true },
+          { name: 'День недели', value: giveaways.WEEKDAY_NAMES[weekday], inline: true },
+          { name: 'Канал', value: `<#${targetChannel.id}>`, inline: true },
+          { name: 'Условие', value: requiredRole ? requiredRole.name : 'нет', inline: true },
+        ]);
         await interaction.editReply(`Готово. Правило #${ruleId}: «${prize}» будет запускаться каждый(ую) ${giveaways.WEEKDAY_NAMES[weekday]} в <#${targetChannel.id}>.`);
         return;
       }
@@ -3367,7 +3445,11 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         await giveaways.setRecurringRuleStatus(ruleId, 'paused');
-        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш остановлен', `«${ruleRow.prize}» (правило #${ruleId})`);
+        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш остановлен', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Приз', value: ruleRow.prize, inline: true },
+          { name: 'Правило', value: `#${ruleId}`, inline: true },
+        ]);
         await interaction.editReply(`Правило #${ruleId} («${ruleRow.prize}») остановлено — новые розыгрыши по нему создаваться не будут.`);
         return;
       }
@@ -3443,13 +3525,21 @@ client.on('interactionCreate', async (interaction) => {
         try {
           if (rawValue.trim().toLowerCase() === 'сброс') {
             await configStore.clearOverride(key);
-            await logAudit(guild, interaction.user, 'Настройка сброшена', `${key} → значение по умолчанию`);
+            await logAudit(guild, interaction.user, 'Настройка сброшена', [
+              { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+              { name: 'Ключ', value: key, inline: true },
+            ]);
             await interaction.editReply(`Настройка «${key}» сброшена на значение по умолчанию: ${config[key]}`);
             return;
           }
           const oldValue = config[key];
           const newValue = await configStore.setOverride(key, rawValue, interaction.user.id);
-          await logAudit(guild, interaction.user, 'Настройка изменена', `${key}: ${oldValue} → ${newValue}`);
+          await logAudit(guild, interaction.user, 'Настройка изменена', [
+            { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Ключ', value: key, inline: true },
+            { name: 'Было', value: String(oldValue), inline: true },
+            { name: 'Стало', value: String(newValue), inline: true },
+          ]);
           await interaction.editReply(`Готово. «${key}» теперь: ${newValue}\n\n(применилось сразу, без перезапуска — но проверьте, что значение корректное, например реальный ID канала/роли)`);
         } catch (err) {
           await interaction.editReply(`⛔ ${err.message}`);
@@ -3497,7 +3587,11 @@ client.on('interactionCreate', async (interaction) => {
         const state = interaction.options.getString('состояние');
         const featureLabels = { applications: 'Заявки на вступление', contracts: 'Приём скриншотов контрактов', reminders: 'Напоминания' };
         await db.setSetting(`feature_${feature}_enabled`, state === 'on' ? 'true' : 'false');
-        await logAudit(guild, interaction.user, 'Переключена функция бота', `${featureLabels[feature]}: ${state === 'on' ? 'включено' : 'выключено'}`);
+        await logAudit(guild, interaction.user, 'Переключена функция бота', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Функция', value: featureLabels[feature], inline: true },
+          { name: 'Состояние', value: state === 'on' ? 'включено' : 'выключено', inline: true },
+        ]);
         await interaction.editReply(`${featureLabels[feature]}: **${state === 'on' ? 'включено' : 'выключено'}**.`);
         return;
       }
@@ -3560,7 +3654,10 @@ client.on('interactionCreate', async (interaction) => {
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const filePath = backup.backupNow();
-        await logAudit(guild, interaction.user, 'Резервная копия создана вручную', filePath ? 'Успешно' : 'Ошибка — см. консоль/канал аудита');
+        await logAudit(guild, interaction.user, 'Резервная копия создана вручную', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Результат', value: filePath ? 'Успешно' : 'Ошибка — см. консоль/канал аудита', inline: true },
+        ]);
         if (filePath) {
           await uploadBackupFile(filePath, `вручную, ${interaction.user.tag}`);
         }
@@ -3630,7 +3727,11 @@ client.on('interactionCreate', async (interaction) => {
           rows.map((r) => [r.at, r.action, r.actor_tag, r.actor_id, r.details]),
         );
         const file = new AttachmentBuilder(Buffer.from(csv, 'utf8'), { name: `audit_${days}d.csv` });
-        await logAudit(guild, interaction.user, 'Экспорт аудита', `За последние ${days} дней, записей: ${rows.length}`);
+        await logAudit(guild, interaction.user, 'Экспорт аудита', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Период', value: `${days} дней`, inline: true },
+          { name: 'Записей', value: String(rows.length), inline: true },
+        ]);
         await interaction.editReply({ content: `Аудит за последние ${days} дней (${rows.length} записей):`, files: [file] });
         return;
       }
@@ -3826,7 +3927,10 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        await logAudit(guild, interaction.user, 'Экспорт базы данных', `Таблиц с данными: ${files.length} из ${tables.length}`);
+        await logAudit(guild, interaction.user, 'Экспорт базы данных', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Таблиц с данными', value: `${files.length} из ${tables.length}`, inline: true },
+        ]);
 
         for (let i = 0; i < files.length; i += 10) {
           const chunk = files.slice(i, i + 10);
@@ -4110,7 +4214,11 @@ client.on('interactionCreate', async (interaction) => {
           await sleep(500);
         }
 
-        await logAudit(guild, interaction.user, 'Рассылка правил', query ? `Одному: ${targets[0].name}` : `Всем участникам (${sent}/${targets.length})`);
+        await logAudit(guild, interaction.user, 'Рассылка правил', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: query ? `Одному: ${targets[0].name}` : 'Всем участникам', inline: true },
+          { name: 'Отправлено', value: query ? '1/1' : `${sent}/${targets.length}`, inline: true },
+        ]);
         await interaction.editReply(query ? `Правила отправлены ${targets[0].name}.` : `Правила отправлены ${sent} из ${targets.length} участников.`);
         return;
       }
@@ -4218,7 +4326,11 @@ client.on('interactionCreate', async (interaction) => {
           guild,
           interaction.user,
           `Контракт: ${label}`,
-          `<@${contract.discord_id}>: ${contract.message_url}`,
+          [
+            { name: 'Кто проверил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Чей контракт', value: `<@${contract.discord_id}>`, inline: true },
+            { name: 'Ссылка', value: `[Скриншот](${contract.message_url})`, inline: false },
+          ],
         );
 
         if (status === 'fulfilled' || status === 'unfulfilled') {
@@ -4325,7 +4437,11 @@ client.on('interactionCreate', async (interaction) => {
         const entry = await faq.getEntry(entryId);
         await faq.deleteEntry(entryId);
         await faqDisplay.safeUpdateFaqChannel(guild, category);
-        await logAudit(guild, interaction.user, 'Гайд FAQ удалён', `[${category}] «${entry ? entry.title : entryId}»`);
+        await logAudit(guild, interaction.user, 'Гайд FAQ удалён', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Категория', value: category, inline: true },
+          { name: 'Заголовок', value: entry ? entry.title : entryId, inline: true },
+        ]);
         await interaction.update({ content: '✅ Гайд удалён.', components: [] });
         return;
       }
@@ -4378,7 +4494,11 @@ client.on('interactionCreate', async (interaction) => {
           await sleep(500);
         }
 
-        await logAudit(guild, interaction.user, 'Рассылка сообщения', `${scope === 'all' ? `Всем (${sent}/${targets.length})` : `Одному: <@${pending.targetId}>`}\n> ${pending.text.slice(0, 300)}`);
+        await logAudit(guild, interaction.user, 'Рассылка сообщения', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: scope === 'all' ? `Всем (${sent}/${targets.length})` : `Одному: <@${pending.targetId}>`, inline: true },
+          { name: 'Текст', value: pending.text.slice(0, 1024), inline: false },
+        ]);
         try {
           await interaction.update({ content: `✅ Отправлено (${sent}/${targets.length}).`, components: [] });
         } catch (_) {}
@@ -4490,7 +4610,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Отпуск отменён участником', `<@${discordId}>`);
+        await logAudit(guild, interaction.user, 'Отпуск отменён участником', [
+          { name: 'Кто отменил', value: `<@${discordId}>`, inline: true },
+        ]);
         try {
           await interaction.update({ content: '✅ Ваш отпуск отменён.', components: [] });
         } catch (_) {
@@ -4519,7 +4641,11 @@ client.on('interactionCreate', async (interaction) => {
           content: `🏖️ Ваш отпуск одобрен до **${formatDateTime(new Date(v.until))}**.`,
           components: [row(new ButtonBuilder().setCustomId(`vacation_selfcancel:${v.discord_id}`).setLabel('❌ Отменить отпуск').setStyle(ButtonStyle.Danger))],
         });
-        await logAudit(guild, interaction.user, 'Отпуск одобрен', `Заявка #${vId}: <@${v.discord_id}> до ${formatDateTime(new Date(v.until))}`);
+        await logAudit(guild, interaction.user, 'Отпуск одобрен', [
+          { name: 'Кто одобрил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${v.discord_id}> | № ${vId}`, inline: true },
+          { name: 'До какого числа', value: formatDateTime(new Date(v.until)), inline: true },
+        ]);
         return safeReply(interaction, 'Отпуск одобрен.');
       }
 
@@ -4579,7 +4705,12 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '✅ Принято'),
         );
         await dmUser(guild, reqRow.discord_id, `✅ Ваша заявка на изменение данных (№ ${reqRow.target_static}) принята: теперь «${reqRow.new_name}».`);
-        await logAudit(guild, interaction.user, 'Данные изменены по заявке', `Заявка #${reqId}: <@${reqRow.discord_id}> — № ${reqRow.target_static}: «${reqRow.old_name}» → «${reqRow.new_name}»`);
+        await logAudit(guild, interaction.user, 'Данные изменены по заявке', [
+          { name: 'Кто одобрил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому изменили', value: `<@${reqRow.discord_id}> | № ${reqRow.target_static}`, inline: true },
+          { name: 'Имя Фамилия до', value: reqRow.old_name, inline: true },
+          { name: 'Имя Фамилия после', value: reqRow.new_name, inline: true },
+        ]);
         return safeReply(interaction, 'Данные изменены.');
       }
 
@@ -4621,7 +4752,10 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '✅ Принято'),
         );
         await dmUser(guild, reqRow.discord_id, '✅ Ваша заявка на роль HR-Менеджера принята!');
-        await logAudit(guild, interaction.user, 'Заявка на HR принята', `Заявка #${reqId}: <@${reqRow.discord_id}> получил(а) роль HR-Менеджера`);
+        await logAudit(guild, interaction.user, 'Заявка на HR принята', [
+          { name: 'Кто принял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого принял', value: `<@${reqRow.discord_id}> | № ${reqId}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка принята, роль выдана.');
       }
 
@@ -4665,7 +4799,10 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '✅ Принято'),
         );
         await dmUser(guild, reqRow.discord_id, `✅ Ваша заявка на добавление паспорта (${reqRow.name}, № ${reqRow.static}) принята.`);
-        await logAudit(guild, interaction.user, 'Паспорт добавлен по заявке', `Заявка #${reqId}: <@${reqRow.discord_id}> — ${reqRow.name}, № ${reqRow.static}`);
+        await logAudit(guild, interaction.user, 'Паспорт добавлен по заявке', [
+          { name: 'Кто одобрил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому добавили', value: `<@${reqRow.discord_id}> | ${reqRow.name}, № ${reqRow.static}`, inline: true },
+        ]);
         return safeReply(interaction, 'Паспорт добавлен.');
       }
 
@@ -4740,7 +4877,12 @@ client.on('interactionCreate', async (interaction) => {
           const msg = await channel.messages.fetch(giveaway.message_id);
           await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
         } catch (_) {}
-        await logAudit(guild, interaction.user, already ? 'Выход из розыгрыша' : 'Участие в розыгрыше', `«${giveaway.prize}»`);
+        const label = already ? 'Выход из розыгрыша' : 'Участие в розыгрыше';
+        await logAudit(guild, interaction.user, label, [
+          { name: 'Розыгрыш', value: giveaway.message_id ? `[Ссылка на розыгрыш](https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id})` : '—', inline: true },
+          { name: 'Приз', value: giveaway.prize, inline: true },
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+        ]);
         return safeReply(interaction, already ? '❌ Вы вышли из розыгрыша.' : '✅ Вы участвуете в розыгрыше! Удачи 🍀');
       }
 
@@ -4826,7 +4968,10 @@ client.on('interactionCreate', async (interaction) => {
         await db.run('DELETE FROM afk_return_requests WHERE key = ?', [`${discordId}:${staticValue}`]);
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'AFK снят по уведомлению о возврате', `<@${discordId}> (${passport.name}, № ${staticValue})`);
+        await logAudit(guild, interaction.user, 'AFK снят по уведомлению о возврате', [
+          { name: 'Кто снял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'У кого', value: `<@${discordId}> | ${passport.name} (№ ${staticValue})`, inline: true },
+        ]);
 
         try {
           await interaction.message.edit({
@@ -4848,7 +4993,11 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.update({ content: '⏳ Восстанавливаю...', embeds: [], components: [] });
         try {
           backup.restoreFromBackup(filename);
-          await logAudit(guild, interaction.user, '⚠️ База данных восстановлена из резервной копии', `Файл: ${filename}. Требуется перезапуск бота.`);
+          await logAudit(guild, interaction.user, '⚠️ База данных восстановлена из резервной копии', [
+            { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Файл', value: filename, inline: true },
+            { name: 'Примечание', value: 'Требуется перезапуск бота.', inline: false },
+          ]);
           await interaction.editReply(`✅ База данных восстановлена из \`${filename}\`.\n\n⚠️ **Перезапустите бота вручную (Restart на Bothost) прямо сейчас**, чтобы изменения точно применились.`);
         } catch (err) {
           await interaction.editReply(`⛔ Не удалось восстановить: ${err.message}`);
@@ -5006,7 +5155,11 @@ client.on('interactionCreate', async (interaction) => {
           await db.run('DELETE FROM blacklist WHERE id = ?', [entryId]);
         }
         await safeUpdateBlacklist(guild);
-        await logAudit(guild, interaction.user, 'Удаление из ЧС', `Записи #${ids.join(', #')}. Причина: ${reason || '—'}`);
+        await logAudit(guild, interaction.user, 'Удаление из ЧС', [
+          { name: 'Кто убрал', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Записи', value: `#${ids.join(', #')}`, inline: true },
+          { name: 'Причина', value: reason || '—', inline: false },
+        ]);
         await interaction.update({ content: '✅ Записи удалены из чёрного списка.', embeds: [], components: [] });
         return;
       }
@@ -5039,7 +5192,9 @@ client.on('interactionCreate', async (interaction) => {
           await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(text)] });
         }
 
-        await logAudit(guild, interaction.user, typeLabels[type], 'Текст изменён и опубликован.');
+        await logAudit(guild, interaction.user, typeLabels[type], [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+        ]);
         await interaction.update({ content: '✅ Сохранено и опубликовано.', embeds: [], components: [] });
         return;
       }
@@ -5088,7 +5243,10 @@ client.on('interactionCreate', async (interaction) => {
         }
         await syncEffectiveIdentity(guild, discordId);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Паспорт удалён', `<@${discordId}>: № ${staticValue}`);
+        await logAudit(guild, interaction.user, 'Паспорт удалён', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${discordId}> | № ${staticValue}`, inline: true },
+        ]);
         return safeReply(interaction, 'Паспорт удалён.');
       }
 
@@ -5100,7 +5258,12 @@ client.on('interactionCreate', async (interaction) => {
         if (!contract) return safeReply(interaction, 'Запись уже не существует.');
         await contracts.deleteContract(contractId);
         await contractsDisplay.safeUpdateContractsStats(guild);
-        await logAudit(guild, interaction.user, 'Контракт удалён вручную', `<@${discordId}>: ${contract.message_url} (было: ${contract.status})`);
+        await logAudit(guild, interaction.user, 'Контракт удалён вручную', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чей контракт', value: `<@${discordId}>`, inline: true },
+          { name: 'Было', value: contract.status, inline: true },
+          { name: 'Ссылка', value: `[Скриншот](${contract.message_url})`, inline: false },
+        ]);
         return safeReply(interaction, 'Запись удалена.');
       }
 
@@ -5112,7 +5275,12 @@ client.on('interactionCreate', async (interaction) => {
         if (!invite) return safeReply(interaction, 'Запись уже не существует.');
         await invitations.deleteInvitation(invitationId);
         await invitationsDisplay.safeUpdateInvitations(guild);
-        await logAudit(guild, interaction.user, 'Приглашение удалено вручную', `<@${inviterId}> → <@${invite.invitee_discord_id}> (было: ${invite.status})`);
+        await logAudit(guild, interaction.user, 'Приглашение удалено вручную', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Пригласитель', value: `<@${inviterId}>`, inline: true },
+          { name: 'Приглашённый', value: `<@${invite.invitee_discord_id}>`, inline: true },
+          { name: 'Было', value: invite.status, inline: true },
+        ]);
         return safeReply(interaction, 'Запись удалена.');
       }
 
@@ -5136,7 +5304,10 @@ client.on('interactionCreate', async (interaction) => {
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Отпуск снят', `<@${discordId}>: ${removedNames.join(', ')}`);
+        await logAudit(guild, interaction.user, 'Отпуск снят', [
+          { name: 'Кто снял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'У кого', value: `<@${discordId}> | ${removedNames.join(', ')}`, inline: true },
+        ]);
         await dmUser(guild, discordId, `📢 Ваш отпуск (${removedNames.join(', ')}) был досрочно завершён администрацией.`);
         return safeReply(interaction, `Отпуск снят: ${removedNames.join(', ')}.`);
       }
@@ -5161,7 +5332,10 @@ client.on('interactionCreate', async (interaction) => {
         }
         await syncStatusRoles(guild, discordId);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'AFK снят', `<@${discordId}>: ${removedNames.join(', ')}`);
+        await logAudit(guild, interaction.user, 'AFK снят', [
+          { name: 'Кто снял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'У кого', value: `<@${discordId}> | ${removedNames.join(', ')}`, inline: true },
+        ]);
         return safeReply(interaction, `AFK снят: ${removedNames.join(', ')}.`);
       }
 
@@ -5231,7 +5405,11 @@ client.on('interactionCreate', async (interaction) => {
         if (chosen === '__reset__') {
           await db.run('DELETE FROM command_permission_overrides WHERE command_name = ?', [commandName]);
           const defaultTier = COMMAND_DEFAULT_TIERS[commandName];
-          await logAudit(guild, interaction.user, 'Право команды сброшено', `/${commandName} → ${tierLabel(defaultTier)} (по умолчанию)`);
+          await logAudit(guild, interaction.user, 'Право команды сброшено', [
+            { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Команда', value: `/${commandName}`, inline: true },
+            { name: 'Новый уровень', value: tierLabel(defaultTier), inline: true },
+          ]);
           await syncOneCommandPermissions(guild, commandName);
           return safeReply(interaction, `Готово. \`/${commandName}\` сброшена на уровень по умолчанию: **${tierLabel(defaultTier)}**.`);
         }
@@ -5250,7 +5428,11 @@ client.on('interactionCreate', async (interaction) => {
            ON CONFLICT(command_name) DO UPDATE SET tier = excluded.tier, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
           [commandName, chosen, interaction.user.id, new Date().toISOString()],
         );
-        await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → ${tierLabel(chosen)}`);
+        await logAudit(guild, interaction.user, 'Право команды изменено', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Команда', value: `/${commandName}`, inline: true },
+          { name: 'Новый уровень', value: tierLabel(chosen), inline: true },
+        ]);
         await syncOneCommandPermissions(guild, commandName);
         return safeReply(interaction, `Готово. \`/${commandName}\` теперь требует: **${tierLabel(chosen)}**\n\n(применилось сразу, без перезапуска)`);
       }
@@ -5267,7 +5449,11 @@ client.on('interactionCreate', async (interaction) => {
            ON CONFLICT(command_name) DO UPDATE SET tier = excluded.tier, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
           [commandName, chosenUserId, interaction.user.id, new Date().toISOString()],
         );
-        await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → только <@${chosenUserId}>`);
+        await logAudit(guild, interaction.user, 'Право команды изменено', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Команда', value: `/${commandName}`, inline: true },
+          { name: 'Новый уровень', value: `Только <@${chosenUserId}>`, inline: true },
+        ]);
         await syncOneCommandPermissions(guild, commandName);
         return safeReply(interaction, `Готово. \`/${commandName}\` теперь доступна только <@${chosenUserId}> (плюс Владелец/Admin по умолчанию).\n\n(применилось сразу, без перезапуска)`);
       }
@@ -5427,7 +5613,12 @@ client.on('interactionCreate', async (interaction) => {
         });
         await db.run('UPDATE data_change_requests SET message_id = ? WHERE id = ?', [sent.id, reqRow.id]);
 
-        await logAudit(guild, interaction.user, 'Заявка на изменение данных', `Заявка #${reqRow.id} от <@${interaction.user.id}>: № ${targetStatic} «${passport.name}» → «${newName}»`);
+        await logAudit(guild, interaction.user, 'Заявка на изменение данных', [
+          { name: 'Подал заявку', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: '№ заявки', value: `#${reqRow.id}`, inline: true },
+          { name: 'Имя Фамилия до', value: passport.name, inline: true },
+          { name: 'Имя Фамилия после', value: newName, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка на изменение данных отправлена на рассмотрение.');
       }
 
@@ -5445,7 +5636,11 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
         await dmUser(guild, reqRow.discord_id, `❌ Ваша заявка на изменение данных отклонена. Причина: ${reason}`);
-        await logAudit(guild, interaction.user, 'Заявка на изменение данных отклонена', `Заявка #${reqId} от <@${reqRow.discord_id}>. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на изменение данных отклонена', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья заявка', value: `<@${reqRow.discord_id}> | № ${reqId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
         return safeReply(interaction, 'Заявка отклонена.');
       }
 
@@ -5473,7 +5668,10 @@ client.on('interactionCreate', async (interaction) => {
         });
         await db.run('UPDATE hr_applications SET message_id = ? WHERE id = ?', [sent.id, reqRow.id]);
 
-        await logAudit(guild, interaction.user, 'Новая заявка на роль HR', `Заявка #${reqRow.id} от <@${interaction.user.id}>`);
+        await logAudit(guild, interaction.user, 'Новая заявка на роль HR', [
+          { name: 'Подал заявку', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: '№ заявки', value: `#${reqRow.id}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка на роль HR-Менеджера отправлена на рассмотрение.');
       }
 
@@ -5490,7 +5688,11 @@ client.on('interactionCreate', async (interaction) => {
           [],
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
-        await logAudit(guild, interaction.user, 'Заявка на HR отклонена', `Заявка #${reqId} от <@${reqRow.discord_id}>. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на HR отклонена', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья заявка', value: `<@${reqRow.discord_id}> | № ${reqId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
         return safeReply(interaction, 'Заявка отклонена.');
       }
 
@@ -5527,7 +5729,11 @@ client.on('interactionCreate', async (interaction) => {
         });
         await db.run('UPDATE passport_requests SET message_id = ? WHERE id = ?', [sent.id, reqRow.id]);
 
-        await logAudit(guild, interaction.user, 'Заявка на добавление паспорта', `Заявка #${reqRow.id} от <@${interaction.user.id}>: ${name} — № ${staticValue}`);
+        await logAudit(guild, interaction.user, 'Заявка на добавление паспорта', [
+          { name: 'Подал заявку', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: '№ заявки', value: `#${reqRow.id}`, inline: true },
+          { name: 'Имя Фамилия', value: `${name} (№ ${staticValue})`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка на добавление паспорта отправлена на рассмотрение.');
       }
 
@@ -5589,7 +5795,10 @@ client.on('interactionCreate', async (interaction) => {
         });
         await db.run('UPDATE applications SET message_id = ? WHERE id = ?', [sent.id, app.id]);
 
-        await logAudit(guild, interaction.user, 'Новая заявка на вступление', `Заявка #${app.id} от <@${app.discord_id}>`);
+        await logAudit(guild, interaction.user, 'Новая заявка на вступление', [
+          { name: 'Подал заявку', value: `<@${app.discord_id}> | ${interaction.user.tag}`, inline: true },
+          { name: '№ заявки', value: `#${app.id}`, inline: true },
+        ]);
         return safeReply(interaction, 'Ваша заявка отправлена на рассмотрение.');
       }
 
@@ -5609,7 +5818,11 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
         await dmUser(guild, reqRow.discord_id, `❌ Ваша заявка на добавление паспорта отклонена. Причина: ${reason}`);
-        await logAudit(guild, interaction.user, 'Заявка на паспорт отклонена', `Заявка #${reqId} от <@${reqRow.discord_id}>. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на паспорт отклонена', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья заявка', value: `<@${reqRow.discord_id}> | № ${reqId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
         return safeReply(interaction, 'Заявка отклонена.');
       }
 
@@ -5628,7 +5841,11 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
         await dmUser(guild, app.discord_id, `❌ Ваша заявка на вступление была отклонена. Причина: ${reason}`);
-        await logAudit(guild, interaction.user, 'Заявка отклонена', `Заявка #${appId} от <@${app.discord_id}>. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка отклонена', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья заявка', value: `<@${app.discord_id}> | № ${appId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
         return safeReply(interaction, 'Заявка отклонена.');
       }
 
@@ -5647,7 +5864,11 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
         await dmUser(guild, k.discord_id, `❌ Ваша заявка на увольнение была отклонена. Причина: ${reason}`);
-        await logAudit(guild, interaction.user, 'Заявка на увольнение отклонена', `Заявка #${kickId} от <@${k.discord_id}>. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Заявка на увольнение отклонена', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья заявка', value: `<@${k.discord_id}> | № ${kickId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
         return safeReply(interaction, 'Заявка отклонена.');
       }
 
@@ -5666,7 +5887,11 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '❌ Отклонено', reason),
         );
         await dmUser(guild, v.discord_id, `❌ Ваша заявка на отпуск отклонена. Причина: ${reason}`);
-        await logAudit(guild, interaction.user, 'Отпуск отклонён', `Заявка #${vId} от <@${v.discord_id}>. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Отпуск отклонён', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья заявка', value: `<@${v.discord_id}> | № ${vId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
         return safeReply(interaction, 'Заявка отклонена.');
       }
 
@@ -5681,7 +5906,10 @@ client.on('interactionCreate', async (interaction) => {
         ]);
         const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
         await refreshReviewMessage(interaction.channel, app.message_id, await applicationReviewEmbed(app, guild.id), applicationReviewComponents(app), actionSummary(interaction.user.id, '✏️ Изменено'));
-        await logAudit(guild, interaction.user, 'Заявка изменена', `Заявка #${appId} отредактирована`);
+        await logAudit(guild, interaction.user, 'Заявка изменена', [
+          { name: 'Кто отредактировал', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: '№ заявки', value: `#${appId}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка обновлена.');
       }
 
@@ -5760,7 +5988,10 @@ client.on('interactionCreate', async (interaction) => {
           embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(rulesText.slice(0, 4000))],
         });
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Заявка принята', `Заявка #${appId}: <@${app.discord_id}> принят(а) в организацию`);
+        await logAudit(guild, interaction.user, 'Заявка принята', [
+          { name: 'Кто принял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого принял', value: `<@${app.discord_id}> | № ${appId}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка принята, участник добавлен.');
       }
 
@@ -5790,7 +6021,11 @@ client.on('interactionCreate', async (interaction) => {
         });
         await db.run('UPDATE kicks SET message_id = ? WHERE id = ?', [sent.id, k.id]);
 
-        await logAudit(guild, interaction.user, 'Новая заявка на увольнение', `Заявка #${k.id} от <@${k.discord_id}> на участника «${k.name}»${k.target_static !== 'all' ? ` (паспорт № ${k.target_static})` : ''}`);
+        await logAudit(guild, interaction.user, 'Новая заявка на увольнение', [
+          { name: 'Подал заявку', value: `<@${k.discord_id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'На кого', value: `${k.name}${k.target_static !== 'all' ? ` (паспорт № ${k.target_static})` : ' (все паспорта)'}`, inline: true },
+          { name: '№ заявки', value: `#${k.id}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка на увольнение отправлена на рассмотрение.');
       }
 
@@ -5800,7 +6035,10 @@ client.on('interactionCreate', async (interaction) => {
         await db.run('UPDATE kicks SET name = ?, target_static = ?, reason = ? WHERE id = ?', [normalizeName(get('name')), get('target_static') || 'all', get('reason') || '', kickId]);
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         await refreshReviewMessage(interaction.channel, k.message_id, await kickReviewEmbed(k), kickReviewComponents(k), actionSummary(interaction.user.id, '✏️ Изменено'));
-        await logAudit(guild, interaction.user, 'Заявка на увольнение изменена', `Заявка #${kickId} отредактирована`);
+        await logAudit(guild, interaction.user, 'Заявка на увольнение изменена', [
+          { name: 'Кто отредактировал', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: '№ заявки', value: `#${kickId}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка обновлена.');
       }
 
@@ -5841,7 +6079,12 @@ client.on('interactionCreate', async (interaction) => {
           guild,
           interaction.user,
           fullyRemoved ? 'Участник уволен' : 'Паспорт участника снят',
-          `Заявка #${kickId}: «${name}»${targetStatic !== 'all' ? ` (паспорт № ${targetStatic})` : ''}. Причина: ${reason || '—'}`,
+          [
+            { name: 'Кто уволил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Кого уволил', value: `«${name}»${targetStatic !== 'all' ? ` (паспорт № ${targetStatic})` : ''}`, inline: true },
+            { name: '№ заявки', value: `#${kickId}`, inline: true },
+            { name: 'Причина', value: reason || '—', inline: false },
+          ],
         );
         return safeReply(interaction, fullyRemoved ? 'Участник уволен.' : 'Паспорт снят.');
       }
@@ -5903,7 +6146,10 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Участник добавлен вручную', `${fields.name} (${hasDiscord ? `<@${fields.discord_id}>` : 'без Discord'})`);
+        await logAudit(guild, interaction.user, 'Участник добавлен вручную', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого добавили', value: `${fields.name} (${hasDiscord ? `<@${fields.discord_id}>` : 'без Discord'})`, inline: true },
+        ]);
         return safeReply(interaction, `Участник добавлен.${hasDiscord ? '' : ' (без Discord — ник/роль/канал-профиль не создавались)'}`);
       }
 
@@ -5937,7 +6183,10 @@ client.on('interactionCreate', async (interaction) => {
         await syncEffectiveIdentity(guild, fields.discord_id);
         await syncProfileChannelName(guild, fields.discord_id, fields.static);
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Данные участника изменены', `${fields.name} (<@${fields.discord_id}>)`);
+        await logAudit(guild, interaction.user, 'Данные участника изменены', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому изменили', value: `${fields.name} (<@${fields.discord_id}>)`, inline: true },
+        ]);
         return safeReply(interaction, 'Данные участника обновлены.');
       }
 
@@ -5959,7 +6208,11 @@ client.on('interactionCreate', async (interaction) => {
           guild,
           interaction.user,
           fullyRemoved ? 'Участник уволен полностью' : 'Паспорт участника снят',
-          `${participant.name} (<@${discordId}>)${scope !== 'all' ? ` — паспорт № ${scope}` : ''}. Причина: ${reason || '—'}`,
+          [
+            { name: 'Кто уволил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Кого уволил', value: `<@${discordId}> | ${participant.name}${scope !== 'all' ? ` (паспорт № ${scope})` : ''}`, inline: true },
+            { name: 'Причина', value: reason || '—', inline: false },
+          ],
         );
         return safeReply(interaction, fullyRemoved ? 'Участник уволен.' : `Паспорт № ${scope} снят.`);
       }
@@ -6038,7 +6291,10 @@ client.on('interactionCreate', async (interaction) => {
           await dmUser(guild, discordId, `📸 Канал с отчётами для паспорта № ${staticValue}: ${newPassportChannelUrl}`);
         }
         await safeUpdateMembersList(guild);
-        await logAudit(guild, interaction.user, 'Паспорт добавлен', `<@${discordId}>: ${name} — № ${staticValue}`);
+        await logAudit(guild, interaction.user, 'Паспорт добавлен', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${discordId}> | ${name} (№ ${staticValue})`, inline: true },
+        ]);
         return safeReply(interaction, 'Паспорт добавлен.');
       }
 
@@ -6050,7 +6306,11 @@ client.on('interactionCreate', async (interaction) => {
         const content = get('content');
         await faq.addEntry(category, title, content, interaction.user.id);
         await faqDisplay.safeUpdateFaqChannel(guild, category);
-        await logAudit(guild, interaction.user, 'Гайд FAQ добавлен', `[${category}] «${title}»`);
+        await logAudit(guild, interaction.user, 'Гайд FAQ добавлен', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Категория', value: category, inline: true },
+          { name: 'Заголовок', value: title, inline: true },
+        ]);
         return safeReply(interaction, 'Гайд добавлен.');
       }
 
@@ -6063,7 +6323,11 @@ client.on('interactionCreate', async (interaction) => {
         const content = get('content');
         await faq.updateEntry(entryId, title, content, interaction.user.id);
         await faqDisplay.safeUpdateFaqChannel(guild, entry.category);
-        await logAudit(guild, interaction.user, 'Гайд FAQ изменён', `[${entry.category}] «${title}»`);
+        await logAudit(guild, interaction.user, 'Гайд FAQ изменён', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Категория', value: entry.category, inline: true },
+          { name: 'Заголовок', value: title, inline: true },
+        ]);
         return safeReply(interaction, 'Гайд обновлён.');
       }
 
@@ -6122,7 +6386,12 @@ client.on('interactionCreate', async (interaction) => {
         await contractsDisplay.safeUpdateContractsStats(guild);
 
         const label = status === 'fulfilled' ? '✅ Выполнен' : '❌ Невыполнен';
-        await logAudit(guild, interaction.user, 'Контракт добавлен вручную', `<@${discordId}>: ${label} — ${link}${staticValue ? ` (паспорт № ${staticValue})` : ''}`);
+        await logAudit(guild, interaction.user, 'Контракт добавлен вручную', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чей контракт', value: `<@${discordId}>${staticValue ? ` (паспорт № ${staticValue})` : ''}`, inline: true },
+          { name: 'Статус', value: label, inline: true },
+          { name: 'Ссылка', value: `[Скриншот](${link})`, inline: false },
+        ]);
 
         if (threadId && (status === 'fulfilled' || status === 'unfulfilled')) {
           await checkContractPromotion(guild, threadId);
@@ -6160,7 +6429,11 @@ client.on('interactionCreate', async (interaction) => {
           ...mentionOpts,
         });
         await db.run('UPDATE vacations SET message_id = ? WHERE id = ?', [sent.id, v.id]);
-        await logAudit(guild, interaction.user, 'Новая заявка на отпуск', `Заявка #${v.id} от <@${v.discord_id}> до ${formatDateTime(deadline)}`);
+        await logAudit(guild, interaction.user, 'Новая заявка на отпуск', [
+          { name: 'Подал заявку', value: `<@${v.discord_id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'До какого числа', value: formatDateTime(deadline), inline: true },
+          { name: '№ заявки', value: `#${v.id}`, inline: true },
+        ]);
         return safeReply(interaction, 'Заявка на отпуск отправлена на рассмотрение.');
       }
 
@@ -6189,7 +6462,12 @@ client.on('interactionCreate', async (interaction) => {
           content: `🏖️ Вам выдан отпуск до **${formatDateTime(deadline)}** (${names}).${reason ? ` Причина: ${reason}` : ''}`,
           components: [row(new ButtonBuilder().setCustomId(`vacation_selfcancel:${discordId}`).setLabel('❌ Отменить отпуск').setStyle(ButtonStyle.Danger))],
         });
-        await logAudit(guild, interaction.user, 'Отпуск выдан', `<@${discordId}> (${names}) до ${formatDateTime(deadline)}${reason ? `. Причина: ${reason}` : ''}`);
+        await logAudit(guild, interaction.user, 'Отпуск выдан', [
+          { name: 'Кто выдал', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${discordId}> | ${names}`, inline: true },
+          { name: 'До какого числа', value: formatDateTime(deadline), inline: true },
+          { name: 'Причина', value: reason || '—', inline: false },
+        ]);
         return safeReply(interaction, `Отпуск выдан: ${names}.`);
       }
 
@@ -6228,7 +6506,11 @@ client.on('interactionCreate', async (interaction) => {
           content: `💤 Вам выставлен статус AFK с ${formatDateOnly(date)}.${reason ? ` Причина: ${reason}.` : ''} Пожалуйста, зайдите в игру под именем **${names}**, чтобы статус отобразился.\n\nКогда вернётесь — нажмите кнопку ниже, руководство проверит и снимет AFK.`,
           components: buttonRows,
         });
-        await logAudit(guild, interaction.user, 'AFK выставлен', `<@${discordId}> (${names}) с ${formatDateOnly(date)}`);
+        await logAudit(guild, interaction.user, 'AFK выставлен', [
+          { name: 'Кто выставил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${discordId}> | ${names}`, inline: true },
+          { name: 'С какого числа', value: formatDateOnly(date), inline: true },
+        ]);
         return safeReply(interaction, `Статус AFK выставлен: ${names}.`);
       }
 
@@ -6257,7 +6539,12 @@ client.on('interactionCreate', async (interaction) => {
           await removeParticipant(guild, participant, `Внесён(а) в чёрный список. Причина: ${reason || '—'}`);
         }
 
-        await logAudit(guild, interaction.user, 'Внесение в ЧС', `<@${discordId}> (№ ${staticValue || '—'}). Причина: ${reason || '—'}${participant ? ' — участник автоматически уволен.' : ''}`);
+        await logAudit(guild, interaction.user, 'Внесение в ЧС', [
+          { name: 'Кто внёс', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого', value: `<@${discordId}> | № ${staticValue || '—'}`, inline: true },
+          { name: 'Причина', value: reason || '—', inline: false },
+          ...(participant ? [{ name: 'Примечание', value: 'Участник автоматически уволен.', inline: false }] : []),
+        ]);
         return safeReply(interaction, `Участник внесён в чёрный список.${participant ? ' Также автоматически уволен из организации.' : ''}`);
       }
 
@@ -6284,7 +6571,12 @@ client.on('interactionCreate', async (interaction) => {
           await removeParticipant(guild, participant, `Внесён(а) в чёрный список. Причина: ${reason || '—'}`);
         }
 
-        await logAudit(guild, interaction.user, 'Внесение в ЧС (без Discord)', `${tag} (№ ${staticValue}). Причина: ${reason || '—'}${participant ? ' — участник автоматически уволен.' : ''}`);
+        await logAudit(guild, interaction.user, 'Внесение в ЧС (без Discord)', [
+          { name: 'Кто внёс', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кого', value: `${tag} | № ${staticValue}`, inline: true },
+          { name: 'Причина', value: reason || '—', inline: false },
+          ...(participant ? [{ name: 'Примечание', value: 'Участник автоматически уволен.', inline: false }] : []),
+        ]);
         return safeReply(interaction, `Внесено в чёрный список (без Discord).${participant ? ' Также автоматически уволен из организации.' : ''}`);
       }
 
@@ -6513,6 +6805,15 @@ async function postContractReviewCard(guild, discordId, takenUrl, takenAt, compl
   const contractId = await contracts.recordPendingContract(discordId, replyToMessage.channel.id, replyToMessage.id, completedUrl, completedAt);
   await contracts.setTakenInfo(contractId, takenUrl, takenAt);
 
+  // Скачиваем оба скриншота себе на диск — если исходное сообщение потом
+  // удалят (случайно или специально), карточка на проверку и история
+  // контракта не останутся с "битыми" картинками.
+  const [takenLocalPath, completedLocalPath] = await Promise.all([
+    mediaCache.downloadToCache(takenUrl, `contract-${contractId}-taken`),
+    mediaCache.downloadToCache(completedUrl, `contract-${contractId}-completed`),
+  ]);
+  await contracts.setLocalPaths(contractId, takenLocalPath, completedLocalPath);
+
   // Discord позволяет только одну картинку на embed через setImage —
   // поэтому вместо ссылок показываем сами скриншоты двумя embed'ами.
   const infoEmbed = new EmbedBuilder()
@@ -6520,18 +6821,30 @@ async function postContractReviewCard(guild, discordId, takenUrl, takenAt, compl
     .setTitle('Новый контракт на проверку')
     .addFields({ name: 'Участник', value: `<@${discordId}>` });
 
-  const takenEmbed = new EmbedBuilder()
-    .setColor(0xfee75c)
-    .setTitle('1️⃣ Взял контракт')
-    .setImage(takenUrl);
+  const takenEmbed = new EmbedBuilder().setColor(0xfee75c).setTitle('1️⃣ Взял контракт');
+  const completedEmbed = new EmbedBuilder().setColor(0xfee75c).setTitle('2️⃣ Итог');
 
-  const completedEmbed = new EmbedBuilder()
-    .setColor(0xfee75c)
-    .setTitle('2️⃣ Итог')
-    .setImage(completedUrl);
+  const files = [];
+  const takenCached = mediaCache.readCached(takenLocalPath);
+  if (takenCached) {
+    const attachmentName = `taken${path.extname(takenLocalPath) || '.png'}`;
+    files.push(new AttachmentBuilder(takenCached, { name: attachmentName }));
+    takenEmbed.setImage(`attachment://${attachmentName}`);
+  } else {
+    takenEmbed.setImage(takenUrl); // не удалось закэшировать — используем исходную ссылку как раньше
+  }
+  const completedCached = mediaCache.readCached(completedLocalPath);
+  if (completedCached) {
+    const attachmentName = `completed${path.extname(completedLocalPath) || '.png'}`;
+    files.push(new AttachmentBuilder(completedCached, { name: attachmentName }));
+    completedEmbed.setImage(`attachment://${attachmentName}`);
+  } else {
+    completedEmbed.setImage(completedUrl);
+  }
 
   const reviewMsg = await replyToMessage.reply({
     embeds: [infoEmbed, takenEmbed, completedEmbed],
+    files,
     components: [row(
       new ButtonBuilder().setCustomId(`contract_fulfilled:${contractId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId(`contract_unfulfilled:${contractId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
@@ -6582,11 +6895,26 @@ client.on('messageDelete', async (message) => {
       fields.push({ name: 'Вложение', value: `Фото/Эмбед (${imageAttachments.length})`, inline: false });
     }
 
-    // До 4 картинок показываем прямо в отдельных embed'ах (Discord позволяет
-    // только одну картинку на embed через setImage)
-    const extraEmbeds = imageAttachments.slice(0, 4).map((a) =>
-      new EmbedBuilder().setColor(0x5865f2).setImage(a.url),
-    );
+    // До 4 картинок скачиваем сразу (пока ссылка Discord ещё жива) и
+    // прикладываем как настоящие файлы — иначе после удаления сообщения
+    // ссылка на вложение может протухнуть раньше, чем аудит её покажет.
+    const imagesToCache = imageAttachments.slice(0, 4);
+    const downloaded = await Promise.all(imagesToCache.map((a) => mediaCache.downloadToCache(a.url, 'deleted-msg')));
+
+    const extraEmbeds = [];
+    const auditFiles = [];
+    imagesToCache.forEach((a, i) => {
+      const cachedBuffer = mediaCache.readCached(downloaded[i]);
+      const embed = new EmbedBuilder().setColor(0x5865f2);
+      if (cachedBuffer) {
+        const attachmentName = `deleted-${i}${path.extname(downloaded[i]) || '.png'}`;
+        auditFiles.push(new AttachmentBuilder(cachedBuffer, { name: attachmentName }));
+        embed.setImage(`attachment://${attachmentName}`);
+      } else {
+        embed.setImage(a.url); // не удалось закэшировать — используем исходную ссылку как раньше
+      }
+      extraEmbeds.push(embed);
+    });
     if (imageAttachments.length > 4) {
       fields.push({ name: 'Ещё картинки', value: `Показаны первые 4 из ${imageAttachments.length}`, inline: false });
     }
@@ -6597,6 +6925,7 @@ client.on('messageDelete', async (message) => {
       '🗑️ Сообщение удалено',
       fields,
       extraEmbeds,
+      auditFiles,
     );
   } catch (err) {
     console.error('Ошибка логирования удаления сообщения:', err);
@@ -6708,6 +7037,7 @@ client.once('clientReady', async () => {
     },
     async (filePath) => {
       await uploadBackupFile(filePath, 'ежедневный автоматический');
+      mediaCache.cleanupOldCache();
     },
   );
 

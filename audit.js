@@ -5,7 +5,7 @@ const db = require('./db');
 // details может быть либо строкой (как раньше), либо массивом полей вида
 // { name, value, inline } — тогда они лягут отдельными полями embed'а
 // (пример: "Повышение" — Кто повысил | Кого повысил, каждое своей колонкой).
-async function logAudit(guild, actor, action, details, extraEmbeds = []) {
+async function logAudit(guild, actor, action, details, extraEmbeds = [], files = []) {
   const isFields = Array.isArray(details);
   const detailsForDb = isFields
     ? details.map((f) => `${f.name}: ${f.value}`).join(' | ')
@@ -27,16 +27,16 @@ async function logAudit(guild, actor, action, details, extraEmbeds = []) {
     const embed = new EmbedBuilder()
       .setColor(0x5865f2)
       .setTitle(action)
-      .setFooter({ text: `Инициатор: ${actor.tag} (${actor.id})` })
       .setTimestamp();
 
     if (isFields) {
       embed.addFields(details.slice(0, 25).map((f) => ({ ...f, value: String(f.value).slice(0, 1024) || '—' })));
     } else {
       embed.setDescription(String(details).slice(0, 4000));
+      embed.setFooter({ text: `Инициатор: ${actor.tag} (${actor.id})` });
     }
 
-    await channel.send({ embeds: [embed, ...extraEmbeds].slice(0, 10) });
+    await channel.send({ embeds: [embed, ...extraEmbeds].slice(0, 10), files });
   } catch (err) {
     console.error('Ошибка логирования аудита:', err);
   }

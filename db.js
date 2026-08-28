@@ -180,6 +180,8 @@ const SCHEMA = {
       reviewed_by: 'TEXT',
       reviewed_at: 'TEXT',
       review_message_id: 'TEXT',
+      taken_local_path: 'TEXT', // локальная копия скриншота "взял" — на случай, если исходное сообщение удалят
+      completed_local_path: 'TEXT', // локальная копия скриншота "итог"
       stuck_reminder_sent: "INTEGER DEFAULT 0",
     },
     indexes: [['discord_id'], ['submitted_at'], ['status']],

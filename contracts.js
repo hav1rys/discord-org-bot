@@ -60,6 +60,10 @@ async function setTakenInfo(contractId, takenUrl, takenAt) {
   await db.run('UPDATE contracts SET taken_message_url = ?, taken_submitted_at = ? WHERE id = ?', [takenUrl, takenAt, contractId]);
 }
 
+async function setLocalPaths(contractId, takenLocalPath, completedLocalPath) {
+  await db.run('UPDATE contracts SET taken_local_path = ?, completed_local_path = ? WHERE id = ?', [takenLocalPath, completedLocalPath, contractId]);
+}
+
 async function getContractById(id) {
   return db.get('SELECT * FROM contracts WHERE id = ?', [id]);
 }
@@ -137,6 +141,7 @@ module.exports = {
   reviewContract,
   setReviewMessageId,
   setTakenInfo,
+  setLocalPaths,
   getContractById,
   recordManualContract,
   deleteContract,
