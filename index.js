@@ -4507,7 +4507,7 @@ client.on('interactionCreate', async (interaction) => {
         const overrides = await db.all('SELECT command_name, tier FROM command_permission_overrides');
         const overrideMap = new Map(overrides.map((o) => [o.command_name, o.tier]));
 
-        const grouped = { admin: [], owner: [], deputy: [], hr: [], owner_account_only: [], specific: [] };
+        const grouped = { everyone: [], admin: [], owner: [], deputy: [], hr: [], owner_account_only: [], specific: [] };
         for (const [name, defaultTier] of Object.entries(COMMAND_DEFAULT_TIERS)) {
           const effectiveTier = overrideMap.has(name) ? overrideMap.get(name) : defaultTier;
           const mark = overrideMap.has(name) ? ' *' : '';
