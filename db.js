@@ -563,6 +563,8 @@ const SCHEMA = {
       status: "TEXT DEFAULT 'open'", // open | archived
       rating: 'INTEGER', // 1 = 👍, 0 = 👎, null — не оценивали
       rated_at: 'TEXT',
+      assigned_to: 'TEXT', // кто из руководства взял тикет на себя
+      assigned_at: 'TEXT',
       created_at: 'TEXT',
       closed_at: 'TEXT',
       closed_by: 'TEXT',

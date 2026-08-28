@@ -49,6 +49,14 @@ async function getFinishedSince(sinceIso) {
   );
 }
 
+// Только строки winners завершённых розыгрышей за период (для топа победителей, без лимита)
+async function getEndedWinnersSince(sinceIso) {
+  return db.all(
+    `SELECT winners FROM giveaways WHERE status = 'ended' AND winners IS NOT NULL AND winners != '' AND created_at >= ?`,
+    [sinceIso],
+  );
+}
+
 async function addEntry(giveawayId, discordId) {
   await db.run('INSERT OR IGNORE INTO giveaway_entries (giveaway_id, discord_id) VALUES (?, ?)', [giveawayId, discordId]);
 }
@@ -142,6 +150,7 @@ module.exports = {
   setStatus,
   setWinners,
   getFinishedSince,
+  getEndedWinnersSince,
   addEntry,
   removeEntry,
   hasEntry,

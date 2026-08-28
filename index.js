@@ -133,6 +133,16 @@ const REVIEW_CHANNELS = {
 };
 
 const TICKET_CAT_LABEL = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое', appeal: 'Апелляция ЧС' };
+
+// Кнопки в шапке тикета: взять на себя / освободить + закрыть.
+function ticketButtonsRow(ticketId, assignedTo) {
+  return new ActionRowBuilder().addComponents(
+    assignedTo
+      ? new ButtonBuilder().setCustomId(`ticket_unclaim:${ticketId}`).setLabel('↩️ Освободить').setStyle(ButtonStyle.Secondary)
+      : new ButtonBuilder().setCustomId(`ticket_claim:${ticketId}`).setLabel('🙋 Беру').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`ticket_close:${ticketId}`).setLabel('🔒 Закрыть тикет').setStyle(ButtonStyle.Danger),
+  );
+}
 const appealMentionRoles = () => config.ROLES_BLACKLIST_ALLOWED.map((r) => `<@&${r}>`).join(' ');
 const appealMentionOpts = { allowedMentions: { roles: config.ROLES_BLACKLIST_ALLOWED } };
 
@@ -149,7 +159,7 @@ function claimButtonRow(type, r) {
 const COMMAND_CATEGORIES = [
   {
     title: '👤 Участники и паспорта',
-    commands: ['история', 'кто_это', 'паспорт_история', 'ник_история', 'отпуска_календарь', 'список_afk', 'отпуск_статистика', 'повышения_история', 'команды_человека'],
+    commands: ['история', 'кто_это', 'паспорт_история', 'ник_история', 'профиль_экспорт', 'отпуска_календарь', 'список_afk', 'отпуск_статистика', 'повышения_история', 'команды_человека'],
   },
   {
     title: '📄 Контракты и приглашения',
@@ -214,7 +224,7 @@ const COMMAND_DEFAULT_TIERS = {
 
   топ_приглашения: 'hr', паспорт_история: 'hr', отпуска_календарь: 'hr', список_afk: 'hr', топ_контракты: 'hr',
   статистика_организации: 'owner', аудит_поиск: 'hr', кто_это: 'hr', история: 'hr', помощь: 'hr',
-  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr', ник_история: 'hr', заявки_скорость: 'owner',
+  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr', ник_история: 'hr', профиль_экспорт: 'hr', заявки_скорость: 'owner',
   журнал_прав: 'admin', команды_человека: 'admin', предпросмотр: 'admin', причины_отказа: 'owner',
   faq: 'everyone', faq_отзывы: 'owner', сравнить_недели: 'owner',
   выплаты_hr: 'owner', воронка_найма: 'owner', статистика_hr: 'owner',
@@ -1157,6 +1167,18 @@ async function syncEffectiveIdentity(guild, discordId) {
     console.error(`Не удалось изменить ник для ${discordId}:`, err.message);
   }
 
+  // Общая роль организации — есть у любого действующего участника (у кого
+  // есть хоть один паспорт). Выдаётся здесь, потому что эта функция
+  // вызывается на всех путях вступления/добавления/повышения.
+  if (config.ROLE_ORGANIZATION) {
+    try {
+      const member = await guild.members.fetch(discordId);
+      await member.roles.add(config.ROLE_ORGANIZATION);
+    } catch (err) {
+      console.error(`Не удалось выдать роль организации для ${discordId}:`, err.message);
+    }
+  }
+
   if (identity.roleId) {
     try {
       const member = await guild.members.fetch(discordId);
@@ -1779,6 +1801,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('ник_история')
     .setDescription('История смены ника на сервере у человека')
+    .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder()
+    .setName('профиль_экспорт')
+    .setDescription('Выгрузить всю информацию о человеке в .txt (история, контракты, отпуска, тикеты и т.д.)')
     .addStringOption((opt) => opt.setName('человек').setDescription('Имя Фамилия / № Паспорта / Discord тег или ID').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
     .setName('заявки_скорость')
@@ -2721,7 +2747,7 @@ async function removeParticipant(guild, participant, reason) {
 
   try {
     const member = await guild.members.fetch(participant.discord_id);
-    await member.roles.remove([...config.ROLE_IDS, config.ROLE_VACATION, config.ROLE_AFK]);
+    await member.roles.remove([...config.ROLE_IDS, config.ROLE_VACATION, config.ROLE_AFK, config.ROLE_ORGANIZATION].filter(Boolean));
   } catch (_) {
     // участник уже мог покинуть сервер
   }
@@ -3189,7 +3215,7 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов', 'отпуск_статистика', 'команды_человека', 'ник_история'];
+      const autocompleteCommands = ['история', 'кто_это', 'правила_разослать', 'каналы_отчётов', 'отпуск_статистика', 'команды_человека', 'ник_история', 'профиль_экспорт'];
       if (!autocompleteCommands.includes(interaction.commandName)) return;
 
       const focused = interaction.options.getFocused();
@@ -4225,6 +4251,20 @@ client.on('interactionCreate', async (interaction) => {
           .setColor(0x5865f2)
           .setTitle(`🎉 История розыгрышей за ${days} дн.`)
           .setDescription(lines.join('\n\n').slice(0, 4000));
+
+        // Топ победителей за период (по всем завершённым, без лимита 25) — проверка на честность
+        const winnerRows = await giveaways.getEndedWinnersSince(since);
+        const winCount = new Map();
+        for (const wr of winnerRows) {
+          for (const w of (wr.winners || '').split(',').filter(Boolean)) {
+            winCount.set(w, (winCount.get(w) || 0) + 1);
+          }
+        }
+        if (winCount.size > 0) {
+          const top = [...winCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+          embed.addFields({ name: '🏆 Чаще всех выигрывали', value: top.map(([w, c], i) => `${i + 1}. <@${w}> — ${c}`).join('\n').slice(0, 1024) });
+        }
+
         await interaction.editReply({ embeds: [embed] });
         return;
       }
@@ -4764,6 +4804,97 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (cmd === 'профиль_экспорт') {
+        if (!(await checkCommandAccess('профиль_экспорт', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const target = await invitations.resolveInviter(interaction.options.getString('человек'));
+        if (!target) {
+          await interaction.editReply('⛔ Человек не найден.');
+          return;
+        }
+        const did = target.discord_id;
+        const L = [];
+        const push = (s = '') => L.push(s);
+        const section = (t) => { push(''); push(`=== ${t} ===`); };
+        const fdt = (v) => (v ? formatDateTime(new Date(v)) : '—');
+
+        push(`ЭКСПОРТ ПРОФИЛЯ`);
+        push(`Discord ID: ${did}`);
+        push(`Тег: ${target.discord_tag || '—'}`);
+        push(`Сформировано: ${formatDateTime(new Date())} (МСК), инициатор: ${interaction.user.tag}`);
+
+        section('УЧЁТНАЯ ЗАПИСЬ');
+        push(`Имя Фамилия: ${target.name} | № Паспорта: ${target.static} | LVL: ${target.lvl ?? '—'} | Онлайн: ${target.online || '—'}`);
+        push(`Ранг (role_id): ${target.role_id || '—'} | Вступил: ${fdt(target.joined_at)}`);
+        push(`Отпуск до: ${fdt(target.vacation_until)} | AFK с: ${target.afk_since || '—'}`);
+        push(`Навыки: ${target.skills || '—'}`);
+
+        const passports = await passportsLib.getAllPassports(did);
+        section(`ПАСПОРТА (${passports.length})`);
+        for (const p of passports) push(`• ${p.name} (№ ${p.static}), позиция ${p.position}, ранг ${p.role_id || '—'}${p.vacation_until ? `, отпуск до ${fdt(p.vacation_until)}` : ''}${p.afk_since ? `, AFK с ${p.afk_since}` : ''}`);
+
+        const dump = async (title, sql, params, fmt) => {
+          const rows = await db.all(sql, params);
+          section(`${title} (${rows.length})`);
+          for (const r of rows) push(`• ${fmt(r)}`);
+        };
+
+        await dump('ИСТОРИЯ ВСТУПЛЕНИЙ/УВОЛЬНЕНИЙ', 'SELECT * FROM membership_events WHERE discord_id = ? ORDER BY at', [did],
+          (r) => `${r.event === 'joined' ? 'вступил' : 'покинул'} — ${r.name} (№ ${r.static}) — ${fdt(r.at)}${r.note ? ` — ${r.note}` : ''}`);
+        await dump('ОТПУСК/AFK (выдачи и снятия руководством)', "SELECT * FROM status_events WHERE discord_id = ? ORDER BY at", [did],
+          (r) => `${r.type} ${r.action === 'granted' ? 'выдан' : 'снят'} — ${r.name} (№ ${r.static}) — ${fdt(r.at)}${r.until ? ` — до ${fdt(r.until)}` : ''}${r.reason ? ` — ${r.reason}` : ''} — actor ${r.actor_id}`);
+        await dump('СМЕНА НИКА НА СЕРВЕРЕ', 'SELECT * FROM nickname_history WHERE discord_id = ? ORDER BY id', [did],
+          (r) => `«${r.old_nick || '—'}» → «${r.new_nick || '—'}» — ${r.changed_by} — ${fdt(r.at)}`);
+        await dump('ЗАЯВКИ НА ВСТУПЛЕНИЕ', 'SELECT * FROM applications WHERE discord_id = ? ORDER BY id', [did],
+          (r) => `#${r.id} — ${r.name} (№ ${r.static}), LVL ${r.lvl} — ${statusLabel(r.status)} — ${fdt(r.created_at)}${r.reject_reason ? ` — причина: ${r.reject_reason}` : ''}${r.accepted_by ? ` — принял ${r.accepted_by}` : ''}${r.rejected_by ? ` — отклонил ${r.rejected_by}` : ''}`);
+        await dump('ЗАЯВКИ НА ДОБАВЛЕНИЕ ПАСПОРТА', 'SELECT * FROM passport_requests WHERE discord_id = ? ORDER BY id', [did],
+          (r) => `#${r.id} — ${r.name} (№ ${r.static}) — ${statusLabel(r.status)} — ${fdt(r.created_at)}${r.reject_reason ? ` — ${r.reject_reason}` : ''}`);
+        await dump('ЗАЯВКИ НА ИЗМЕНЕНИЕ ДАННЫХ', 'SELECT * FROM data_change_requests WHERE discord_id = ? ORDER BY id', [did],
+          (r) => `#${r.id} — № ${r.target_static}: «${r.old_name}» → «${r.new_name}» — ${statusLabel(r.status)} — ${fdt(r.created_at)}${r.reject_reason ? ` — ${r.reject_reason}` : ''}`);
+        await dump('ЗАЯВКИ НА ОТПУСК (самостоятельные)', 'SELECT * FROM vacations WHERE discord_id = ? ORDER BY id', [did],
+          (r) => `#${r.id} — до ${fdt(r.until)} — ${statusLabel(r.status)} — ${fdt(r.created_at)}${r.reason ? ` — ${r.reason}` : ''}${r.reject_reason ? ` — отказ: ${r.reject_reason}` : ''}`);
+
+        const everStatics = new Set(passports.map((p) => p.static));
+        for (const e of await db.all('SELECT DISTINCT static FROM membership_events WHERE discord_id = ?', [did])) everStatics.add(e.static);
+        if (everStatics.size > 0) {
+          const ph = [...everStatics].map(() => '?').join(',');
+          await dump('ЗАЯВКИ НА УВОЛЬНЕНИЕ', `SELECT * FROM kicks WHERE target_static IN (${ph}) ORDER BY id`, [...everStatics],
+            (r) => `#${r.id} — ${r.name} (№ ${r.target_static}) — ${statusLabel(r.status)} — ${fdt(r.created_at)}${r.reason ? ` — ${r.reason}` : ''}${r.reject_reason ? ` — отказ: ${r.reject_reason}` : ''}`);
+        }
+
+        await dump('КОНТРАКТЫ', "SELECT * FROM contracts WHERE discord_id = ? ORDER BY submitted_at", [did],
+          (r) => `${statusLabel(r.status)} — ${fdt(r.submitted_at)}${r.reviewed_by ? ` — проверил ${r.reviewed_by} (${fdt(r.reviewed_at)})` : ''} — ${r.message_url || '—'}`);
+        await dump('ПРИГЛАШЕНИЯ (кого пригласил)', "SELECT * FROM invitations WHERE inviter_discord_id = ? ORDER BY id", [did],
+          (r) => `${r.invitee_name} (№ ${r.invitee_static}), id ${r.invitee_discord_id} — ${r.status} — вступил ${fdt(r.joined_at)}`);
+        await dump('ПРИГЛАШЕНИЯ (кем приглашён)', "SELECT * FROM invitations WHERE invitee_discord_id = ? ORDER BY id", [did],
+          (r) => `пригласил ${r.inviter_discord_id} — ${r.status} — вступил ${fdt(r.joined_at)}`);
+        await dump('ПРИЁМ ЗАЯВОК (как заявитель)', "SELECT * FROM acceptances WHERE applicant_discord_id = ? ORDER BY id", [did],
+          (r) => `принял ${r.staff_discord_id} — ${r.status} — вступил ${fdt(r.joined_at)}`);
+        await dump('ПРИЁМ ЗАЯВОК (как HR — кого принял)', "SELECT * FROM acceptances WHERE staff_discord_id = ? ORDER BY id", [did],
+          (r) => `${r.applicant_name} (№ ${r.applicant_static}), id ${r.applicant_discord_id} — ${r.status} — вступил ${fdt(r.joined_at)}`);
+        await dump('КОДОВЫЕ СЛОВА', "SELECT * FROM codeword_submissions WHERE discord_id = ? ORDER BY id", [did],
+          (r) => `#${r.id} — ${r.status}${r.reviewed_by ? ` (проверил ${r.reviewed_by})` : ''} — ${fdt(r.submitted_at)}`);
+        await dump('АПЕЛЛЯЦИИ НА ЧС', "SELECT * FROM appeals WHERE discord_id = ? ORDER BY id", [did],
+          (r) => `#${r.id} — ${r.status} — ${fdt(r.created_at)}${r.reject_reason ? ` — ${r.reject_reason}` : ''}`);
+        await dump('ТИКЕТЫ (открыл)', "SELECT * FROM tickets WHERE opener_id = ? ORDER BY id", [did],
+          (r) => `#${r.id} [${TICKET_CAT_LABEL[r.category] || '—'}] «${r.subject || '—'}» — ${r.status} — ${fdt(r.created_at)}${r.rating != null ? ` — оценка ${r.rating ? '👍' : '👎'}` : ''}`);
+        await dump('ЧЁРНЫЙ СПИСОК', "SELECT * FROM blacklist WHERE discord_id = ? ORDER BY id", [did],
+          (r) => `№ ${r.static || '—'} — ${r.reason || 'без причины'} — внёс ${r.added_by} — ${fdt(r.created_at)}${r.until ? ` — до ${fdt(r.until)}` : ' — навсегда'}${r.appeal_blocked ? ' — АПЕЛЛЯЦИИ ЗАПРЕЩЕНЫ' : ''}`);
+        await dump('АУДИТ (действия этого человека, последние 100)', "SELECT * FROM audit_log WHERE actor_id = ? ORDER BY id DESC LIMIT 100", [did],
+          (r) => `${fdt(r.at)} — ${r.action} — ${r.details}`);
+
+        const bom = Buffer.from([0xEF, 0xBB, 0xBF]);
+        const file = new AttachmentBuilder(Buffer.concat([bom, Buffer.from(L.join('\n'), 'utf8')]), { name: `profile_${did}.txt` });
+        await logAudit(guild, interaction.user, 'Экспорт профиля человека', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чей профиль', value: `<@${did}> | ${target.name} (№ ${target.static})`, inline: true },
+        ]);
+        await interaction.editReply({ content: `Профиль ${target.name} (№ ${target.static}):`, files: [file] });
+        return;
+      }
+
       if (cmd === 'заявки_скорость') {
         if (!(await checkCommandAccess('заявки_скорость', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
@@ -4921,7 +5052,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply('Открытых тикетов нет.');
           return;
         }
-        const lines = open.map((t) => `<#${t.channel_id}> — [${TICKET_CAT_LABEL[t.category] || '—'}] «${t.subject || '—'}» от <@${t.opener_id}>, открыт ${formatDateTime(new Date(t.created_at))}`);
+        const lines = open.map((t) => `<#${t.channel_id}> — [${TICKET_CAT_LABEL[t.category] || '—'}] «${t.subject || '—'}» от <@${t.opener_id}>${t.assigned_to ? `, у <@${t.assigned_to}>` : ', никто не взял'}, открыт ${formatDateTime(new Date(t.created_at))}`);
         const embed = new EmbedBuilder().setColor(0x5865f2).setTitle(`🎫 Открытые тикеты (${open.length})`).setDescription(lines.join('\n').slice(0, 4000));
         await interaction.editReply({ embeds: [embed] });
         return;
@@ -6661,6 +6792,37 @@ client.on('interactionCreate', async (interaction) => {
         return safeReply(interaction, `🔒 <@${targetId}> больше не сможет подавать апелляцию.`);
       }
 
+      if (id.startsWith('ticket_claim:') || id.startsWith('ticket_unclaim:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        const claiming = id.startsWith('ticket_claim:');
+        const ticketId = id.split(':')[1];
+        const ticket = await db.get('SELECT * FROM tickets WHERE id = ?', [ticketId]);
+        if (!ticket || ticket.status !== 'open') return safeReply(interaction, 'Тикет уже закрыт.');
+        if (claiming && ticket.assigned_to && ticket.assigned_to !== interaction.user.id) {
+          return safeReply(interaction, `⛔ Тикет уже взял(а) <@${ticket.assigned_to}>.`);
+        }
+        if (!claiming && ticket.assigned_to !== interaction.user.id && !perms.canManageMembersList(interaction.member)) {
+          return safeReply(interaction, '⛔ Освободить может тот, кто взял, или Владелец/Зам. Владелец.');
+        }
+        const newAssignee = claiming ? interaction.user.id : null;
+        await db.run('UPDATE tickets SET assigned_to = ?, assigned_at = ? WHERE id = ?', [newAssignee, claiming ? new Date().toISOString() : null, ticketId]);
+        try {
+          const src = interaction.message.embeds[0];
+          const rebuilt = EmbedBuilder.from(src);
+          const fields = (src.fields || []).filter((f) => f.name !== '🙋 Рассматривает');
+          if (newAssignee) fields.push({ name: '🙋 Рассматривает', value: `<@${newAssignee}>`, inline: true });
+          rebuilt.setFields(fields);
+          await interaction.update({ embeds: [rebuilt], components: [ticketButtonsRow(ticketId, newAssignee)] });
+        } catch (e) {
+          await safeReply(interaction, claiming ? '✅ Взяли тикет.' : '↩️ Освободили.');
+        }
+        await logAudit(guild, interaction.user, claiming ? 'Тикет взят на рассмотрение' : 'Тикет освобождён', [
+          { name: 'Кто', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Тикет', value: `#${ticketId} — <#${ticket.channel_id}>`, inline: true },
+        ]);
+        return;
+      }
+
       if (id.startsWith('ticket_close:')) {
         const ticketId = id.split(':')[1];
         const ticket = await db.get('SELECT * FROM tickets WHERE id = ?', [ticketId]);
@@ -7731,7 +7893,7 @@ client.on('interactionCreate', async (interaction) => {
 
         try {
           const member = await guild.members.fetch(app.discord_id);
-          await member.roles.add(config.ROLE_APPLY);
+          await member.roles.add([config.ROLE_APPLY, config.ROLE_ORGANIZATION].filter(Boolean));
         } catch (err) {
           console.error('Не удалось выдать роль при принятии заявки:', err);
         }
@@ -8573,7 +8735,7 @@ client.on('interactionCreate', async (interaction) => {
             { name: 'Тип', value: TICKET_CAT_LABEL[cat], inline: true },
             { name: 'Открыт', value: formatDateTime(new Date()), inline: true },
           )],
-          components: [row(new ButtonBuilder().setCustomId(`ticket_close:${result.lastID}`).setLabel('🔒 Закрыть тикет').setStyle(ButtonStyle.Danger))],
+          components: [ticketButtonsRow(result.lastID, null)],
           ...mentionOpts,
         });
 
@@ -8920,6 +9082,39 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     );
   } catch (err) {
     console.error('Ошибка логирования смены ника:', err);
+  }
+});
+
+// Участник числится в организации, но покинул Discord-сервер — уведомляем
+// руководство (бот НЕ увольняет сам, только флаг).
+client.on('guildMemberRemove', async (member) => {
+  try {
+    const participant = await db.get('SELECT * FROM participants WHERE discord_id = ?', [member.id]);
+    if (!participant) return;
+    const passports = await passportsLib.getAllPassports(member.id);
+    const list = passports.map((p) => `${p.name} (№ ${p.static})`).join(', ') || '—';
+    const tag = member.user ? member.user.tag : member.id;
+    const guild = member.guild;
+    try {
+      const channel = await guild.channels.fetch(config.CHANNEL_KICK_REVIEW);
+      await channel.send({
+        content: perms.mentionManagementRoles(),
+        embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('⚠️ Участник пропал с сервера').setDescription(
+          `<@${member.id}> (${tag}) покинул(а) Discord-сервер, но всё ещё числится в организации.\n` +
+          `Паспорта: ${list}\n\n` +
+          `Бот НЕ уволил автоматически — решите вручную (заявка на увольнение / оставить).`,
+        )],
+        ...mentionOpts,
+      });
+    } catch (e) {
+      console.error('Не удалось уведомить о выходе участника:', e.message);
+    }
+    await logAudit(guild, client.user, '⚠️ Участник покинул Discord-сервер', [
+      { name: 'Кто', value: `<@${member.id}> | ${tag}`, inline: true },
+      { name: 'Паспорта', value: list.slice(0, 1024), inline: false },
+    ]);
+  } catch (err) {
+    console.error('Ошибка обработки выхода участника с сервера:', err);
   }
 });
 
