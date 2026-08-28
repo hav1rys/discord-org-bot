@@ -491,7 +491,53 @@ const SCHEMA = {
     },
     indexes: [['category']],
   },
+
+  // История смены НИКА на сервере (не путать с data_change_requests — там
+  // заявки на смену Имени Фамилии по паспорту). Пишется из guildMemberUpdate;
+  // изменения, сделанные самим ботом (синхронизация эффективной личности),
+  // не записываются — только ручные правки людей.
+  nickname_history: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      old_nick: 'TEXT',
+      new_nick: 'TEXT',
+      changed_by: 'TEXT', // discord id того, кто поменял (по журналу Discord), либо 'unknown'
+      at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  // Тикеты поддержки — приватный канал на вопрос, при закрытии канал
+  // просто уезжает в архивную категорию (без транскрипта).
+  tickets: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      channel_id: 'TEXT UNIQUE',
+      opener_id: 'TEXT',
+      subject: 'TEXT',
+      status: "TEXT DEFAULT 'open'", // open | archived
+      created_at: 'TEXT',
+      closed_at: 'TEXT',
+      closed_by: 'TEXT',
+    },
+    indexes: [['opener_id'], ['status']],
+  },
 };
+
+// Общие поля для всех очередей на рассмотрение: взятие заявки в работу
+// (assigned_to/assigned_at), отметка о времени фактического решения
+// (reviewed_at — для статистики скорости) и флаг «SLA-напоминание уже
+// отправлено». Держим одним списком, чтобы не дублировать по таблицам.
+const REVIEW_FIELDS = {
+  reviewed_at: 'TEXT',
+  assigned_to: 'TEXT',
+  assigned_at: 'TEXT',
+  sla_reminder_sent: 'INTEGER DEFAULT 0',
+};
+for (const reviewTable of ['applications', 'kicks', 'vacations', 'hr_applications', 'data_change_requests', 'passport_requests']) {
+  Object.assign(SCHEMA[reviewTable].columns, REVIEW_FIELDS);
+}
 
 // Убирает модификаторы, недопустимые в ALTER TABLE ADD COLUMN
 // (PRIMARY KEY/AUTOINCREMENT/UNIQUE можно указать только при создании

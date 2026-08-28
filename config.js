@@ -26,6 +26,9 @@ module.exports = {
   CHANNEL_DATA_CHANGE_REVIEW: '1531231514371555449',
   CHANNEL_HR_APPLY_MENU: '1531216550391185480',
   CHANNEL_HR_APPLY_REVIEW: '1531233540426039306',
+  CHANNEL_TICKETS_MENU: '1542825263123931136',
+  CHANNEL_TICKETS_ACTIVE_CATEGORY: '1542825479080386651',
+  CHANNEL_TICKETS_ARCHIVE_CATEGORY: '1542825562069012500',
 
   // ----- Служебные роли -----
   // Роль, дающая доступ к командам/кнопкам бота
@@ -82,6 +85,7 @@ module.exports = {
   VACATION_REMINDER_HOURS: 24, // за сколько часов до конца отпуска слать напоминание
   HR_REMINDER_INTERVAL_DAYS: 7, // раз во сколько дней напоминать HR о непроверенных заявках
   STUCK_CONTRACT_HOURS: 24, // если контракт висит на проверке дольше — напомнить руководству
+  REVIEW_SLA_HOURS: 24, // если заявка (любой очереди) висит без решения дольше — напомнить руководству один раз
   WEEKLY_PROMOTION_CONTRACT_THRESHOLD: 3, // сколько контрактов за неделю нужно для авто-повышения Стажёра
   WEEKLY_RANK_ADJUSTMENT_DAY: 1, // день недели для авто-корректировки рангов (0=вс, 1=пн, ... 6=сб)
 

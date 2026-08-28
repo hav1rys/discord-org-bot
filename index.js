@@ -918,6 +918,45 @@ async function checkVacationReminders(guild) {
   }
 }
 
+// Раз в час — автоматически снимает отпуска, у которых истёк срок
+// (vacation_until <= сейчас): чистит поле у паспорта, логирует снятие,
+// синхронизирует статусные роли, обновляет список и шлёт ЛС. Не гейтится
+// переключателем «Напоминания» — это действие, а не напоминание.
+async function checkExpiredVacations(guild) {
+  const nowIso = new Date().toISOString();
+  const participants = await db.all(
+    'SELECT discord_id, static, name, vacation_until FROM participants WHERE vacation_until IS NOT NULL AND vacation_until <= ?',
+    [nowIso],
+  );
+  const extras = await db.all(
+    'SELECT discord_id, static, name, vacation_until FROM extra_passports WHERE vacation_until IS NOT NULL AND vacation_until <= ?',
+    [nowIso],
+  );
+  const expired = [...participants, ...extras];
+  if (expired.length === 0) return;
+
+  const affected = new Set();
+  for (const p of expired) {
+    await passportsLib.updatePassportFields(p.discord_id, p.static, { vacation_until: null });
+    await history.logStatusRevoked('vacation', p.discord_id, p.static, p.name, client.user.id);
+    affected.add(p.discord_id);
+  }
+
+  for (const discordId of affected) {
+    await syncStatusRoles(guild, discordId);
+  }
+  await safeUpdateMembersList(guild);
+
+  for (const p of expired) {
+    await dmUser(guild, p.discord_id, `🏖️ Ваш отпуск (${p.name}, № ${p.static}) закончился — статус снят автоматически. С возвращением!`);
+  }
+
+  await logAudit(guild, client.user, '🏖️ Отпуск(а) сняты автоматически (истёк срок)', [
+    { name: 'Снято паспортов', value: String(expired.length), inline: true },
+    { name: 'Кому', value: expired.map((p) => `${p.name} (№ ${p.static}) — <@${p.discord_id}>`).join('\n').slice(0, 1024), inline: false },
+  ]);
+}
+
 async function syncStatusRoles(guild, discordId) {
   const passports = await passportsLib.getAllPassports(discordId);
   const hasVacation = passports.some((p) => p.vacation_until);
@@ -1413,7 +1452,9 @@ const commands = [
     .addStringOption((opt) => opt.setName('запрос').setDescription('№ Паспорта / Discord тег / Имя Фамилия').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
     .setName('экспорт_статистика')
-    .setDescription('Выгрузить статистику текущей недели (контракты/приглашения/заявки) в .csv'),
+    .setDescription('Выгрузить статистику за период (контракты/приглашения/заявки) в .csv')
+    .addIntegerOption((opt) => opt.setName('недель_назад').setDescription('0 = текущая неделя, 1 = прошлая и т.д. (игнорируется, если задано «дней»)').setRequired(false).setMinValue(0))
+    .addIntegerOption((opt) => opt.setName('дней').setDescription('Скользящее окно: последние N дней от текущего момента').setRequired(false).setMinValue(1)),
   new SlashCommandBuilder()
     .setName('каналы_отчётов')
     .setDescription('Отправить в ЛС ссылки на каналы с отчётами — одному человеку или всем в организации')
@@ -2895,8 +2936,18 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const range = contracts.getWeekRange(0);
-        const label = contracts.formatWeekLabel(range).replace(/\./g, '-');
+        const daysOpt = interaction.options.getInteger('дней');
+        const weeksAgoOpt = interaction.options.getInteger('недель_назад') || 0;
+        let range;
+        let periodLabel;
+        if (daysOpt) {
+          range = { start: new Date(Date.now() - daysOpt * 24 * 60 * 60 * 1000), end: new Date() };
+          periodLabel = `последние ${daysOpt} дн.`;
+        } else {
+          range = contracts.getWeekRange(weeksAgoOpt);
+          periodLabel = contracts.formatWeekLabel(range);
+        }
+        const label = periodLabel.replace(/[.\s:]+/g, '-');
 
         const contractRows = await db.all(
           `SELECT * FROM contracts WHERE submitted_at BETWEEN ? AND ? ORDER BY submitted_at`,
@@ -2933,9 +2984,9 @@ client.on('interactionCreate', async (interaction) => {
 
         await logAudit(guild, interaction.user, 'Экспорт статистики', [
           { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
-          { name: 'Неделя', value: contracts.formatWeekLabel(range), inline: true },
+          { name: 'Период', value: periodLabel, inline: true },
         ]);
-        await interaction.editReply({ content: `Статистика за ${contracts.formatWeekLabel(range)}:`, files });
+        await interaction.editReply({ content: `Статистика за ${periodLabel}:`, files });
         return;
       }
 
@@ -7390,6 +7441,7 @@ client.once('clientReady', async () => {
         }
         await checkDiskSpace(guild);
         await checkStuckContracts(guild);
+        await checkExpiredVacations(guild);
         await runWeeklyRankAdjustment(guild);
         await checkRecurringGiveaways(guild);
         await sendDailyDigest(guild);
