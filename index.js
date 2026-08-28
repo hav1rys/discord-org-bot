@@ -9236,8 +9236,24 @@ client.once('clientReady', async () => {
 
   // --- Диагностика веб-возможностей хостинга (разовая проверка) ---
   console.log(`[web-check] PORT: ${process.env.PORT || '(не задан)'}`);
-  const webHints = Object.keys(process.env).filter((k) => /PORT|HOST|DOMAIN|URL|WEB|HTTP|BIND|LISTEN|PUBLIC|PROXY/i.test(k));
-  console.log(`[web-check] Похожие на веб переменные окружения: ${webHints.length ? webHints.join(', ') : '(нет)'}`);
+  console.log(`[web-check] DOMAIN: ${process.env.DOMAIN || '(не задан)'}`);
+  console.log(`[web-check] BOTHOST_FEATURES: ${process.env.BOTHOST_FEATURES || '(не задан)'}`);
+  if (process.env.WEBHOOK_URL) {
+    let masked = process.env.WEBHOOK_URL;
+    try { masked = new URL(process.env.WEBHOOK_URL).origin + '/…'; } catch (_) {}
+    console.log(`[web-check] WEBHOOK_URL (origin): ${masked}`);
+  }
+  try {
+    const http = require('http');
+    http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Freelance Company bot — web OK\n');
+    }).listen(process.env.PORT || 3000, () => {
+      console.log(`[web-check] HTTP-сервер поднят на порту ${process.env.PORT || 3000}`);
+    });
+  } catch (e) {
+    console.error('[web-check] Не удалось поднять HTTP-сервер:', e.message);
+  }
 
   await db.init();
   const overridesCount = await configStore.loadOverrides();
