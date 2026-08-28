@@ -3306,7 +3306,7 @@ client.on('interactionCreate', async (interaction) => {
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const result = await syncAllCommandPermissions(guild);
-        await logAudit(guild, interaction.user, 'Видимость команд синхронизирована с Discord', `Успешно: ${result.ok}${result.failed.length > 0 ? `. Ошибок: ${result.failed.length}` : ''}`);
+        await logSystem(guild, 'Видимость команд синхронизирована с Discord', `Инициатор: ${interaction.user.tag} (${interaction.user.id}). Успешно: ${result.ok}${result.failed.length > 0 ? `. Ошибок: ${result.failed.length}` : ''}`);
         let msg = `✅ Синхронизировано команд: ${result.ok}.`;
         if (result.failed.length > 0) {
           msg += `\n\n⚠️ Не удалось (${result.failed.length}):\n${result.failed.slice(0, 10).join('\n')}`;
@@ -6075,7 +6075,7 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        await logAudit(guild, interaction.user, 'Настроена синхронизация видимости команд с Discord', 'Авторизация пройдена, запускаю первичную синхронизацию.');
+        await logSystem(guild, 'Настроена синхронизация видимости команд с Discord', `Инициатор: ${interaction.user.tag} (${interaction.user.id}). Авторизация пройдена, запускаю первичную синхронизацию.`);
         await interaction.editReply('✅ Авторизация прошла успешно. Применяю видимость ко всем командам, это может занять минуту...');
 
         const result = await syncAllCommandPermissions(guild);
