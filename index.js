@@ -1729,7 +1729,7 @@ const commands = [
     .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 30)').setRequired(false).setMinValue(1)),
   new SlashCommandBuilder()
     .setName('импорт_участники')
-    .setDescription('Импорт участников из .csv (формат participants.csv из /экспорт_бд): запись + роль + ник + канал-профиль')
+    .setDescription('Импорт участников из .csv (формат participants.csv из /экспорт_бд)')
     .addAttachmentOption((opt) => opt.setName('файл').setDescription('.csv, минимум колонки discord_id, name, static').setRequired(true)),
   new SlashCommandBuilder()
     .setName('тикеты')
