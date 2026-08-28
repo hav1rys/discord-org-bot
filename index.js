@@ -124,7 +124,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🎉 Розыгрыши',
-    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_добавить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить'],
+    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_добавить_участника', 'розыгрыш_удалить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить', 'розыгрыш_чс_добавить', 'розыгрыш_чс_убрать', 'розыгрыш_чс_список'],
   },
   {
     title: '📢 Тексты и рассылки',
@@ -170,16 +170,18 @@ const COMMAND_DEFAULT_TIERS = {
 
   розыгрыш_старт: 'owner', розыгрыш_завершить: 'owner', розыгрыш_отменить: 'owner', розыгрыш_реролл: 'owner', розыгрыш_участники: 'owner',
   розыгрыш_добавить_участника: 'owner', розыгрыш_повтор_создать: 'owner', розыгрыш_повтор_список: 'owner', розыгрыш_повтор_отменить: 'owner',
+  розыгрыш_удалить_участника: 'owner',
   правила: 'owner', правила_обновить: 'owner', правила_разослать: 'owner', агитация: 'owner', агитация_обновить: 'owner',
-  hr_вакансия: 'owner', hr_вакансия_обновить: 'owner', рассылка_сообщение: 'owner', каналы_отчётов: 'owner', предпросмотр: 'owner',
+  hr_вакансия: 'owner', hr_вакансия_обновить: 'owner', рассылка_сообщение: 'owner', каналы_отчётов: 'owner',
   профили_восстановить: 'owner', статус: 'owner', пинг: 'owner',
 
   экспорт_статистика: 'deputy', аудит_экспорт: 'deputy',
 
   топ_приглашения: 'hr', паспорт_история: 'hr', отпуска_календарь: 'hr', список_afk: 'hr', топ_контракты: 'hr',
   статистика_организации: 'hr', аудит_поиск: 'hr', кто_это: 'hr', история: 'hr', помощь: 'hr',
-  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr', команды_человека: 'hr',
-  журнал_прав: 'admin',
+  сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr',
+  журнал_прав: 'admin', команды_человека: 'admin', предпросмотр: 'admin',
+  розыгрыш_чс_добавить: 'admin', розыгрыш_чс_убрать: 'admin', розыгрыш_чс_список: 'admin',
   экспорт_бд: 'admin', резерв_восстановить: 'admin',
 };
 
@@ -1386,6 +1388,23 @@ const commands = [
     .setDescription('Остановить повторяющийся розыгрыш')
     .addStringOption((opt) => opt.setName('правило').setDescription('Какое правило остановить').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
+    .setName('розыгрыш_удалить_участника')
+    .setDescription('Удалить человека из розыгрыша')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true))
+    .addUserOption((opt) => opt.setName('человек').setDescription('Кого удалить').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_чс_добавить')
+    .setDescription('Добавить человека в ЧС розыгрышей (не сможет участвовать ни в одном)')
+    .addUserOption((opt) => opt.setName('человек').setDescription('Кого добавить').setRequired(true))
+    .addStringOption((opt) => opt.setName('причина').setDescription('Причина').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_чс_убрать')
+    .setDescription('Убрать человека из ЧС розыгрышей')
+    .addUserOption((opt) => opt.setName('человек').setDescription('Кого убрать').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_чс_список')
+    .setDescription('Список ЧС розыгрышей'),
+  new SlashCommandBuilder()
     .setName('розыгрыш_завершить')
     .setDescription('Досрочно завершить розыгрыш и выбрать победителей')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш завершить').setRequired(true).setAutocomplete(true)),
@@ -2387,13 +2406,13 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники' || interaction.commandName === 'розыгрыш_добавить_участника') {
+      if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_реролл' || interaction.commandName === 'розыгрыш_участники' || interaction.commandName === 'розыгрыш_добавить_участника' || interaction.commandName === 'розыгрыш_удалить_участника') {
         const focused = interaction.options.getFocused();
         let statusClause = '';
         let params = [`%${focused}%`];
         if (interaction.commandName === 'розыгрыш_реролл') {
           statusClause = "AND status = 'ended'";
-        } else if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_добавить_участника') {
+        } else if (interaction.commandName === 'розыгрыш_завершить' || interaction.commandName === 'розыгрыш_отменить' || interaction.commandName === 'розыгрыш_добавить_участника' || interaction.commandName === 'розыгрыш_удалить_участника') {
           statusClause = "AND status = 'active'";
         } // giveaway_participants — любой статус, без фильтра
         const rows = await db.all(
@@ -3053,6 +3072,11 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
+        if (await giveaways.isBlacklisted(targetUser.id)) {
+          await interaction.editReply('⛔ Этот человек в ЧС розыгрышей — участвовать не может.');
+          return;
+        }
+
         if (giveaway.required_role_id) {
           let targetMember;
           try {
@@ -3082,6 +3106,82 @@ client.on('interactionCreate', async (interaction) => {
 
         await logAudit(guild, interaction.user, 'Участник добавлен в розыгрыш вручную', `«${giveaway.prize}» — <@${targetUser.id}>`);
         await interaction.editReply(`✅ <@${targetUser.id}> добавлен(а) в розыгрыш «${giveaway.prize}».`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_удалить_участника') {
+        if (!(await checkCommandAccess('розыгрыш_удалить_участника', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const giveawayId = interaction.options.getString('розыгрыш');
+        const targetUser = interaction.options.getUser('человек');
+        const giveaway = await giveaways.getGiveaway(giveawayId);
+        if (!giveaway || giveaway.status !== 'active') {
+          await interaction.editReply('⛔ Розыгрыш не найден или уже завершён.');
+          return;
+        }
+
+        const already = await giveaways.hasEntry(giveawayId, targetUser.id);
+        if (!already) {
+          await interaction.editReply('Этот человек и так не участвует.');
+          return;
+        }
+        await giveaways.removeEntry(giveawayId, targetUser.id);
+        const count = await giveaways.countEntries(giveawayId);
+        try {
+          const channel = await guild.channels.fetch(giveaway.channel_id);
+          const msg = await channel.messages.fetch(giveaway.message_id);
+          await msg.edit({ embeds: [buildGiveawayEmbed(giveaway, count)] });
+        } catch (_) {}
+
+        await logAudit(guild, interaction.user, 'Участник удалён из розыгрыша вручную', `«${giveaway.prize}» — <@${targetUser.id}>`);
+        await interaction.editReply(`✅ <@${targetUser.id}> удалён(а) из розыгрыша «${giveaway.prize}».`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_чс_добавить') {
+        if (!(await checkCommandAccess('розыгрыш_чс_добавить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const targetUser = interaction.options.getUser('человек');
+        const reason = interaction.options.getString('причина') || '';
+        await giveaways.addToBlacklist(targetUser.id, reason, interaction.user.id);
+        await logAudit(guild, interaction.user, 'Добавлен в ЧС розыгрышей', `<@${targetUser.id}>${reason ? `: ${reason}` : ''}`);
+        await interaction.editReply(`✅ <@${targetUser.id}> добавлен(а) в ЧС розыгрышей.`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_чс_убрать') {
+        if (!(await checkCommandAccess('розыгрыш_чс_убрать', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const targetUser = interaction.options.getUser('человек');
+        const removed = await giveaways.removeFromBlacklist(targetUser.id);
+        if (!removed) {
+          await interaction.editReply('Этого человека и так не было в ЧС розыгрышей.');
+          return;
+        }
+        await logAudit(guild, interaction.user, 'Убран из ЧС розыгрышей', `<@${targetUser.id}>`);
+        await interaction.editReply(`✅ <@${targetUser.id}> убран(а) из ЧС розыгрышей.`);
+        return;
+      }
+
+      if (cmd === 'розыгрыш_чс_список') {
+        if (!(await checkCommandAccess('розыгрыш_чс_список', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rows = await giveaways.getBlacklist();
+        if (rows.length === 0) {
+          await interaction.editReply('ЧС розыгрышей пуста.');
+          return;
+        }
+        const lines = rows.map((r) => `<@${r.discord_id}>${r.reason ? ` — ${r.reason}` : ''} (добавил: <@${r.added_by}>, ${formatDateTime(new Date(r.added_at))})`);
+        const embed = new EmbedBuilder().setColor(0xed4245).setTitle('🚫 ЧС розыгрышей').setDescription(lines.join('\n').slice(0, 4000));
+        await interaction.editReply({ embeds: [embed] });
         return;
       }
 
@@ -4480,6 +4580,9 @@ client.on('interactionCreate', async (interaction) => {
           return safeReply(interaction, '⛔ Этот розыгрыш уже завершён.');
         }
         const already = await giveaways.hasEntry(giveawayId, interaction.user.id);
+        if (!already && (await giveaways.isBlacklisted(interaction.user.id))) {
+          return safeReply(interaction, '⛔ Вы в ЧС розыгрышей — участвовать не можете.');
+        }
         if (!already && giveaway.required_role_id && !interaction.member.roles.cache.has(giveaway.required_role_id)) {
           return safeReply(interaction, `⛔ Участвовать может только роль <@&${giveaway.required_role_id}>.`);
         }

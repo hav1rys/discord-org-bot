@@ -97,6 +97,29 @@ async function setRecurringRuleStatus(id, status) {
   await db.run('UPDATE giveaway_recurring_rules SET status = ? WHERE id = ?', [status, id]);
 }
 
+// ---------- ЧС розыгрышей ----------
+
+async function addToBlacklist(discordId, reason, addedBy) {
+  await db.run(
+    `INSERT INTO giveaway_blacklist (discord_id, reason, added_by, added_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(discord_id) DO UPDATE SET reason = excluded.reason, added_by = excluded.added_by, added_at = excluded.added_at`,
+    [discordId, reason || '', addedBy, new Date().toISOString()],
+  );
+}
+
+async function removeFromBlacklist(discordId) {
+  const result = await db.run('DELETE FROM giveaway_blacklist WHERE discord_id = ?', [discordId]);
+  return result.changes > 0;
+}
+
+async function isBlacklisted(discordId) {
+  return !!(await db.get('SELECT discord_id FROM giveaway_blacklist WHERE discord_id = ?', [discordId]));
+}
+
+async function getBlacklist() {
+  return db.all('SELECT * FROM giveaway_blacklist ORDER BY added_at DESC');
+}
+
 module.exports = {
   WEEKDAY_NAMES,
   parseDuration,
@@ -116,4 +139,8 @@ module.exports = {
   getActiveRecurringRules,
   setRecurringRuleLastRun,
   setRecurringRuleStatus,
+  addToBlacklist,
+  removeFromBlacklist,
+  isBlacklisted,
+  getBlacklist,
 };

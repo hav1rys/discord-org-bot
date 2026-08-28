@@ -400,6 +400,17 @@ const SCHEMA = {
     indexes: [['giveaway_id']],
   },
 
+  // ЧС розыгрышей — эти люди не могут участвовать ни в одном розыгрыше
+  // (ни сами, ни через ручное добавление), независимо от условия роли.
+  giveaway_blacklist: {
+    columns: {
+      discord_id: 'TEXT PRIMARY KEY',
+      reason: 'TEXT',
+      added_by: 'TEXT',
+      added_at: 'TEXT',
+    },
+  },
+
   // Защита от спама кнопкой "Вошёл(а)" — одно уведомление на один период
   // AFK (afk_since сверяется, чтобы новая выдача AFK снова разрешила отправить)
   afk_return_requests: {
