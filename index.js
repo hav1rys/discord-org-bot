@@ -142,7 +142,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '💾 Резервные копии',
-    commands: ['бэкап_сейчас', 'бэкапы_список', 'резерв_восстановить'],
+    commands: ['бэкап_сейчас', 'бэкапы_список', 'резерв_восстановить', 'резерв_загрузить'],
   },
   {
     title: '🩺 Диагностика и отчётность',
@@ -186,7 +186,7 @@ const COMMAND_DEFAULT_TIERS = {
   журнал_прав: 'admin', команды_человека: 'admin', предпросмотр: 'admin',
   розыгрыш_чс_добавить: 'admin', розыгрыш_чс_убрать: 'admin', розыгрыш_чс_список: 'admin',
   discord_права_настроить: 'owner_account_only', discord_права_синхронизировать: 'owner_account_only',
-  экспорт_бд: 'admin', резерв_восстановить: 'admin',
+  экспорт_бд: 'admin', резерв_восстановить: 'admin', резерв_загрузить: 'admin',
 };
 
 function isSnowflake(value) {
@@ -1583,6 +1583,10 @@ const commands = [
     .setDescription('⚠️ Откатить базу данных к резервной копии (перезаписывает текущие данные)')
     .addStringOption((opt) => opt.setName('файл').setDescription('Какую резервную копию восстановить').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder()
+    .setName('резерв_загрузить')
+    .setDescription('⚠️ Заменить базу данных загруженным .db файлом (перезаписывает текущие данные)')
+    .addAttachmentOption((opt) => opt.setName('файл').setDescription('.db файл базы данных').setRequired(true)),
+  new SlashCommandBuilder()
     .setName('предпросмотр')
     .setDescription('Показать себе, как выглядит текущий текст, прежде чем рассылать всем')
     .addStringOption((opt) =>
@@ -2064,6 +2068,7 @@ async function dmUser(guild, discordId, content) {
 // потерялась, если сайт умрёт") — используется и ежедневным авто-бэкапом,
 // и командой /бэкап_сейчас.
 const searchQueryCache = new Map(); // короткий id -> текст запроса (для кнопок пагинации)
+const pendingDbUploads = new Map(); // короткий id -> { path, uploadedBy } (для подтверждения /резерв_загрузить)
 const SEARCH_PAGE_SIZE = 10;
 
 function buildGlobalSearchQueries(q) {
@@ -3710,6 +3715,56 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
+      if (cmd === 'резерв_загрузить') {
+        if (!(await checkCommandAccess('резерв_загрузить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        const attachment = interaction.options.getAttachment('файл');
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        let buffer;
+        try {
+          const res = await fetch(attachment.url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          buffer = Buffer.from(await res.arrayBuffer());
+        } catch (err) {
+          await interaction.editReply(`⛔ Не удалось скачать файл: ${err.message}`);
+          return;
+        }
+
+        // Простая проверка — действительно ли это файл SQLite (первые 16
+        // байт любой валидной базы SQLite — "SQLite format 3\0")
+        const header = buffer.subarray(0, 16).toString('utf8');
+        if (!header.startsWith('SQLite format 3')) {
+          await interaction.editReply('⛔ Этот файл не похож на базу данных SQLite (нет нужного заголовка). Ничего не менял.');
+          return;
+        }
+
+        const tempDir = path.join(db.dataDir, 'pending_uploads');
+        fs.mkdirSync(tempDir, { recursive: true });
+        const tempId = Math.random().toString(36).slice(2, 10);
+        const tempPath = path.join(tempDir, `${tempId}.db`);
+        fs.writeFileSync(tempPath, buffer);
+        pendingDbUploads.set(tempId, { path: tempPath, uploadedBy: interaction.user.id });
+
+        const uploadEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle('⚠️ Загрузка базы данных')
+          .setDescription(
+            `Вы собираетесь заменить **текущую** базу данных загруженным файлом:\n\`${attachment.name}\` (${(buffer.length / 1024 / 1024).toFixed(2)} МБ).\n\n` +
+            `**Все текущие данные будут потеряны безвозвратно.** Перед заменой бот автоматически сделает резервную копию текущей базы — на случай, если загруженный файл окажется не тем.\n\n` +
+            `После подтверждения бот нужно будет **вручную перезапустить** (Restart на Bothost), чтобы изменения точно применились.`,
+          );
+        await interaction.editReply({
+          embeds: [uploadEmbed],
+          components: [row(
+            new ButtonBuilder().setCustomId(`upload_db_confirm:${tempId}`).setLabel('⚠️ Да, заменить').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId(`upload_db_cancel:${tempId}`).setLabel('Отмена').setStyle(ButtonStyle.Secondary),
+          )],
+        });
+        return;
+      }
+
       if (cmd === 'аудит_экспорт') {
         if (!(await checkCommandAccess('аудит_экспорт', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
@@ -4993,6 +5048,46 @@ client.on('interactionCreate', async (interaction) => {
 
         await dmUser(guild, discordId, `✅ AFK снят по паспорту № ${staticValue} (${passport.name}). С возвращением!`);
         return safeReply(interaction, `AFK снят: ${passport.name} (№ ${staticValue}).`);
+      }
+
+      if (id.startsWith('upload_db_confirm:')) {
+        if (!(await checkCommandAccess('резерв_загрузить', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const tempId = id.split(':')[1];
+        const pending = pendingDbUploads.get(tempId);
+        if (!pending) {
+          return safeReply(interaction, '⛔ Эта загрузка устарела или уже обработана — выполните `/резерв_загрузить` заново.');
+        }
+        pendingDbUploads.delete(tempId);
+
+        await interaction.update({ content: '⏳ Делаю резервную копию текущей базы и заменяю...', embeds: [], components: [] });
+        try {
+          const backupPath = backup.backupNow();
+          if (backupPath) {
+            await uploadBackupFile(backupPath, `перед загрузкой новой базы, инициатор ${interaction.user.tag}`);
+          }
+          fs.copyFileSync(pending.path, db.dbPath);
+          fs.unlinkSync(pending.path);
+          await logAudit(guild, interaction.user, '⚠️ База данных заменена загруженным файлом', [
+            { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Примечание', value: backupPath ? 'Резервная копия прежней базы сделана и отправлена в канал бэкапов. Требуется перезапуск бота.' : '⚠️ Не удалось сделать резервную копию перед заменой! Требуется перезапуск бота.', inline: false },
+          ]);
+          await interaction.editReply('✅ База данных заменена загруженным файлом.\n\n⚠️ **Перезапустите бота вручную (Restart на Bothost) прямо сейчас**, чтобы изменения точно применились.');
+        } catch (err) {
+          await interaction.editReply(`⛔ Не удалось заменить базу: ${err.message}`);
+        }
+        return;
+      }
+
+      if (id.startsWith('upload_db_cancel:')) {
+        const tempId = id.split(':')[1];
+        const pending = pendingDbUploads.get(tempId);
+        if (pending) {
+          try { fs.unlinkSync(pending.path); } catch (_) {}
+          pendingDbUploads.delete(tempId);
+        }
+        return interaction.update({ content: '❌ Загрузка отменена.', embeds: [], components: [] });
       }
 
       if (id.startsWith('restore_confirm:')) {
