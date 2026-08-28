@@ -46,6 +46,7 @@ const history = require('./history');
 const { buildCsv } = require('./csv');
 const giveaways = require('./giveaways');
 const configStore = require('./config_store');
+const commandPermSync = require('./command_permissions_sync');
 const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
@@ -136,7 +137,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🛠️ Настройки бота',
-    commands: ['настройка_изменить', 'настройка_показать', 'настройка_переключить'],
+    commands: ['настройка_изменить', 'настройка_показать', 'настройка_переключить', 'discord_права_настроить', 'discord_права_синхронизировать'],
   },
   {
     title: '💾 Резервные копии',
@@ -160,6 +161,7 @@ const TIER_INFO = {
   owner: { label: 'Владелец и выше', check: (m) => perms.isOwnerTier(m) },
   deputy: { label: 'Зам. Владелец и выше', check: (m) => perms.isDeputyTier(m) },
   hr: { label: 'HR-Менеджер и выше', check: (m) => perms.isHrTier(m) },
+  owner_account_only: { label: `🔒 Только аккаунт <@${config.OWNER_USER_ID}> (без обхода через роли)`, check: (m) => m.id === config.OWNER_USER_ID },
 };
 
 // Уровень по умолчанию для каждой команды (используется, пока никто не
@@ -182,6 +184,7 @@ const COMMAND_DEFAULT_TIERS = {
   сверка_ролей: 'hr', поиск_везде: 'hr', отпуск_статистика: 'hr', повышения_история: 'hr',
   журнал_прав: 'admin', команды_человека: 'admin', предпросмотр: 'admin',
   розыгрыш_чс_добавить: 'admin', розыгрыш_чс_убрать: 'admin', розыгрыш_чс_список: 'admin',
+  discord_права_настроить: 'owner_account_only', discord_права_синхронизировать: 'owner_account_only',
   экспорт_бд: 'admin', резерв_восстановить: 'admin',
 };
 
@@ -214,6 +217,71 @@ async function checkCommandAccess(commandName, member) {
   }
   const info = TIER_INFO[tier] || TIER_INFO.admin;
   return info.check(member);
+}
+
+// Переводит уровень команды (tier) в списки role_id/user_id, которым нужно
+// разрешить видимость в самом Discord — используется только для
+// синхронизации с нативной системой прав Discord (см. /discord_права_*).
+// Уровни "и выше" разворачиваются в конкретные роли (owner → ещё и все
+// роли выше по иерархии не нужны, у нас "и выше" уже означает "этот и
+// более privileged" — Владелец/Зам./HR тут не вложены друг в друга по
+// ролям Discord, поэтому перечисляем явно под каждый уровень).
+function resolveTierToDiscordPermissions(tier) {
+  if (tier === 'owner_account_only') {
+    return { roleIds: [], userIds: [config.OWNER_USER_ID].filter(Boolean) };
+  }
+
+  const roleIds = new Set([config.ROLE_PLUS, config.ROLE_ADMIN]);
+  const userIds = new Set([config.OWNER_USER_ID]);
+
+  if (isSnowflake(tier)) {
+    userIds.add(tier);
+    return { roleIds: [...roleIds].filter(Boolean), userIds: [...userIds].filter(Boolean) };
+  }
+
+  if (tier === 'owner' || tier === 'deputy' || tier === 'hr') roleIds.add(config.ROLE_OWNER);
+  if (tier === 'deputy' || tier === 'hr') roleIds.add(config.ROLE_DEPUTY);
+  if (tier === 'hr') roleIds.add(config.ROLE_HR);
+
+  return { roleIds: [...roleIds].filter(Boolean), userIds: [...userIds].filter(Boolean) };
+}
+
+// Синхронизирует видимость ОДНОЙ команды в Discord под её текущий
+// (возможно, только что изменённый) уровень доступа. Тихо ничего не
+// делает, если OAuth ещё не настроен — /права_команд продолжает работать
+// как обычно (проверка внутри бота), просто без нативного скрытия.
+async function syncOneCommandPermissions(guild, commandName) {
+  if (!(await commandPermSync.isAuthorized())) return;
+  try {
+    const discordCommands = await guild.commands.fetch();
+    const discordCommand = discordCommands.find((c) => c.name === commandName);
+    if (!discordCommand) return;
+    const tier = await getCommandTier(commandName);
+    const { roleIds, userIds } = resolveTierToDiscordPermissions(tier);
+    await commandPermSync.setCommandPermissions(guild.id, client.application.id, discordCommand.id, roleIds, userIds);
+  } catch (err) {
+    console.error(`Не удалось синхронизировать видимость команды /${commandName} с Discord:`, err.message);
+  }
+}
+
+// Полная пересинхронизация всех команд разом — для первой настройки и
+// команды /discord_права_синхронизировать.
+async function syncAllCommandPermissions(guild) {
+  const discordCommands = await guild.commands.fetch();
+  const result = { ok: 0, failed: [] };
+  for (const commandName of Object.keys(COMMAND_DEFAULT_TIERS)) {
+    const discordCommand = discordCommands.find((c) => c.name === commandName);
+    if (!discordCommand) continue;
+    const tier = await getCommandTier(commandName);
+    const { roleIds, userIds } = resolveTierToDiscordPermissions(tier);
+    try {
+      await commandPermSync.setCommandPermissions(guild.id, client.application.id, discordCommand.id, roleIds, userIds);
+      result.ok++;
+    } catch (err) {
+      result.failed.push(`/${commandName}: ${err.message}`);
+    }
+  }
+  return result;
 }
 
 async function getCurrentText(key, fallback) {
@@ -1405,6 +1473,12 @@ const commands = [
     .setName('розыгрыш_чс_список')
     .setDescription('Список ЧС розыгрышей'),
   new SlashCommandBuilder()
+    .setName('discord_права_настроить')
+    .setDescription('Одноразовая настройка: чтобы недоступные команды пропадали из списка / у людей в Discord'),
+  new SlashCommandBuilder()
+    .setName('discord_права_синхронизировать')
+    .setDescription('Заново применить видимость всех команд в Discord (после массовых изменений прав)'),
+  new SlashCommandBuilder()
     .setName('розыгрыш_завершить')
     .setDescription('Досрочно завершить розыгрыш и выбрать победителей')
     .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш завершить').setRequired(true).setAutocomplete(true)),
@@ -1527,6 +1601,15 @@ async function registerCommands() {
     console.warn('CLIENT_ID не задан — слэш-команды не будут зарегистрированы.');
     return;
   }
+
+  // Если синхронизация видимости команд с Discord настроена (см.
+  // /discord_права_настроить) — прячем команды по умолчанию (видны только
+  // тем, кому явно разрешено через per-command overwrite). Пока не
+  // настроено — оставляем как раньше (видны всем), чтобы ничего не
+  // сломать до завершения одноразовой настройки.
+  const isPermSyncSetUp = await commandPermSync.isAuthorized().catch(() => false);
+  const payload = isPermSyncSetUp ? commands.map((c) => ({ ...c, default_member_permissions: '0' })) : commands;
+
   if (guildId) {
     // Если раньше (до того, как появился GUILD_ID) команды успели
     // зарегистрироваться ГЛОБАЛЬНО — они годами висят рядом с серверными
@@ -1538,9 +1621,9 @@ async function registerCommands() {
     } catch (err) {
       console.error('Не удалось очистить старые глобальные команды:', err.message);
     }
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: payload });
   } else {
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
+    await rest.put(Routes.applicationCommands(clientId), { body: payload });
   }
 }
 
@@ -3185,6 +3268,50 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (cmd === 'discord_права_настроить') {
+        if (!(await checkCommandAccess('discord_права_настроить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        const envError = commandPermSync.missingEnvMessage();
+        if (envError) {
+          return interaction.reply({ content: `⛔ ${envError}`, flags: MessageFlags.Ephemeral });
+        }
+
+        const url = commandPermSync.buildAuthorizeUrl();
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('🔗 Настройка видимости команд в Discord')
+          .setDescription(
+            `1. Откройте эту ссылку и авторизуйтесь: ${url}\n\n` +
+            `2. После подтверждения Discord перенаправит на страницу, которая может показать ошибку "не удалось открыть" — это нормально, нужная часть уже в адресной строке браузера.\n\n` +
+            `3. Скопируйте из адресной строки значение после \`code=\` (до символа \`&\`, если он есть).\n\n` +
+            `4. Нажмите кнопку ниже и вставьте код.`,
+          );
+        return interaction.reply({
+          embeds: [embed],
+          components: [row(new ButtonBuilder().setCustomId('oauth_enter_code').setLabel('Ввести код').setStyle(ButtonStyle.Primary))],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+
+      if (cmd === 'discord_права_синхронизировать') {
+        if (!(await checkCommandAccess('discord_права_синхронизировать', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        if (!(await commandPermSync.isAuthorized())) {
+          return interaction.reply({ content: '⛔ Сначала выполните `/discord_права_настроить`.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const result = await syncAllCommandPermissions(guild);
+        await logAudit(guild, interaction.user, 'Видимость команд синхронизирована с Discord', `Успешно: ${result.ok}${result.failed.length > 0 ? `. Ошибок: ${result.failed.length}` : ''}`);
+        let msg = `✅ Синхронизировано команд: ${result.ok}.`;
+        if (result.failed.length > 0) {
+          msg += `\n\n⚠️ Не удалось (${result.failed.length}):\n${result.failed.slice(0, 10).join('\n')}`;
+        }
+        await interaction.editReply(msg.slice(0, 2000));
+        return;
+      }
+
       if (cmd === 'розыгрыш_повтор_создать') {
         if (!(await checkCommandAccess('розыгрыш_повтор_создать', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
@@ -3511,10 +3638,23 @@ client.on('interactionCreate', async (interaction) => {
         }
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const descByName = new Map(commands.map((c) => [c.name, c.description]));
-        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📖 Все команды бота');
+        const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('📖 Доступные вам команды');
+        let totalShown = 0;
         for (const cat of COMMAND_CATEGORIES) {
-          const lines = cat.commands.map((name) => `\`/${name}\` — ${descByName.get(name) || '—'}`);
+          const allowedNames = [];
+          for (const name of cat.commands) {
+            if (await checkCommandAccess(name, interaction.member)) {
+              allowedNames.push(name);
+            }
+          }
+          if (allowedNames.length === 0) continue; // категория вся недоступна — не показываем пустой заголовок
+          totalShown += allowedNames.length;
+          const lines = allowedNames.map((name) => `\`/${name}\` — ${descByName.get(name) || '—'}`);
           embed.addFields({ name: cat.title, value: lines.join('\n').slice(0, 1024) });
+        }
+        if (totalShown === 0) {
+          await interaction.editReply('Вам не доступна ни одна команда.');
+          return;
         }
         await interaction.editReply({ embeds: [embed] });
         return;
@@ -3528,7 +3668,7 @@ client.on('interactionCreate', async (interaction) => {
         const overrides = await db.all('SELECT command_name, tier FROM command_permission_overrides');
         const overrideMap = new Map(overrides.map((o) => [o.command_name, o.tier]));
 
-        const grouped = { admin: [], owner: [], deputy: [], hr: [], specific: [] };
+        const grouped = { admin: [], owner: [], deputy: [], hr: [], owner_account_only: [], specific: [] };
         for (const [name, defaultTier] of Object.entries(COMMAND_DEFAULT_TIERS)) {
           const effectiveTier = overrideMap.has(name) ? overrideMap.get(name) : defaultTier;
           const mark = overrideMap.has(name) ? ' *' : '';
@@ -4733,6 +4873,15 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (id === 'oauth_enter_code') {
+        if (!(await checkCommandAccess('discord_права_настроить', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        const modal = new ModalBuilder().setCustomId('modal_oauth_code').setTitle('Код авторизации Discord');
+        modal.addComponents(row(txt(null, 'code', 'Код из адресной строки (после code=)')));
+        return interaction.showModal(modal);
+      }
+
       if (id === 'perm_edit_start') {
         if (!(await checkCommandAccess('права_команд', interaction.member))) {
           return safeReply(interaction, '⛔ У вас нет прав.');
@@ -5080,6 +5229,7 @@ client.on('interactionCreate', async (interaction) => {
           await db.run('DELETE FROM command_permission_overrides WHERE command_name = ?', [commandName]);
           const defaultTier = COMMAND_DEFAULT_TIERS[commandName];
           await logAudit(guild, interaction.user, 'Право команды сброшено', `/${commandName} → ${tierLabel(defaultTier)} (по умолчанию)`);
+          await syncOneCommandPermissions(guild, commandName);
           return safeReply(interaction, `Готово. \`/${commandName}\` сброшена на уровень по умолчанию: **${tierLabel(defaultTier)}**.`);
         }
 
@@ -5098,6 +5248,7 @@ client.on('interactionCreate', async (interaction) => {
           [commandName, chosen, interaction.user.id, new Date().toISOString()],
         );
         await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → ${tierLabel(chosen)}`);
+        await syncOneCommandPermissions(guild, commandName);
         return safeReply(interaction, `Готово. \`/${commandName}\` теперь требует: **${tierLabel(chosen)}**\n\n(применилось сразу, без перезапуска)`);
       }
 
@@ -5114,6 +5265,7 @@ client.on('interactionCreate', async (interaction) => {
           [commandName, chosenUserId, interaction.user.id, new Date().toISOString()],
         );
         await logAudit(guild, interaction.user, 'Право команды изменено', `/${commandName} → только <@${chosenUserId}>`);
+        await syncOneCommandPermissions(guild, commandName);
         return safeReply(interaction, `Готово. \`/${commandName}\` теперь доступна только <@${chosenUserId}> (плюс Владелец/Admin по умолчанию).\n\n(применилось сразу, без перезапуска)`);
       }
 
@@ -5901,6 +6053,36 @@ client.on('interactionCreate', async (interaction) => {
         await faqDisplay.safeUpdateFaqChannel(guild, entry.category);
         await logAudit(guild, interaction.user, 'Гайд FAQ изменён', `[${entry.category}] «${title}»`);
         return safeReply(interaction, 'Гайд обновлён.');
+      }
+
+      if (id === 'modal_oauth_code') {
+        if (!(await checkCommandAccess('discord_права_настроить', interaction.member))) {
+          return safeReply(interaction, '⛔ У вас нет прав.');
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        let code = get('code').trim();
+        // На случай, если вставили весь URL целиком, а не только код
+        const codeMatch = code.match(/[?&]code=([^&\s]+)/);
+        if (codeMatch) code = codeMatch[1];
+
+        try {
+          await commandPermSync.exchangeCode(code, interaction.user.id);
+        } catch (err) {
+          await interaction.editReply(`⛔ Не удалось обменять код: ${err.message}`);
+          return;
+        }
+
+        await logAudit(guild, interaction.user, 'Настроена синхронизация видимости команд с Discord', 'Авторизация пройдена, запускаю первичную синхронизацию.');
+        await interaction.editReply('✅ Авторизация прошла успешно. Применяю видимость ко всем командам, это может занять минуту...');
+
+        const result = await syncAllCommandPermissions(guild);
+        let msg = `✅ Готово. Синхронизировано команд: ${result.ok}.`;
+        if (result.failed.length > 0) {
+          msg += `\n\n⚠️ Не удалось (${result.failed.length}):\n${result.failed.slice(0, 10).join('\n')}`;
+        }
+        msg += '\n\nТеперь при изменении прав через `/права_команд` видимость в Discord будет обновляться автоматически. Если когда-нибудь разойдётся — используйте `/discord_права_синхронизировать`.';
+        await interaction.followUp({ content: msg.slice(0, 2000), flags: MessageFlags.Ephemeral });
+        return;
       }
 
       if (id.startsWith('modal_contract_manual:')) {

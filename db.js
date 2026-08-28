@@ -347,6 +347,20 @@ const SCHEMA = {
     },
   },
 
+  // OAuth2-токен пользователя (не токен бота!) для синхронизации видимости
+  // команд в самом Discord — Discord требует именно Bearer-токен
+  // авторизованного человека для правки прав команд, токен бота не подходит.
+  oauth_tokens: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY', // всегда 1 — одна запись на всё приложение
+      access_token: 'TEXT',
+      refresh_token: 'TEXT',
+      expires_at: 'TEXT',
+      authorized_by: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+
   config_overrides: {
     columns: {
       key: 'TEXT PRIMARY KEY',
