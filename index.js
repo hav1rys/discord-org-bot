@@ -283,7 +283,7 @@ async function syncAllCommandPermissions(guild) {
     } catch (err) {
       result.failed.push(`/${commandName}: ${err.message}`);
     }
-    if (i < names.length - 1) await new Promise((resolve) => setTimeout(resolve, 700)); // упреждающая пауза — этот эндпоинт лимитирует строго
+    if (i < names.length - 1) await new Promise((resolve) => setTimeout(resolve, 1200)); // упреждающая пауза — этот эндпоинт лимитирует строго
   }
   return result;
 }

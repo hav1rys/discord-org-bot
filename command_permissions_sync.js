@@ -144,7 +144,7 @@ async function setCommandPermissions(guildId, applicationId, commandId, allowedR
     body: JSON.stringify({ permissions }),
   });
 
-  if (res.status === 429 && attempt <= 3) {
+  if (res.status === 429 && attempt <= 5) {
     let waitSeconds = 3;
     try {
       const data = await res.json();
