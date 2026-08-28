@@ -9233,6 +9233,12 @@ client.on('messageCreate', async (message) => {
 
 client.once('clientReady', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
+
+  // --- Диагностика веб-возможностей хостинга (разовая проверка) ---
+  console.log(`[web-check] PORT: ${process.env.PORT || '(не задан)'}`);
+  const webHints = Object.keys(process.env).filter((k) => /PORT|HOST|DOMAIN|URL|WEB|HTTP|BIND|LISTEN|PUBLIC|PROXY/i.test(k));
+  console.log(`[web-check] Похожие на веб переменные окружения: ${webHints.length ? webHints.join(', ') : '(нет)'}`);
+
   await db.init();
   const overridesCount = await configStore.loadOverrides();
   if (overridesCount > 0) console.log(`Применено переопределений конфига из БД: ${overridesCount}`);
