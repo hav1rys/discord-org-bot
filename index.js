@@ -4322,14 +4322,24 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await contractsDisplay.safeUpdateContractsStats(guild);
+
+        let passportInfo = await db.get('SELECT name, static FROM participants WHERE profile_thread_id = ?', [contract.thread_id]);
+        if (!passportInfo) {
+          passportInfo = await db.get('SELECT name, static FROM extra_passports WHERE profile_thread_id = ?', [contract.thread_id]);
+        }
+        const cardLink = contract.thread_id && contract.review_message_id
+          ? `[Карточка контракта](https://discord.com/channels/${guild.id}/${contract.thread_id}/${contract.review_message_id})`
+          : (contract.message_url ? `[Скриншот](${contract.message_url})` : '—');
+
         await logAudit(
           guild,
           interaction.user,
           `Контракт: ${label}`,
           [
             { name: 'Кто проверил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
-            { name: 'Чей контракт', value: `<@${contract.discord_id}>`, inline: true },
-            { name: 'Ссылка', value: `[Скриншот](${contract.message_url})`, inline: false },
+            { name: 'Чей контракт', value: `<@${contract.discord_id}> | ${passportInfo ? `${passportInfo.name} (№ ${passportInfo.static})` : '—'}`, inline: true },
+            { name: 'Канал', value: contract.thread_id ? `<#${contract.thread_id}>` : '—', inline: true },
+            { name: 'Ссылка', value: cardLink, inline: false },
           ],
         );
 
@@ -5258,11 +5268,21 @@ client.on('interactionCreate', async (interaction) => {
         if (!contract) return safeReply(interaction, 'Запись уже не существует.');
         await contracts.deleteContract(contractId);
         await contractsDisplay.safeUpdateContractsStats(guild);
+
+        let removedPassportInfo = await db.get('SELECT name, static FROM participants WHERE profile_thread_id = ?', [contract.thread_id]);
+        if (!removedPassportInfo) {
+          removedPassportInfo = await db.get('SELECT name, static FROM extra_passports WHERE profile_thread_id = ?', [contract.thread_id]);
+        }
+        const removedCardLink = contract.thread_id && contract.review_message_id
+          ? `[Карточка контракта](https://discord.com/channels/${guild.id}/${contract.thread_id}/${contract.review_message_id})`
+          : (contract.message_url ? `[Скриншот](${contract.message_url})` : '—');
+
         await logAudit(guild, interaction.user, 'Контракт удалён вручную', [
           { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
-          { name: 'Чей контракт', value: `<@${discordId}>`, inline: true },
+          { name: 'Чей контракт', value: `<@${discordId}> | ${removedPassportInfo ? `${removedPassportInfo.name} (№ ${removedPassportInfo.static})` : '—'}`, inline: true },
+          { name: 'Канал', value: contract.thread_id ? `<#${contract.thread_id}>` : '—', inline: true },
           { name: 'Было', value: contract.status, inline: true },
-          { name: 'Ссылка', value: `[Скриншот](${contract.message_url})`, inline: false },
+          { name: 'Ссылка', value: removedCardLink, inline: false },
         ]);
         return safeReply(interaction, 'Запись удалена.');
       }
@@ -6376,10 +6396,12 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         let threadId = null;
+        let passportName = null;
         if (staticValue) {
           const passports = await passportsLib.getAllPassports(discordId);
           const passport = passports.find((p) => p.static === staticValue);
           threadId = passport ? passport.profile_thread_id : null;
+          passportName = passport ? passport.name : null;
         }
 
         await contracts.recordManualContract(discordId, link, submittedAt, status, interaction.user.id, threadId);
@@ -6388,7 +6410,8 @@ client.on('interactionCreate', async (interaction) => {
         const label = status === 'fulfilled' ? '✅ Выполнен' : '❌ Невыполнен';
         await logAudit(guild, interaction.user, 'Контракт добавлен вручную', [
           { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
-          { name: 'Чей контракт', value: `<@${discordId}>${staticValue ? ` (паспорт № ${staticValue})` : ''}`, inline: true },
+          { name: 'Чей контракт', value: `<@${discordId}> | ${passportName ? `${passportName} (№ ${staticValue})` : '—'}`, inline: true },
+          { name: 'Канал', value: threadId ? `<#${threadId}>` : '—', inline: true },
           { name: 'Статус', value: label, inline: true },
           { name: 'Ссылка', value: `[Скриншот](${link})`, inline: false },
         ]);
