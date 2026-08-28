@@ -1903,8 +1903,10 @@ const commands = [
   // настроек интеграций на сервере.
 ].map((c) => c.toJSON());
 
+const BOT_TOKEN = process.env.API_TOKEN || process.env.DISCORD_TOKEN;
+
 async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
   const clientId = process.env.CLIENT_ID;
   const guildId = process.env.GUILD_ID;
   if (!clientId) {
@@ -9234,25 +9236,11 @@ client.on('messageCreate', async (message) => {
 client.once('clientReady', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
 
-  // --- Диагностика веб-возможностей хостинга (разовая проверка) ---
-  console.log(`[web-check] PORT: ${process.env.PORT || '(не задан)'}`);
-  console.log(`[web-check] DOMAIN: ${process.env.DOMAIN || '(не задан)'}`);
-  console.log(`[web-check] BOTHOST_FEATURES: ${process.env.BOTHOST_FEATURES || '(не задан)'}`);
-  if (process.env.WEBHOOK_URL) {
-    let masked = process.env.WEBHOOK_URL;
-    try { masked = new URL(process.env.WEBHOOK_URL).origin + '/…'; } catch (_) {}
-    console.log(`[web-check] WEBHOOK_URL (origin): ${masked}`);
-  }
+  // --- Сайт (вход через Discord) на том же домене/порту ---
   try {
-    const http = require('http');
-    http.createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('Freelance Company bot — web OK\n');
-    }).listen(process.env.PORT || 3000, () => {
-      console.log(`[web-check] HTTP-сервер поднят на порту ${process.env.PORT || 3000}`);
-    });
+    require('./web').start(client);
   } catch (e) {
-    console.error('[web-check] Не удалось поднять HTTP-сервер:', e.message);
+    console.error('[web] Не удалось запустить сайт:', e.message);
   }
 
   await db.init();
@@ -9355,4 +9343,4 @@ client.once('clientReady', async () => {
   }, 60 * 1000);
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(BOT_TOKEN);

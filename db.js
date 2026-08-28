@@ -495,6 +495,18 @@ const SCHEMA = {
     indexes: [['category']],
   },
 
+  // Кто заходил на сайт через Discord OAuth (регистрация = первый вход).
+  web_users: {
+    columns: {
+      discord_id: 'TEXT PRIMARY KEY',
+      username: 'TEXT',
+      avatar: 'TEXT',
+      first_login: 'TEXT',
+      last_login: 'TEXT',
+      login_count: 'INTEGER DEFAULT 0',
+    },
+  },
+
   // История смены НИКА на сервере (не путать с data_change_requests — там
   // заявки на смену Имени Фамилии по паспорту). Пишется из guildMemberUpdate;
   // изменения, сделанные самим ботом (синхронизация эффективной личности),

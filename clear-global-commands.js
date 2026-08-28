@@ -4,7 +4,7 @@
 require('dotenv').config();
 const { REST, Routes } = require('discord.js');
 
-const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+const rest = new REST({ version: '10' }).setToken(process.env.API_TOKEN || process.env.DISCORD_TOKEN);
 
 (async () => {
   if (!process.env.CLIENT_ID) {
