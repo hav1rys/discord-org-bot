@@ -1846,25 +1846,54 @@ async function sendFaqManagePanel(guild) {
   const channel = await guild.channels.fetch(config.CHANNEL_FAQ_MANAGE);
   if (!channel) return;
 
-  const messageId = await db.getSetting('faq_manage_message_id');
-  if (messageId) {
-    try {
-      await channel.messages.fetch(messageId);
-      return; // панель уже есть, повторно не отправляем
-    } catch (_) {
-      // сообщение удалили — отправим новое
-    }
-  }
-
-  const sent = await channel.send({
-    embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('⚙️ Управление гайдами FAQ').setDescription('Добавление/изменение/удаление гайдов для каналов FAQ участников и HR-Менеджеров.')],
+  const payload = {
+    embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('⚙️ Управление гайдами FAQ').setDescription('Добавление / изменение / удаление / порядок гайдов для каналов FAQ (общий, участники, HR).')],
     components: [row(
       new ButtonBuilder().setCustomId('faq_add').setLabel('➕ Добавить гайд').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('faq_edit').setLabel('✏️ Изменить гайд').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('faq_delete').setLabel('➖ Удалить гайд').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('faq_reorder').setLabel('↕️ Порядок гайдов').setStyle(ButtonStyle.Secondary),
     )],
-  });
+  };
+
+  const messageId = await db.getSetting('faq_manage_message_id');
+  if (messageId) {
+    try {
+      const msg = await channel.messages.fetch(messageId);
+      await msg.edit(payload);
+      return;
+    } catch (_) {
+      // сообщение удалили — отправим новое ниже
+    }
+  }
+  const sent = await channel.send(payload);
   await db.setSetting('faq_manage_message_id', sent.id);
+}
+
+// Панель изменения порядка гайдов одной категории (эфемерная, для кнопки «↕️ Порядок»)
+async function faqReorderPanel(category, focusId) {
+  const labels = { member: 'участники', hr: 'HR', public: 'общий' };
+  const entries = await faq.listEntries(category);
+  const lines = entries.map((e, i) => {
+    const focused = String(e.id) === String(focusId);
+    return `${i + 1}. ${focused ? '**' : ''}${e.title}${focused ? '** ◄' : ''}`;
+  });
+  const comps = [];
+  if (focusId && entries.some((e) => String(e.id) === String(focusId))) {
+    comps.push(row(
+      new ButtonBuilder().setCustomId(`faq_move:${category}:${focusId}:up`).setLabel('▲ Выше').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`faq_move:${category}:${focusId}:down`).setLabel('▼ Ниже').setStyle(ButtonStyle.Primary),
+    ));
+  }
+  if (entries.length > 0) {
+    comps.push(row(
+      new StringSelectMenuBuilder()
+        .setCustomId(`select_faq_reorder:${category}`)
+        .setPlaceholder('Выбрать гайд для перемещения')
+        .addOptions(entries.slice(0, 25).map((e) => new StringSelectMenuOptionBuilder().setLabel(e.title.slice(0, 100)).setValue(String(e.id)))),
+    ));
+  }
+  return { content: `**Порядок гайдов — ${labels[category] || category}** (сверху вниз):\n\n${lines.join('\n') || '_(гайдов нет)_'}`, components: comps };
 }
 
 // Отправляет меню один раз и запоминает его id в settings — при повторном
@@ -2120,14 +2149,6 @@ async function initMenus(guild) {
     await sendOrEditMenu(ticketsChannel, 'tickets_menu_message_id', {
       embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🎫 Поддержка').setDescription('Нажмите кнопку, чтобы открыть приватный тикет — переписку увидите только вы и руководство.')],
       components: [row(new ButtonBuilder().setCustomId('ticket_open').setLabel('🎫 Открыть тикет').setStyle(ButtonStyle.Primary))],
-    });
-  });
-
-  await safeInitStep('канал апелляций ЧС', async () => {
-    const appealChannel = await guild.channels.fetch(config.CHANNEL_APPEAL_MENU);
-    await sendOrEditMenu(appealChannel, 'appeal_menu_message_id', {
-      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('🚫 Апелляция на чёрный список').setDescription('Если вы в чёрном списке организации и считаете это ошибкой — нажмите кнопку. Откроется приватный канал с Владельцем и Зам. Владельца.')],
-      components: [row(new ButtonBuilder().setCustomId('appeal_open').setLabel('📝 Подать апелляцию').setStyle(ButtonStyle.Danger))],
     });
   });
 
@@ -2410,6 +2431,34 @@ function vacationReviewComponents(v) {
     ),
     claimButtonRow('vacation', v),
   ];
+}
+
+function appealReviewEmbed(a, blRows) {
+  const embed = new EmbedBuilder()
+    .setColor(a.status === 'accepted' ? 0x57f287 : a.status === 'rejected' ? 0xed4245 : 0xfee75c)
+    .setTitle(`🚫 Апелляция на ЧС #${a.id}`)
+    .setDescription(a.text ? String(a.text).slice(0, 4000) : '—')
+    .addFields(
+      { name: 'Автор', value: `<@${a.discord_id}> | ${a.discord_tag || a.discord_id}`, inline: false },
+      { name: 'Статус', value: statusLabel(a.status), inline: true },
+    );
+  if (blRows && blRows.length) {
+    embed.addFields({
+      name: 'Записи в ЧС',
+      value: blRows.map((r) => `• № ${r.static || '—'} — ${r.reason || 'без причины'} (${formatDateOnly(new Date(r.created_at))}${r.until ? `, до ${formatDateOnly(new Date(r.until))}` : ''})`).join('\n').slice(0, 1024),
+    });
+  }
+  if (a.reject_reason) embed.addFields({ name: 'Причина отказа', value: a.reject_reason });
+  return embed;
+}
+
+function appealReviewComponents(a) {
+  if (a.status !== 'pending') return [];
+  return [row(
+    new ButtonBuilder().setCustomId(`appeal_accept:${a.id}`).setLabel('✅ Снять из ЧС').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`appeal_reject:${a.id}`).setLabel('❌ Отклонить').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`appeal_block:${a.discord_id}`).setLabel('🔒 Запретить апелляции').setStyle(ButtonStyle.Secondary),
+  )];
 }
 
 async function refreshReviewMessage(channel, messageId, embed, components, content) {
@@ -2886,11 +2935,21 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
         return;
 }
 
-// Поиск по гайдам FAQ. Категории зависят от того, кто ищет: общий + для
-// участников всем, раздел HR — только тем, кто может проверять заявки.
+// Какие разделы FAQ доступны для поиска этому человеку:
+//  public — всем; member — тем, кто в организации (есть ранговая роль) и выше;
+//  hr — HR-Менеджеру и выше.
+function faqSearchableCategories(member) {
+  const cats = ['public'];
+  if (!member) return cats;
+  const inOrg = config.ROLE_IDS.some((r) => member.roles.cache.has(r)) || perms.hasBotAccess(member) || perms.isHrTier(member);
+  if (inOrg) cats.push('member');
+  if (perms.isHrTier(member)) cats.push('hr');
+  return cats;
+}
+
+// Поиск по гайдам FAQ с учётом доступных человеку разделов.
 async function runFaqSearch(member, query) {
-  const cats = ['public', 'member'];
-  if (member && perms.canReview(member)) cats.push('hr');
+  const cats = faqSearchableCategories(member);
   const q = `%${query}%`;
   const placeholders = cats.map(() => '?').join(',');
   const rows = await db.all(
@@ -5494,6 +5553,38 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.showModal(modal);
       }
 
+      if (id === 'faq_reorder') {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        return safeReply(interaction, {
+          content: 'Порядок гайдов какого канала менять?',
+          components: [row(
+            new ButtonBuilder().setCustomId('faq_reorder_cat:member').setLabel('Участники').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('faq_reorder_cat:hr').setLabel('HR-Менеджеры').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('faq_reorder_cat:public').setLabel('Общий (для всех)').setStyle(ButtonStyle.Primary),
+          )],
+        });
+      }
+
+      if (id.startsWith('faq_reorder_cat:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const category = id.split(':')[1];
+        return safeReply(interaction, await faqReorderPanel(category, null));
+      }
+
+      if (id.startsWith('faq_move:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const [, category, entryId, direction] = id.split(':');
+        await faq.moveEntry(entryId, direction === 'up' ? 'up' : 'down');
+        await faqDisplay.safeUpdateFaqChannel(guild, category);
+        await logAudit(guild, interaction.user, 'Порядок гайда FAQ изменён', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Категория', value: category, inline: true },
+          { name: 'Направление', value: direction === 'up' ? 'выше' : 'ниже', inline: true },
+        ]);
+        const panel = await faqReorderPanel(category, entryId);
+        try { return await interaction.update(panel); } catch (_) { return safeReply(interaction, panel); }
+      }
+
       if (id.startsWith('faq_helpful:')) {
         const [, entryId, valStr] = id.split(':');
         const helpful = valStr === '1' ? 1 : 0;
@@ -5623,6 +5714,22 @@ client.on('interactionCreate', async (interaction) => {
         const existing = await db.get('SELECT id FROM participants WHERE discord_id = ?', [interaction.user.id]);
         if (existing) {
           return interaction.showModal(buildPassportRequestModal());
+        }
+
+        // В чёрном списке — вместо отказа предлагаем подать апелляцию
+        const blRows = await db.all('SELECT * FROM blacklist WHERE discord_id = ?', [interaction.user.id]);
+        if (blRows.length > 0) {
+          if (blRows.some((r) => r.appeal_blocked)) {
+            return safeReply(interaction, '⛔ Вы находитесь в чёрном списке организации, и подача апелляции для вас закрыта.');
+          }
+          const openAppeal = await db.get("SELECT * FROM appeals WHERE discord_id = ? AND status = 'pending'", [interaction.user.id]);
+          if (openAppeal) {
+            return safeReply(interaction, '⛔ Вы в чёрном списке. Ваша апелляция уже на рассмотрении — дождитесь ответа.');
+          }
+          return safeReply(interaction, {
+            content: '⛔ Вы находитесь в чёрном списке организации и не можете подать заявку на вступление.\n\nЕсли считаете это ошибкой — подайте апелляцию:',
+            components: [row(new ButtonBuilder().setCustomId('appeal_open').setLabel('📝 Подать апелляцию').setStyle(ButtonStyle.Danger))],
+          });
         }
 
         const lastRejected = await db.get(
@@ -6215,11 +6322,37 @@ client.on('interactionCreate', async (interaction) => {
         const blRows = await db.all('SELECT * FROM blacklist WHERE discord_id = ?', [interaction.user.id]);
         if (blRows.length === 0) return safeReply(interaction, 'Вы не в чёрном списке — апелляция не нужна.');
         if (blRows.some((r) => r.appeal_blocked)) return safeReply(interaction, '⛔ Вам запрещено подавать апелляцию на чёрный список.');
-        const openAppeal = await db.get("SELECT * FROM tickets WHERE opener_id = ? AND category = 'appeal' AND status = 'open'", [interaction.user.id]);
-        if (openAppeal) return safeReply(interaction, `У вас уже открыта апелляция: <#${openAppeal.channel_id}>.`);
+        const openAppeal = await db.get("SELECT * FROM appeals WHERE discord_id = ? AND status = 'pending'", [interaction.user.id]);
+        if (openAppeal) return safeReply(interaction, 'Ваша апелляция уже на рассмотрении — дождитесь ответа.');
         const modal = new ModalBuilder().setCustomId('modal_appeal_open').setTitle('Апелляция на чёрный список');
         modal.addComponents(row(txt(null, 'text', 'Почему вас нужно убрать из ЧС', { paragraph: true, maxLength: 2000 })));
         return interaction.showModal(modal);
+      }
+
+      if (id.startsWith('appeal_accept:')) {
+        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ Решать апелляции может только Владелец/Зам. Владелец.');
+        const appealId = id.split(':')[1];
+        const a = await db.get('SELECT * FROM appeals WHERE id = ?', [appealId]);
+        if (!a || a.status !== 'pending') return safeReply(interaction, 'Апелляция уже обработана.');
+        const removed = await db.run('DELETE FROM blacklist WHERE discord_id = ?', [a.discord_id]);
+        await db.run("UPDATE appeals SET status = 'accepted', resolved_by = ?, resolved_at = ? WHERE id = ?", [interaction.user.id, new Date().toISOString(), appealId]);
+        await safeUpdateBlacklist(guild);
+        await refreshReviewMessage(interaction.channel, a.message_id, appealReviewEmbed({ ...a, status: 'accepted' }, []), [], actionSummary(interaction.user.id, '✅ ЧС снят'));
+        await dmUser(guild, a.discord_id, '✅ Ваша апелляция принята — вы убраны из чёрного списка организации.');
+        await logAudit(guild, interaction.user, 'Апелляция ЧС принята', [
+          { name: 'Кто принял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${a.discord_id}>`, inline: true },
+          { name: 'Удалено записей ЧС', value: String(removed ? removed.changes : 0), inline: true },
+        ]);
+        return safeReply(interaction, 'Апелляция принята, человек убран из ЧС.');
+      }
+
+      if (id.startsWith('appeal_reject:')) {
+        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ Решать апелляции может только Владелец/Зам. Владелец.');
+        const appealId = id.split(':')[1];
+        const a = await db.get('SELECT * FROM appeals WHERE id = ?', [appealId]);
+        if (!a || a.status !== 'pending') return safeReply(interaction, 'Апелляция уже обработана.');
+        return interaction.showModal(buildRejectReasonModal(`modal_appeal_reject:${appealId}`));
       }
 
       if (id.startsWith('appeal_block:')) {
@@ -6227,6 +6360,7 @@ client.on('interactionCreate', async (interaction) => {
         const targetId = id.split(':')[1];
         const res = await db.run('UPDATE blacklist SET appeal_blocked = 1 WHERE discord_id = ?', [targetId]);
         if (!res || res.changes === 0) return safeReply(interaction, 'У этого человека нет записей в ЧС.');
+        await db.run("UPDATE appeals SET status = 'rejected', reject_reason = 'Апелляции запрещены', resolved_by = ?, resolved_at = ? WHERE discord_id = ? AND status = 'pending'", [interaction.user.id, new Date().toISOString(), targetId]);
         await logAudit(guild, interaction.user, 'Апелляции на ЧС запрещены', [
           { name: 'Кто запретил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
           { name: 'Кому', value: `<@${targetId}>`, inline: true },
@@ -6704,6 +6838,13 @@ client.on('interactionCreate', async (interaction) => {
             new ButtonBuilder().setCustomId('faq_delete_cancel').setLabel('❌ Отменить').setStyle(ButtonStyle.Secondary),
           )],
         });
+      }
+
+      if (customId.startsWith('select_faq_reorder:')) {
+        if (!perms.canManageFaq(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав управлять гайдами FAQ.');
+        const category = customId.split(':')[1];
+        const panel = await faqReorderPanel(category, interaction.values[0]);
+        try { return await interaction.update(panel); } catch (_) { return safeReply(interaction, panel); }
       }
 
       if (customId.startsWith('select_rejtpl_edit:')) {
@@ -8115,65 +8256,60 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // Апелляция из ЧС
+      // Апелляция из ЧС — заявка уходит в канал рассмотрения апелляций
       if (id === 'modal_appeal_open') {
         const text = get('text').trim() || '(без текста)';
         const blRows = await db.all('SELECT * FROM blacklist WHERE discord_id = ?', [interaction.user.id]);
         if (blRows.length === 0) return safeReply(interaction, 'Вы не в чёрном списке — апелляция не нужна.');
         if (blRows.some((r) => r.appeal_blocked)) return safeReply(interaction, '⛔ Вам запрещено подавать апелляцию на чёрный список.');
-        const openAppeal = await db.get("SELECT * FROM tickets WHERE opener_id = ? AND category = 'appeal' AND status = 'open'", [interaction.user.id]);
-        if (openAppeal) return safeReply(interaction, `У вас уже открыта апелляция: <#${openAppeal.channel_id}>.`);
+        const openAppeal = await db.get("SELECT * FROM appeals WHERE discord_id = ? AND status = 'pending'", [interaction.user.id]);
+        if (openAppeal) return safeReply(interaction, 'Ваша апелляция уже на рассмотрении — дождитесь ответа.');
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-        const overwrites = [
-          { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: guild.client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.AttachFiles] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.AttachFiles] },
-          { id: config.OWNER_USER_ID, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
-        ];
-        for (const roleId of config.ROLES_BLACKLIST_ALLOWED) {
-          overwrites.push({ id: roleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] });
-        }
+        const insert = await db.run(
+          "INSERT INTO appeals (discord_id, discord_tag, text, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+          [interaction.user.id, interaction.user.tag, text, new Date().toISOString()],
+        );
+        const appealRow = { id: insert.lastID, discord_id: interaction.user.id, discord_tag: interaction.user.tag, text, status: 'pending' };
 
-        let channel;
         try {
-          channel = await guild.channels.create({
-            name: `апелляция-${interaction.user.username}`.toLowerCase().replace(/[^a-zа-яё0-9-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 90) || `appeal-${Date.now()}`,
-            type: ChannelType.GuildText,
-            parent: config.CHANNEL_TICKETS_ACTIVE_CATEGORY,
-            permissionOverwrites: overwrites,
-            topic: `[Апелляция ЧС] ${interaction.user.tag}`.slice(0, 1000),
+          const reviewChannel = await guild.channels.fetch(config.CHANNEL_APPEAL_REVIEW);
+          const sent = await reviewChannel.send({
+            content: `${appealMentionRoles()} — апелляция на ЧС от <@${interaction.user.id}>`,
+            embeds: [appealReviewEmbed(appealRow, blRows)],
+            components: appealReviewComponents(appealRow),
+            ...appealMentionOpts,
           });
+          await db.run('UPDATE appeals SET message_id = ? WHERE id = ?', [sent.id, appealRow.id]);
         } catch (err) {
-          await interaction.editReply(`⛔ Не удалось создать канал апелляции: ${err.message}`);
+          console.error('Не удалось отправить апелляцию в канал рассмотрения:', err.message);
+          await interaction.editReply('⛔ Не удалось отправить апелляцию (проверьте настройку канала). Обратитесь к руководству напрямую.');
           return;
         }
 
-        const result = await db.run(
-          "INSERT INTO tickets (channel_id, opener_id, subject, category, status, created_at) VALUES (?, ?, 'Апелляция ЧС', 'appeal', 'open', ?)",
-          [channel.id, interaction.user.id, new Date().toISOString()],
-        );
-
-        const blLines = blRows.map((r) => `• № ${r.static || '—'} — ${r.reason || 'без причины'} (${formatDateOnly(new Date(r.created_at))}${r.until ? `, до ${formatDateOnly(new Date(r.until))}` : ''})`).join('\n');
-        await channel.send({
-          content: `${appealMentionRoles()} — апелляция от <@${interaction.user.id}>`,
-          embeds: [new EmbedBuilder().setColor(0xed4245).setTitle('🚫 Апелляция на чёрный список').setDescription(text.slice(0, 4000)).addFields(
-            { name: 'Автор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: false },
-            { name: 'Записи в ЧС', value: blLines.slice(0, 1024) || '—', inline: false },
-          )],
-          components: [row(
-            new ButtonBuilder().setCustomId(`ticket_close:${result.lastID}`).setLabel('🔒 Закрыть').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId(`appeal_block:${interaction.user.id}`).setLabel('🔒 Запретить апелляции').setStyle(ButtonStyle.Secondary),
-          )],
-          ...appealMentionOpts,
-        });
-
         await logAudit(guild, interaction.user, 'Подана апелляция на ЧС', [
           { name: 'Автор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
-          { name: 'Канал', value: `<#${channel.id}>`, inline: true },
+          { name: '№ апелляции', value: `#${appealRow.id}`, inline: true },
         ]);
-        await interaction.editReply(`Апелляция создана: <#${channel.id}>. Ответ придёт туда.`);
+        await interaction.editReply('Апелляция отправлена на рассмотрение Владельцу/Зам. Владельцу. Ответ придёт вам в личные сообщения.');
         return;
+      }
+
+      if (id.startsWith('modal_appeal_reject:')) {
+        if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ Решать апелляции может только Владелец/Зам. Владелец.');
+        const appealId = id.split(':')[1];
+        const a = await db.get('SELECT * FROM appeals WHERE id = ?', [appealId]);
+        if (!a || a.status !== 'pending') return safeReply(interaction, 'Апелляция уже обработана.');
+        const reason = get('reason');
+        await db.run("UPDATE appeals SET status = 'rejected', reject_reason = ?, resolved_by = ?, resolved_at = ? WHERE id = ?", [reason, interaction.user.id, new Date().toISOString(), appealId]);
+        await refreshReviewMessage(interaction.channel, a.message_id, appealReviewEmbed({ ...a, status: 'rejected', reject_reason: reason }, null), [], actionSummary(interaction.user.id, '❌ Отклонено', reason));
+        await dmUser(guild, a.discord_id, `❌ Ваша апелляция на чёрный список отклонена. Причина: ${reason}`);
+        await logAudit(guild, interaction.user, 'Апелляция ЧС отклонена', [
+          { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Чья апелляция', value: `<@${a.discord_id}> | № ${appealId}`, inline: true },
+          { name: 'Причина', value: reason, inline: false },
+        ]);
+        return safeReply(interaction, 'Апелляция отклонена.');
       }
     }
   } catch (err) {

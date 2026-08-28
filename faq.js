@@ -46,4 +46,22 @@ async function deleteEntry(id) {
   }
 }
 
-module.exports = { listEntries, getEntry, addEntry, updateEntry, deleteEntry, versionKey };
+// Двигает гайд на одну позицию вверх ('up') или вниз ('down') в пределах
+// своей категории. Позиции при этом нормализуются в 0..n-1. Возвращает
+// категорию перемещённого гайда (или null, если гайд не найден).
+async function moveEntry(id, direction) {
+  const entry = await getEntry(id);
+  if (!entry) return null;
+  const siblings = await db.all('SELECT id FROM faq_entries WHERE category = ? ORDER BY position ASC, id ASC', [entry.category]);
+  for (let i = 0; i < siblings.length; i++) {
+    await db.run('UPDATE faq_entries SET position = ? WHERE id = ?', [i, siblings[i].id]);
+  }
+  const idx = siblings.findIndex((s) => String(s.id) === String(id));
+  const target = direction === 'up' ? idx - 1 : idx + 1;
+  if (idx === -1 || target < 0 || target >= siblings.length) return entry.category;
+  await db.run('UPDATE faq_entries SET position = ? WHERE id = ?', [target, id]);
+  await db.run('UPDATE faq_entries SET position = ? WHERE id = ?', [idx, siblings[target].id]);
+  return entry.category;
+}
+
+module.exports = { listEntries, getEntry, addEntry, updateEntry, deleteEntry, moveEntry, versionKey };

@@ -510,6 +510,24 @@ const SCHEMA = {
     indexes: [['discord_id']],
   },
 
+  // Апелляции на чёрный список — заявка от человека из ЧС, уходит в
+  // CHANNEL_APPEAL_REVIEW, решают Владелец/Зам. Владелец (accept = снять из ЧС).
+  appeals: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      discord_tag: 'TEXT',
+      text: 'TEXT',
+      status: "TEXT DEFAULT 'pending'", // pending | accepted | rejected
+      reject_reason: 'TEXT',
+      message_id: 'TEXT',
+      resolved_by: 'TEXT',
+      resolved_at: 'TEXT',
+      created_at: 'TEXT',
+    },
+    indexes: [['discord_id'], ['status']],
+  },
+
   // Тикеты поддержки — приватный канал на вопрос, при закрытии канал
   // просто уезжает в архивную категорию (без транскрипта).
   tickets: {
