@@ -319,6 +319,10 @@ const CLIENT_SCRIPT = `
   function apply(m){ if(m==='light')d.setAttribute('data-theme','light'); else if(m==='dark')d.setAttribute('data-theme','dark'); else d.removeAttribute('data-theme'); }
   var stored=null; try{stored=localStorage.getItem('fc_theme');}catch(e){}
   apply(stored||'auto');
+  try{
+    var pc=JSON.parse(localStorage.getItem('fc_colors')||'null');
+    if(pc&&typeof pc==='object') for(var k in pc){ if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(pc[k])) d.style.setProperty('--'+k,pc[k]); }
+  }catch(e){}
   window.fcTheme=function(){
     var cur=stored||'auto', next=cur==='auto'?'light':cur==='light'?'dark':'auto';
     stored=next; apply(next);
@@ -712,6 +716,7 @@ async function meBody(client, user) {
         <div class="muted" style="margin-top:6px">Уровень доступа: ${esc(acc.level)}. Роли на сервере: ${roleTags}</div>
       </div>
       <a class="btn" href="/apply">Подать заявку на вступление</a>
+      ${personalThemeCard()}
       ${loginsCard}`;
   }
 
@@ -765,6 +770,7 @@ async function meBody(client, user) {
     </div>
     ${ticketCard}
     ${inviteCard}
+    ${personalThemeCard()}
     ${loginsCard}
     ${memberForms(user, passports, canAppeal)}`;
 }
@@ -1676,25 +1682,30 @@ async function profileBody(client, viewer, acc, targetId) {
     }
     const anyVac = passports.some((pp) => pp.vacation_until);
     const anyAfk = passports.some((pp) => pp.afk_since);
+    const passSel = (lbl) => `<label>${lbl}<select name="static"><option value="">— все паспорта —</option>${passOpts}</select></label>`;
     blocks.push(`<form method="POST" action="/u/vacation" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
-      <h3>Выдать отпуск (все паспорта)</h3>
+      <h3>Выдать отпуск</h3>
+      ${passSel('Кому — паспорт или все')}
       <label>До какого числа (ДД.ММ.ГГГГ или 7d)<input name="deadline" required maxlength="20"></label>
       <label>Причина<input name="reason" maxlength="200"></label>
       <button class="btn sm" type="submit">Выдать</button></form>`);
     if (anyVac) {
       blocks.push(`<form method="POST" action="/u/vacation_revoke" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
         <h3>Снять отпуск</h3>
-        <button class="btn sm" type="submit">Снять со всех паспортов</button></form>`);
+        ${passSel('С кого — паспорт или все')}
+        <button class="btn sm" type="submit">Снять</button></form>`);
     }
     blocks.push(`<form method="POST" action="/u/afk" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
-      <h3>Отметить AFK (все паспорта)</h3>
+      <h3>Отметить AFK</h3>
+      ${passSel('Кому — паспорт или все')}
       <label>Дата начала (ДД.ММ.ГГГГ)<input name="date" required maxlength="20"></label>
       <label>Причина<input name="reason" maxlength="200"></label>
       <button class="btn sm" type="submit">Отметить</button></form>`);
     if (anyAfk) {
       blocks.push(`<form method="POST" action="/u/afk_clear" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
         <h3>Снять AFK</h3>
-        <button class="btn sm" type="submit">Снять со всех паспортов</button></form>`);
+        ${passSel('С кого — паспорт или все')}
+        <button class="btn sm" type="submit">Снять</button></form>`);
     }
     blocks.push(`<form method="POST" action="/u/contract" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
       <h3>Записать контракт</h3>
@@ -1714,7 +1725,7 @@ async function profileBody(client, viewer, acc, targetId) {
   const contractHistCard = `<div class="card"><h2>История контрактов (${contractHist.length})</h2>
     <div class="tablewrap"><table><tr><th>Когда</th><th>Итог</th><th>Пруф</th></tr>${chRows || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
   const aboutCard = p.about ? `<div class="card"><h2>Обо мне</h2>${mdToHtml(String(p.about).slice(0, 1000))}</div>` : '';
-  const promoRows = promos.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.action)}</td><td>${esc((r.details || '').slice(0, 200))}</td></tr>`).join('');
+  const promoRows = promos.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.action)}</td><td>${renderMentions(client, esc((r.details || '').slice(0, 200)))}</td></tr>`).join('');
   const invitedByLine = invitedByRow
     ? `<div class="card"><h2>Пригласил</h2>${personLink(client, invitedByRow.inviter_discord_id)} · ${fmt(invitedByRow.joined_at)}</div>`
     : '';
@@ -1726,7 +1737,7 @@ async function profileBody(client, viewer, acc, targetId) {
     const siteActs = await db.all("SELECT action, details, at FROM audit_log WHERE actor_id = ? ORDER BY id DESC LIMIT 15", [targetId]).catch(() => []);
     const siteCard = `<div class="card"><h2>Действия на сайте (последние 15)</h2>
       <div class="tablewrap"><table><tr><th>Когда</th><th>Действие</th><th>Детали</th></tr>
-        ${siteActs.map((a) => `<tr><td class="muted">${fmt(a.at)}</td><td>${esc(a.action || '')}</td><td class="mini">${esc((a.details || '').slice(0, 160))}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
+        ${siteActs.map((a) => `<tr><td class="muted">${fmt(a.at)}</td><td>${esc(a.action || '')}</td><td class="mini">${renderMentions(client, esc((a.details || '').slice(0, 160)))}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
       </table></div>
       <a class="mini" href="/audit?who=${esc(targetId)}">весь аудит по этому человеку →</a></div>`;
     extraStaffCards = cmdCard + siteCard;
@@ -1938,10 +1949,46 @@ async function dashboardBody(client) {
     <p class="mini">Чем ярче — тем больше выполненных контрактов в этот час.</p></div>`;
 
   return `
-  <div class="bar" style="justify-content:space-between">
+  <div class="bar" style="justify-content:space-between;flex-wrap:wrap">
     <h1 style="margin:0">Дашборд</h1>
-    <button class="btn ghost sm" type="button" onclick="window.print()">🖨️ Печать / PDF</button>
+    <span class="bar" style="margin:0">
+      <a class="btn ghost sm" href="/export/dashboard.html">💾 Скачать (HTML)</a>
+      <button class="btn ghost sm" type="button" onclick="fcDashPng(this)">🖼️ Картинкой (PNG)</button>
+      <button class="btn ghost sm" type="button" onclick="window.print()">🖨️ Печать / PDF</button>
+    </span>
   </div>
+  <script>
+  function fcDashPng(btn){
+    var node=document.querySelector('.wrap'); if(!node)return;
+    var old=btn.textContent; btn.textContent='рендерю…'; btn.disabled=true;
+    try{
+      var rect=node.getBoundingClientRect(), w=Math.ceil(rect.width), h=Math.ceil(node.scrollHeight);
+      var css=''; for(var i=0;i<document.styleSheets.length;i++){try{var rl=document.styleSheets[i].cssRules;for(var j=0;j<rl.length;j++)css+=rl[j].cssText+'\\n';}catch(e){}}
+      var clone=node.cloneNode(true);
+      clone.querySelectorAll('button,form,.tabs,script').forEach(function(e){e.remove()});
+      var bg=getComputedStyle(document.body).backgroundColor||'#0f1013';
+      clone.setAttribute('xmlns','http://www.w3.org/1999/xhtml');
+      clone.style.width=w+'px'; clone.style.background=bg; clone.style.padding='8px';
+      var html=new XMLSerializer().serializeToString(clone);
+      var cssX=css.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+      var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'"><style>'+cssX+'</style><foreignObject width="100%" height="100%">'+html+'</foreignObject></svg>';
+      var img=new Image();
+      img.onload=function(){
+        var c=document.createElement('canvas'); c.width=w*2; c.height=h*2;
+        var ctx=c.getContext('2d'); ctx.scale(2,2); ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
+        ctx.drawImage(img,0,0);
+        c.toBlob(function(b){
+          if(!b){btn.textContent='не вышло — используйте HTML';setTimeout(function(){btn.textContent=old;btn.disabled=false},2500);return;}
+          var a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='dashboard-'+new Date().toISOString().slice(0,10)+'.png'; a.click();
+          setTimeout(function(){URL.revokeObjectURL(a.href)},4000);
+          btn.textContent=old; btn.disabled=false;
+        },'image/png');
+      };
+      img.onerror=function(){btn.textContent='не вышло — используйте HTML';setTimeout(function(){btn.textContent=old;btn.disabled=false},2500);};
+      img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+    }catch(e){btn.textContent='не вышло — используйте HTML';setTimeout(function(){btn.textContent=old;btn.disabled=false},2500);}
+  }
+  </script>
   <div class="card"><h2>Воронка найма за 30 дней</h2>
     <div class="grid">${tile(total, 'заявок')}${tile(accepted, 'принято')}${tile(rejected, 'отказано')}${tile(pending, 'в очереди')}${tile(stayed, 'досидело 3+ дня')}</div>
     ${barChart([{ label: 'подано', value: total }, { label: 'принято', value: accepted }, { label: 'отказ', value: rejected }, { label: '3+ дня', value: stayed }])}
@@ -2117,7 +2164,7 @@ async function auditBody(client, sp, pageNum, user) {
   const totalRow = await db.get(`SELECT COUNT(*) c FROM audit_log ${where}`, par);
   const total = totalRow ? totalRow.c : 0;
   const rows = await db.all(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...par, PAGE_SIZE, pageNum * PAGE_SIZE]);
-  const trs = rows.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.actor_tag || r.actor_id || '—')}</td><td>${esc(r.action || '')}</td><td>${esc((r.details || '').slice(0, 300))}</td></tr>`).join('');
+  const trs = rows.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.actor_tag || r.actor_id || '—')}</td><td>${esc(r.action || '')}</td><td>${renderMentions(client, esc((r.details || '').slice(0, 300)))}</td></tr>`).join('');
   const qkeep = qs({ who, act, days });
   const undoable = await db.all("SELECT * FROM undo_actions WHERE done_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 10", [new Date().toISOString()]).catch(() => []);
   const undoCard = undoable.length ? `<div class="card"><h2>Можно отменить (5 мин)</h2>
@@ -2444,12 +2491,68 @@ const THEME_LABELS = {
   bg: 'Фон страницы', panel: 'Карточки', panel2: 'Панели и поля', line: 'Границы', text: 'Основной текст',
   muted: 'Серый текст', accent: 'Акцент (кнопки)', accent2: 'Акцент 2 / ссылки', ok: 'Успех', bad: 'Ошибка', warn: 'Предупреждение',
 };
+const THEME_PRESETS = {
+  default: {},
+  amoled: { bg: '#000000', panel: '#0a0a0a', panel2: '#141414', line: '#242424', text: '#f0f0f0', muted: '#8a8a8a', accent: '#4f8cff', accent2: '#79a9ff' },
+  ocean: { bg: '#0b1622', panel: '#122232', panel2: '#18314a', line: '#20415f', text: '#e6f0f7', muted: '#8fa9bd', accent: '#1fb6c9', accent2: '#5fd3e2' },
+  forest: { bg: '#0e1712', panel: '#15211a', panel2: '#1d2f24', line: '#2a3f31', text: '#e8f2ea', muted: '#94ab9c', accent: '#3fae6b', accent2: '#71cf97' },
+  plum: { bg: '#160f1a', panel: '#1e1626', panel2: '#2a1f36', line: '#3a2c49', text: '#f1e9f5', muted: '#a996b3', accent: '#9b59d0', accent2: '#bd8ae0' },
+};
+const PRESET_LABELS = { default: 'стандарт', amoled: 'AMOLED', ocean: 'океан', forest: 'лес', plum: 'слива' };
+// Какой пресет соответствует текущим цветам сайта (или null — «свои цвета»).
+function activePreset(colors) {
+  const cur = { ...THEME_DEFAULTS, ...(colors || {}) };
+  for (const [name, pr] of Object.entries(THEME_PRESETS)) {
+    const eff = { ...THEME_DEFAULTS, ...pr };
+    if (Object.keys(THEME_DEFAULTS).every((k) => (cur[k] || '').toLowerCase() === (eff[k] || '').toLowerCase())) return name;
+  }
+  return null;
+}
+
+// Персональная тема (только для этого браузера, без сервера) — блок для /me.
+function personalThemeCard() {
+  const rows = Object.keys(THEME_DEFAULTS).map((k) => `<label class="chk" style="justify-content:space-between">
+    <span>${esc(THEME_LABELS[k])}</span>
+    <input type="color" data-k="${k}" value="${THEME_DEFAULTS[k]}">
+  </label>`).join('');
+  return `<div class="card"><h2>Свой вид сайта</h2>
+    <p class="mini">Цвета меняются <b>только в этом браузере</b> и не видны другим. Общий вид сайта настраивает havirys.</p>
+    <div class="form" id="mytheme">${rows}
+      <div class="bar" style="margin-top:12px">
+        <button class="btn sm" type="button" onclick="fcMyThemeSave()">Применить</button>
+        <button class="btn ghost sm" type="button" onclick="fcMyThemeReset()">Сбросить</button>
+      </div>
+    </div>
+    <script>
+    (function(){
+      var box=document.getElementById('mytheme'); if(!box)return;
+      var cur={}; try{cur=JSON.parse(localStorage.getItem('fc_colors')||'{}')}catch(e){}
+      var cs=getComputedStyle(document.documentElement);
+      box.querySelectorAll('input[data-k]').forEach(function(inp){
+        var k=inp.dataset.k;
+        var val=cur[k]|| (cs.getPropertyValue('--'+k)||'').trim() || inp.value;
+        if(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(val)) inp.value=val.length===4?('#'+val[1]+val[1]+val[2]+val[2]+val[3]+val[3]):val;
+      });
+      window.fcMyThemeSave=function(){
+        var o={}; box.querySelectorAll('input[data-k]').forEach(function(inp){o[inp.dataset.k]=inp.value;});
+        try{localStorage.setItem('fc_colors',JSON.stringify(o));}catch(e){}
+        for(var k in o) document.documentElement.style.setProperty('--'+k,o[k]);
+      };
+      window.fcMyThemeReset=function(){
+        try{localStorage.removeItem('fc_colors');}catch(e){}
+        location.reload();
+      };
+    })();
+    </script>
+  </div>`;
+}
 
 async function panelAdmin(client, user) {
   await loadSite(true);
   const g = guildOf(client);
   const v = (k, d) => esc(SITE[k] != null && SITE[k] !== '' ? SITE[k] : (d || ''));
 
+  const curPreset = activePreset(SITE.color);
   const colorInputs = Object.keys(THEME_DEFAULTS).map((k) => {
     const cur = (SITE.color && SITE.color[k]) || THEME_DEFAULTS[k];
     return `<label>${esc(THEME_LABELS[k])}
@@ -2501,9 +2604,12 @@ async function panelAdmin(client, user) {
       </div>
     </form>
     <div class="bar" style="margin-top:8px"><span class="mini">Пресеты:</span>
-      ${['default', 'amoled', 'ocean', 'forest', 'plum'].map((pn) => `<form method="POST" action="/admin/theme_preset" style="display:inline">${csrfField(user)}<input type="hidden" name="preset" value="${pn}"><button class="btn ghost sm" type="submit">${pn === 'default' ? 'стандарт' : pn === 'amoled' ? 'AMOLED' : pn === 'ocean' ? 'океан' : pn === 'forest' ? 'лес' : 'слива'}</button></form>`).join('')}
+      ${Object.keys(THEME_PRESETS).map((pn) => {
+        const on = curPreset === pn;
+        return `<form method="POST" action="/admin/theme_preset" style="display:inline">${csrfField(user)}<input type="hidden" name="preset" value="${pn}"><button class="btn ${on ? '' : 'ghost '}sm" type="submit"${on ? ' style="outline:2px solid var(--accent2);outline-offset:1px"' : ''}>${on ? '✓ ' : ''}${esc(PRESET_LABELS[pn])}</button></form>`;
+      }).join('')}
     </div>
-    <p class="mini">Применяется на всех страницах через ~30 сек (кэш). Светлая тема остаётся стандартной.</p>
+    <p class="mini">Сейчас: <b>${curPreset ? esc(PRESET_LABELS[curPreset]) : 'свои цвета'}</b>. Применяется на всех страницах через ~30 сек (кэш). Светлая тема остаётся стандартной.</p>
   </div>
 
   <div class="card"><h2>Конфигурация сайта (JSON)</h2>
@@ -3567,23 +3673,31 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await webAudit(client, user, 'Удалён паспорт (сайт)', `<@${target}> № ${stat}`);
       return back + '?' + qs({ ok: 'Паспорт удалён.' });
     }
+    // Выбор паспорта: пусто = все паспорта участника, иначе только указанный.
+    const pickPassports = async (all) => {
+      const sel = (body.get('static') || '').trim();
+      if (!sel) return { list: all, one: false };
+      const only = all.filter((pp) => pp.static === sel);
+      return { list: only, one: true };
+    };
     if (pathName === '/u/vacation') {
       const deadline = dates.parseDeadline(body.get('deadline') || '');
       if (!deadline) return back + '?' + qs({ err: 'Неверная дата.' });
       const reason = (body.get('reason') || '').trim();
-      const passports = await passportsLib.getAllPassports(target);
+      const { list: passports, one } = await pickPassports(await passportsLib.getAllPassports(target));
+      if (!passports.length) return back + '?' + qs({ err: 'Паспорт не найден.' });
       for (const pp of passports) {
         await passportsLib.updatePassportFields(target, pp.static, { vacation_until: deadline.toISOString() });
         await history.logStatusGranted('vacation', target, pp.static, pp.name, reason, deadline.toISOString(), user.id).catch(() => {});
       }
       await hook('syncStatusRoles')(g, target);
       await hook('safeUpdateMembersList')(g);
-      await pushNotify(target, 'vacation', `Вам выдан отпуск до ${dates.formatDateTime(deadline)}`, '/me').catch(() => {});
-      await webAudit(client, user, 'Отпуск выдан (сайт)', `<@${target}> до ${dates.formatDateTime(deadline)}${reason ? ' — ' + reason : ''}`);
+      await pushNotify(target, 'vacation', `Вам выдан отпуск до ${dates.formatDateTime(deadline)}${one ? ` (паспорт № ${passports[0].static})` : ''}`, '/me').catch(() => {});
+      await webAudit(client, user, 'Отпуск выдан (сайт)', `<@${target}>${one ? ` № ${passports[0].static}` : ' (все паспорта)'} до ${dates.formatDateTime(deadline)}${reason ? ' — ' + reason : ''}`);
       return back + '?' + qs({ ok: 'Отпуск выдан.' });
     }
     if (pathName === '/u/vacation_revoke') {
-      const passports = await passportsLib.getAllPassports(target);
+      const { list: passports, one } = await pickPassports(await passportsLib.getAllPassports(target));
       for (const pp of passports) {
         if (!pp.vacation_until) continue;
         await passportsLib.updatePassportFields(target, pp.static, { vacation_until: null });
@@ -3591,25 +3705,26 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       }
       await hook('syncStatusRoles')(g, target);
       await hook('safeUpdateMembersList')(g);
-      await webAudit(client, user, 'Отпуск снят (сайт)', `<@${target}>`);
+      await webAudit(client, user, 'Отпуск снят (сайт)', `<@${target}>${one && passports[0] ? ` № ${passports[0].static}` : ' (все паспорта)'}`);
       return back + '?' + qs({ ok: 'Отпуск снят.' });
     }
     if (pathName === '/u/afk') {
       const date = dates.parseDateOnly(body.get('date') || '');
       if (!date) return back + '?' + qs({ err: 'Неверная дата (ДД.ММ.ГГГГ).' });
       const reason = (body.get('reason') || '').trim();
-      const passports = await passportsLib.getAllPassports(target);
+      const { list: passports, one } = await pickPassports(await passportsLib.getAllPassports(target));
+      if (!passports.length) return back + '?' + qs({ err: 'Паспорт не найден.' });
       for (const pp of passports) {
         await passportsLib.updatePassportFields(target, pp.static, { afk_since: dates.formatDateOnly(date) });
         await history.logStatusGranted('afk', target, pp.static, pp.name, reason, null, user.id).catch(() => {});
       }
       await hook('syncStatusRoles')(g, target);
       await hook('safeUpdateMembersList')(g);
-      await webAudit(client, user, 'AFK отмечен (сайт)', `<@${target}> с ${dates.formatDateOnly(date)}${reason ? ' — ' + reason : ''}`);
+      await webAudit(client, user, 'AFK отмечен (сайт)', `<@${target}>${one ? ` № ${passports[0].static}` : ' (все паспорта)'} с ${dates.formatDateOnly(date)}${reason ? ' — ' + reason : ''}`);
       return back + '?' + qs({ ok: 'AFK отмечен.' });
     }
     if (pathName === '/u/afk_clear') {
-      const passports = await passportsLib.getAllPassports(target);
+      const { list: passports, one } = await pickPassports(await passportsLib.getAllPassports(target));
       for (const pp of passports) {
         if (!pp.afk_since) continue;
         await passportsLib.updatePassportFields(target, pp.static, { afk_since: null });
@@ -3617,7 +3732,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       }
       await hook('syncStatusRoles')(g, target);
       await hook('safeUpdateMembersList')(g);
-      await webAudit(client, user, 'AFK снят (сайт)', `<@${target}>`);
+      await webAudit(client, user, 'AFK снят (сайт)', `<@${target}>${one && passports[0] ? ` № ${passports[0].static}` : ' (все паспорта)'}`);
       return back + '?' + qs({ ok: 'AFK снят.' });
     }
     if (pathName === '/u/contract') {
@@ -4632,14 +4747,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== пресеты темы + редактор каналов (havirys) =====
   if (pathName === '/admin/theme_preset') {
     if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
-    const PRESETS = {
-      default: {},
-      amoled: { bg: '#000000', panel: '#0a0a0a', panel2: '#141414', line: '#242424', text: '#f0f0f0', muted: '#8a8a8a', accent: '#4f8cff', accent2: '#79a9ff' },
-      ocean: { bg: '#0b1622', panel: '#122232', panel2: '#18314a', line: '#20415f', text: '#e6f0f7', muted: '#8fa9bd', accent: '#1fb6c9', accent2: '#5fd3e2' },
-      forest: { bg: '#0e1712', panel: '#15211a', panel2: '#1d2f24', line: '#2a3f31', text: '#e8f2ea', muted: '#94ab9c', accent: '#3fae6b', accent2: '#71cf97' },
-      plum: { bg: '#160f1a', panel: '#1e1626', panel2: '#2a1f36', line: '#3a2c49', text: '#f1e9f5', muted: '#a996b3', accent: '#9b59d0', accent2: '#bd8ae0' },
-    };
-    const pr = PRESETS[body.get('preset')] || null;
+    const pr = THEME_PRESETS[body.get('preset')] || null;
     if (!pr) return '/panel?tab=admin&' + qs({ err: 'Неизвестный пресет.' });
     await db.run("DELETE FROM settings WHERE key LIKE 'site.color.%'");
     for (const [k, v] of Object.entries(pr)) await db.setSetting('site.color.' + k, v);
@@ -5046,6 +5154,22 @@ function start(client, hooks = {}) {
           return sendCsv('stats-week.csv', toCsv(lb, [
             { key: 'discord_id', label: 'Discord ID' }, { key: 'fulfilled', label: 'Выполнено' }, { key: 'unfulfilled', label: 'Не выполнено' },
           ]));
+        }
+        if (path === '/export/dashboard.html') {
+          const dstr = new Date().toISOString().slice(0, 10);
+          const inner = await dashboardBody(client);
+          const page = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Дашборд — ${esc(siteBrand())} — ${dstr}</title>
+<style>${STYLE}${themeOverrideCss()}</style></head>
+<body><div class="wrap wide">
+<p class="mini">Снимок дашборда «${esc(siteBrand())}» · ${new Date().toLocaleString('ru-RU')}</p>
+${inner}
+</div>
+<script>(function(){document.querySelectorAll('button,form,.gcd').forEach(function(e){if(e.classList.contains('gcd'))return;e.style.display='none'});document.querySelectorAll('.gcd').forEach(function(e){e.textContent='—'})})();</script>
+</body></html>`;
+          await webAudit(client, user, 'Скачивание дашборда HTML (сайт)', dstr);
+          return done(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Disposition': `attachment; filename="dashboard-${dstr}.html"` }, page);
         }
         if (path === '/export/db.sqlite') {
           if (acc.rank < LEVELS.owner) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Только Владелец');
