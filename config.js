@@ -49,6 +49,16 @@ module.exports = {
   SITE_BRAND: 'Freelance Company',
   SITE_DISCORD_INVITE: 'https://discord.gg/aMXaC86Qcq',
 
+  // Бот сам создаёт Discord-роли под бейджи достижений и выдаёт/снимает их
+  // (роли создаются лениво — когда первый участник заработал бейдж, id
+  // сохраняется в таблицу badge_roles). false — полностью отключить.
+  BADGE_AUTO_ROLES: true,
+  // Необязательное ручное переопределение: badge_key -> id уже существующей
+  // роли (тогда бот использует её вместо автосоздания). Ключи: contracts10,
+  // contracts50, contracts100, invites5, invites15, month, veteran90,
+  // winner, winner3, streak2, streak4.
+  BADGE_ROLES: {},
+
   // Пользователь-владелец: неприкосновенен для управляющих действий других,
   // и может пользоваться командами бота без роли ROLE_PLUS.
   OWNER_USER_ID: '652927337016328212',

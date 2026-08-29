@@ -12,13 +12,23 @@ function parseDuration(input) {
   return amount * multipliers[unit];
 }
 
-async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null) {
+async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null, minRoleId = null) {
   const result = await db.run(
-    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, recurring_rule_id, created_at)
-     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, recurringRuleId, new Date().toISOString()],
+    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, min_role_id, recurring_rule_id, created_at)
+     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, minRoleId, recurringRuleId, new Date().toISOString()],
   );
   return result.lastID;
+}
+
+// Проверка «минимальной роли»: у участника есть роль этого ранга или ВЫШЕ
+// по иерархии config.ROLE_IDS (index 0 — самый высокий ранг).
+function meetsMinRole(member, minRoleId) {
+  if (!minRoleId) return true;
+  const config = require('./config');
+  const minIdx = config.ROLE_IDS.indexOf(minRoleId);
+  if (minIdx === -1) return true;
+  return config.ROLE_IDS.some((r, i) => i <= minIdx && member.roles.cache.has(r));
 }
 
 async function setMessageId(giveawayId, messageId) {
@@ -144,6 +154,7 @@ module.exports = {
   WEEKDAY_NAMES,
   parseDuration,
   createGiveaway,
+  meetsMinRole,
   setMessageId,
   getGiveaway,
   getActiveExpired,

@@ -51,6 +51,7 @@ const commandPermSync = require('./command_permissions_sync');
 const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
+const badges = require('./badges');
 
 const client = new Client({
   intents: [
@@ -2118,6 +2119,43 @@ async function startGiveawayFromRule(guild, rule) {
   });
   await giveaways.setMessageId(giveawayId, sent.id);
   return giveawayId;
+}
+
+// Отложенные розыгрыши (создаются с сайта): когда наступает start_at —
+// бот создаёт обычный розыгрыш и публикует его в канал.
+async function fireScheduledGiveaways(guild) {
+  let due;
+  try {
+    due = await db.all("SELECT * FROM scheduled_giveaways WHERE status = 'pending' AND start_at <= ?", [new Date().toISOString()]);
+  } catch (_) { return; }
+  for (const s of due) {
+    try {
+      const endsAt = new Date(Date.now() + (s.duration_ms || 3600000));
+      const gid = await giveaways.createGiveaway(
+        s.channel_id, s.prize, s.winners_count, s.host_id, endsAt.toISOString(),
+        s.required_role_id || null, null, s.min_role_id || null,
+      );
+      const channel = await guild.channels.fetch(s.channel_id);
+      const embed = buildGiveawayEmbed({
+        prize: s.prize, winners_count: s.winners_count, ends_at: endsAt.toISOString(),
+        host_id: s.host_id, required_role_id: s.required_role_id,
+      }, 0);
+      const sent = await channel.send({
+        content: '🎉 **РОЗЫГРЫШ** 🎉',
+        embeds: [embed],
+        components: buildGiveawayComponents(gid),
+      });
+      await giveaways.setMessageId(gid, sent.id);
+      await db.run("UPDATE scheduled_giveaways SET status = 'fired', fired_giveaway_id = ? WHERE id = ?", [gid, s.id]);
+      await logAudit(guild, client.user, 'Отложенный розыгрыш запущен', [
+        { name: 'Приз', value: s.prize, inline: true },
+        { name: 'Победителей', value: String(s.winners_count), inline: true },
+      ]);
+    } catch (err) {
+      console.error('Не удалось запустить отложенный розыгрыш', s.id, err.message);
+      await db.run("UPDATE scheduled_giveaways SET status = 'cancelled' WHERE id = ?", [s.id]).catch(() => {});
+    }
+  }
 }
 
 // Раз в день (проверяется из часового таймера) — если сегодня день недели
@@ -6485,6 +6523,9 @@ client.on('interactionCreate', async (interaction) => {
         if (!already && giveaway.required_role_id && !interaction.member.roles.cache.has(giveaway.required_role_id)) {
           return safeReply(interaction, `⛔ Участвовать может только роль <@&${giveaway.required_role_id}>.`);
         }
+        if (!already && giveaway.min_role_id && !giveaways.meetsMinRole(interaction.member, giveaway.min_role_id)) {
+          return safeReply(interaction, `⛔ Участвовать могут роли не ниже <@&${giveaway.min_role_id}>.`);
+        }
         if (already) {
           await giveaways.removeEntry(giveawayId, interaction.user.id);
         } else {
@@ -9246,7 +9287,18 @@ client.once('clientReady', async () => {
 
   // --- Сайт (вход через Discord) на том же домене/порту ---
   try {
-    require('./web').start(client);
+    require('./web').start(client, {
+      syncEffectiveIdentity,
+      syncStatusRoles,
+      syncProfileChannelName,
+      createProfileThread,
+      removeParticipant,
+      safeUpdateMembersList,
+      getCurrentText,
+      runWeeklyRankAdjustment,
+      commandDefaultTiers: COMMAND_DEFAULT_TIERS,
+      tierLabels: Object.fromEntries(Object.entries(TIER_INFO).map(([k, v]) => [k, v.label])),
+    });
   } catch (e) {
     console.error('[web] Не удалось запустить сайт:', e.message);
   }
@@ -9264,6 +9316,16 @@ client.once('clientReady', async () => {
     } catch (err) {
       console.error('Не удалось залогировать запуск бота в аудит:', err.message);
     }
+    // Через минуту после старта — синхронизировать авто-роли за бейджи
+    // (создать недостающие роли и разнести их по участникам).
+    setTimeout(async () => {
+      try {
+        const g = await client.guilds.fetch(process.env.GUILD_ID);
+        await badges.syncAllRoles(g);
+      } catch (err) {
+        console.error('Не удалось синхронизировать роли за бейджи при старте:', err.message);
+      }
+    }, 60 * 1000);
   }
 
   backup.scheduleDailyBackup(
@@ -9322,6 +9384,7 @@ client.once('clientReady', async () => {
         await checkExpiredBlacklist(guild);
         await runWeeklyRankAdjustment(guild);
         await checkRecurringGiveaways(guild);
+        await badges.syncAllRoles(guild);
         await sendDailyDigest(guild);
         await sendWeeklyDigest(guild);
       }
@@ -9345,6 +9408,8 @@ client.once('clientReady', async () => {
       for (const g of expiredGiveaways) {
         await endGiveaway(guild, g.id);
       }
+
+      await fireScheduledGiveaways(guild);
     } catch (err) {
       console.error('Ошибка проверки автовозврата недели статистики:', err);
     }

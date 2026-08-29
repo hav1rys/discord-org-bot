@@ -385,6 +385,7 @@ const SCHEMA = {
       ends_at: 'TEXT',
       status: "TEXT DEFAULT 'active'", // active | ended | cancelled
       required_role_id: 'TEXT', // если задано — участвовать может только эта роль (и роли выше по иерархии)
+      min_role_id: 'TEXT', // если задано — участвовать может эта роль ранга и ВЫШЕ по иерархии ROLE_IDS
       recurring_rule_id: 'INTEGER', // если создан из шаблона повтора — ссылка на giveaway_recurring_rules.id
       winners: 'TEXT', // discord id победителей через запятую (для /розыгрыш_история)
       created_at: 'TEXT',
@@ -504,6 +505,85 @@ const SCHEMA = {
       first_login: 'TEXT',
       last_login: 'TEXT',
       login_count: 'INTEGER DEFAULT 0',
+      sess_ver: 'INTEGER DEFAULT 0', // версия сессии; +1 = «выйти со всех устройств»
+    },
+  },
+
+  // Журнал входов на сайт (для страницы «Мои входы»).
+  web_logins: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      ip: 'TEXT',
+      ua: 'TEXT',
+      at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  // Реферальные ссылки для сайта: /i/<code> запоминает, кто пригласил, и
+  // подставляет это в заявку на вступление автоматически.
+  invite_links: {
+    columns: {
+      code: 'TEXT PRIMARY KEY',
+      creator_id: 'TEXT',
+      created_at: 'TEXT',
+      uses: 'INTEGER DEFAULT 0',
+      signups: 'INTEGER DEFAULT 0',
+    },
+    indexes: [['creator_id']],
+  },
+
+  // Комментарии/обсуждение под заявкой на вступление (на сайте, до решения).
+  application_comments: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      application_id: 'INTEGER',
+      author_id: 'TEXT',
+      author_name: 'TEXT',
+      text: 'TEXT',
+      at: 'TEXT',
+    },
+    indexes: [['application_id']],
+  },
+
+  // Отложенные розыгрыши: бот сам создаёт розыгрыш, когда наступит start_at.
+  scheduled_giveaways: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      prize: 'TEXT',
+      winners_count: 'INTEGER',
+      channel_id: 'TEXT',
+      duration_ms: 'INTEGER',
+      required_role_id: 'TEXT',
+      min_role_id: 'TEXT',
+      start_at: 'TEXT',
+      host_id: 'TEXT',
+      status: "TEXT DEFAULT 'pending'", // pending | fired | cancelled
+      fired_giveaway_id: 'INTEGER',
+      created_at: 'TEXT',
+    },
+    indexes: [['status']],
+  },
+
+  // Сохранённые шаблоны рассылок (с подстановками {имя} {паспорт} {ранг}).
+  broadcast_templates: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      name: 'TEXT',
+      text: 'TEXT',
+      created_by: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+
+  // Discord-роли, которые бот сам создаёт под бейджи достижений
+  // (badge_key -> role_id). Если роль удалить на сервере — бот создаст заново.
+  badge_roles: {
+    columns: {
+      badge_key: 'TEXT PRIMARY KEY',
+      role_id: 'TEXT',
+      created_at: 'TEXT',
     },
   },
 
