@@ -5801,16 +5801,24 @@ client.on('interactionCreate', async (interaction) => {
           rebuilt.setFields(keptFields);
           const otherEmbeds = interaction.message.embeds.slice(1).map((e) => EmbedBuilder.from(e));
 
+          // Пробегаем по СЫРЫМ компонентам сообщения (у них есть геттер
+          // .customId), а не по билдерам из ActionRowBuilder.from() — у тех
+          // .customId нет, из-за чего кнопка «Беру» раньше не превращалась
+          // в «Освободить».
           const rebuiltComponents = interaction.message.components.map((r) => {
-            const nr = ActionRowBuilder.from(r);
-            nr.components = nr.components.map((c) => {
-              if (c.customId && (c.customId.startsWith('review_claim:') || c.customId.startsWith('review_unclaim:'))) {
-                return newAssignee
-                  ? new ButtonBuilder().setCustomId(`review_unclaim:${type}:${rowId}`).setLabel('↩️ Освободить').setStyle(ButtonStyle.Secondary)
-                  : new ButtonBuilder().setCustomId(`review_claim:${type}:${rowId}`).setLabel('🙋 Беру на рассмотрение').setStyle(ButtonStyle.Primary);
+            const nr = new ActionRowBuilder();
+            for (const c of r.components) {
+              const cid = c.customId || (c.data && c.data.custom_id);
+              if (cid && (cid.startsWith('review_claim:') || cid.startsWith('review_unclaim:'))) {
+                nr.addComponents(
+                  newAssignee
+                    ? new ButtonBuilder().setCustomId(`review_unclaim:${type}:${rowId}`).setLabel('↩️ Освободить').setStyle(ButtonStyle.Secondary)
+                    : new ButtonBuilder().setCustomId(`review_claim:${type}:${rowId}`).setLabel('🙋 Беру на рассмотрение').setStyle(ButtonStyle.Primary),
+                );
+              } else {
+                nr.addComponents(ButtonBuilder.from(c));
               }
-              return ButtonBuilder.from(c);
-            });
+            }
             return nr;
           });
 
@@ -6598,12 +6606,13 @@ client.on('interactionCreate', async (interaction) => {
         // паспортам, остаются рабочими) — чтобы нельзя было спамить.
         try {
           const newComponents = interaction.message.components.map((r) => {
-            const newRow = ActionRowBuilder.from(r);
-            newRow.components = newRow.components.map((c) => {
+            const newRow = new ActionRowBuilder();
+            for (const c of r.components) {
+              const cid = c.customId || (c.data && c.data.custom_id);
               const btn = ButtonBuilder.from(c);
-              if (c.customId === id) btn.setDisabled(true).setLabel(`✅ Уведомление отправлено`);
-              return btn;
-            });
+              if (cid === id) btn.setDisabled(true).setLabel('✅ Уведомление отправлено');
+              newRow.addComponents(btn);
+            }
             return newRow;
           });
           await interaction.message.edit({ components: newComponents });
@@ -9296,6 +9305,8 @@ client.once('clientReady', async () => {
       safeUpdateMembersList,
       getCurrentText,
       runWeeklyRankAdjustment,
+      initMenus,
+      checkContractPromotion,
       commandDefaultTiers: COMMAND_DEFAULT_TIERS,
       tierLabels: Object.fromEntries(Object.entries(TIER_INFO).map(([k, v]) => [k, v.label])),
     });

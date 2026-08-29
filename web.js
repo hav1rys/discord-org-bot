@@ -21,6 +21,9 @@ const history = require('./history');
 const acceptances = require('./acceptances');
 const contractsDisplay = require('./contracts_display');
 const badges = require('./badges');
+const backup = require('./backup');
+const faq = require('./faq');
+const faqDisplay = require('./faq_display');
 
 const OWNER_ID = config.OWNER_USER_ID; // havirys — полный доступ, включая редактор БД
 
@@ -120,7 +123,8 @@ async function accessFor(client, discordId) {
   const guild = client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
   if (guild) {
     try {
-      const member = await guild.members.fetch(discordId);
+      // из кэша (discord.js держит его свежим по событиям); fetch — только промах
+      const member = guild.members.cache.get(discordId) || await guild.members.fetch(discordId);
       roleNames = member.roles.cache.filter((r) => r.name !== '@everyone').map((r) => r.name);
       if (perms.hasBotAccess(member) || member.id === config.OWNER_USER_ID || member.roles.cache.has(config.ROLE_OWNER)) level = 'owner';
       else if (member.roles.cache.has(config.ROLE_DEPUTY)) level = 'deputy';
@@ -209,6 +213,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .form input,.form select,.form textarea{display:block;width:100%;margin-top:5px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;color:var(--text);font:inherit}
 .form input:focus,.form select:focus,.form textarea:focus{outline:1px solid var(--accent);border-color:var(--accent)}
 .form input[readonly]{opacity:.5}
+.form input[type=color]{width:48px;height:34px;padding:2px;border-radius:8px;cursor:pointer;flex:0 0 auto}
 .form button{margin-top:14px}
 .avatar{border-radius:50%;object-fit:cover;border:1px solid var(--line);background:var(--panel2);flex:0 0 auto}
 .phead{display:flex;gap:16px;align-items:center;margin-bottom:6px}
@@ -259,8 +264,45 @@ const CLIENT_SCRIPT = `
   }catch(e){}
 })();`;
 
+// ---------- Настройки сайта (правит havirys, лежат в settings) ----------
+const THEME_KEYS = ['bg', 'panel', 'panel2', 'line', 'text', 'muted', 'accent', 'accent2', 'ok', 'bad', 'warn'];
+let SITE = { color: {} };
+let _siteAt = 0;
+async function loadSite(force) {
+  if (!force && Date.now() - _siteAt < 30000) return SITE;
+  const next = { color: {} };
+  try {
+    const rows = await db.all("SELECT key, value FROM settings WHERE key LIKE 'site.%'");
+    for (const r of rows) {
+      if (r.key.startsWith('site.color.')) {
+        const k = r.key.slice(11);
+        if (r.value && /^#[0-9a-fA-F]{6}$/.test(r.value)) next.color[k] = r.value;
+      } else {
+        const k = r.key.slice(5);
+        if (r.value != null && r.value !== '') next[k] = r.value;
+      }
+    }
+  } catch (_) {}
+  SITE = next;
+  _siteAt = Date.now();
+  return SITE;
+}
+function siteBrand() { return SITE.brand || config.SITE_BRAND; }
+function siteInvite() { return SITE.invite || config.SITE_DISCORD_INVITE; }
+function themeOverrideCss() {
+  const c = SITE.color || {};
+  const d = Object.keys(c).filter((k) => THEME_KEYS.includes(k)).map((k) => `--${k}:${c[k]}`).join(';');
+  return d ? `:root{${d}}` : '';
+}
+function brandHtml() {
+  const parts = siteBrand().trim().split(/\s+/);
+  return parts.length > 1
+    ? `<b>${esc(parts[0])}</b> ${esc(parts.slice(1).join(' '))}`
+    : `<b>${esc(siteBrand())}</b>`;
+}
+
 function topbar(user, level) {
-  const brand = `<a class="brand" href="/"><b>Freelance</b> Company</a>`;
+  const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
   if (!user) {
     return `<div class="top"><div class="left">${THEME_TOGGLE}<a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
   }
@@ -278,12 +320,14 @@ function topbar(user, level) {
 }
 
 function layout(opts) {
+  const override = themeOverrideCss();
+  const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())} · сайт работает на том же сервере, что и Discord-бот`;
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(opts.title)}</title><style>${STYLE}</style><script>${CLIENT_SCRIPT}</script></head><body>
+<title>${esc(opts.title)}</title><style>${STYLE}${override}</style><script>${CLIENT_SCRIPT}</script></head><body>
 ${topbar(opts.user, opts.level || 'guest')}
 <div class="wrap${opts.wide ? ' wide' : ''}">${opts.body}
-<div class="foot">${esc(config.SITE_BRAND)} · сайт работает на том же сервере, что и Discord-бот</div>
+<div class="foot">${foot}</div>
 </div></body></html>`;
 }
 
@@ -301,13 +345,16 @@ async function orgStats() {
     fulfilled: await c("SELECT COUNT(*) c FROM contracts WHERE status='fulfilled' AND submitted_at BETWEEN ? AND ?", [s, e]),
     unfulfilled: await c("SELECT COUNT(*) c FROM contracts WHERE status='unfulfilled' AND submitted_at BETWEEN ? AND ?", [s, e]),
     endedGiveaways: await c("SELECT COUNT(*) c FROM giveaways WHERE status='ended'"),
+    activeGiveaways: await db.all("SELECT id, prize FROM giveaways WHERE status='active' ORDER BY ends_at ASC LIMIT 5").catch(() => []),
     webUsers: await c('SELECT COUNT(*) c FROM web_users'),
     weekLabel: contracts.formatWeekLabel(range),
   };
 }
 
 async function landingBody(st) {
-  const inv = esc(config.SITE_DISCORD_INVITE);
+  const inv = esc(siteInvite());
+  const heroTitle = SITE.hero_title || `Организация «${config.SITE_BRAND}»`;
+  const heroText = SITE.hero_text || 'Выполнение контрактов на GTA5RP. Контракты от 50 векселей, возможность брать их самостоятельно, офис в Rockford HilIs ВС и помощь в прокачке навыков.';
   let ag = '';
   try {
     const row = await contentVersions.getLatestVersion('agitation');
@@ -315,8 +362,8 @@ async function landingBody(st) {
   } catch (_) { ag = content.DEFAULT_AGITATION; }
   return `
   <div class="hero">
-    <h1>Организация «${esc(config.SITE_BRAND)}»</h1>
-    <p>Выполнение контрактов на GTA5RP. Контракты от 50 векселей, возможность брать их самостоятельно, офис в Rockford HilIs ВС и помощь в прокачке навыков.</p>
+    <h1>${esc(heroTitle)}</h1>
+    <p>${esc(heroText)}</p>
     <a class="btn" href="/apply">Подать заявку на вступление</a>
     <a class="btn ghost" href="/login">Войти через Discord</a>
     <a class="btn ghost" href="${inv}" target="_blank" rel="noopener">Discord-сервер</a>
@@ -331,6 +378,11 @@ async function landingBody(st) {
       <div class="tile"><div class="n">${st.endedGiveaways}</div><div class="l">завершённых розыгрышей</div></div>
     </div>
   </div>
+
+  ${(st.activeGiveaways && st.activeGiveaways.length) ? `<div class="card"><h2>🎉 Идут розыгрыши</h2>
+    ${st.activeGiveaways.map((gw) => `<a class="pill" href="/g/${gw.id}" style="font-size:14px">${esc(gw.prize)}</a>`).join(' ')}
+    <div style="margin-top:10px"><a class="btn sm" href="/giveaways">Все розыгрыши · участвовать</a></div>
+  </div>` : ''}
 
   <div class="card">
     <h2>Преимущества</h2>
@@ -386,6 +438,8 @@ async function meBody(client, user) {
   }
 
   const passports = await passportsLib.getAllPassports(did);
+  const blRow = await db.get('SELECT id, appeal_blocked FROM blacklist WHERE discord_id = ?', [did]).catch(() => null);
+  const canAppeal = !!(blRow && !blRow.appeal_blocked);
   const range = contracts.getWeekRange(0);
   const week = await contracts.getUserWeekStats(did, range);
   const invRow = await db.get("SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed'", [did]);
@@ -426,7 +480,7 @@ async function meBody(client, user) {
     ${ticketCard}
     ${inviteCard}
     ${loginsCard}
-    ${memberForms(user)}`;
+    ${memberForms(user, passports, canAppeal)}`;
 }
 
 // ---------- Панель управления ----------
@@ -435,15 +489,19 @@ const PANEL_TABS = [
   ['sla', 'SLA'],
   ['apps', 'Заявки'],
   ['queues', 'Очереди'],
+  ['contracts_check', 'Контракты — проверка'],
   ['members', 'Участники'],
   ['contracts', 'Контракты'],
   ['invites', 'Приглашения'],
   ['giveaways', 'Розыгрыши'],
   ['blacklist', 'Чёрный список'],
   ['texts', 'Тексты'],
+  ['faq_manage', 'Гайды FAQ'],
+  ['reasons', 'Причины отказа'],
   ['broadcast', 'Рассылка'],
   ['settings', 'Настройки'],
   ['perms', 'Права команд'],
+  ['admin', 'Админ'],
   ['data', 'База данных'],
 ];
 
@@ -453,8 +511,8 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   const canOwner = acc.rank >= LEVELS.owner;
   const isHavirys = user && user.id === OWNER_ID;
   const vis = {
-    blacklist: canBl, texts: canOwner, broadcast: canOwner, settings: canOwner,
-    perms: isHavirys, data: canData,
+    blacklist: canBl, texts: canOwner, faq_manage: canOwner, reasons: canOwner,
+    broadcast: canOwner, settings: canOwner, perms: isHavirys, admin: isHavirys, data: canData,
   };
   const tabsHtml = PANEL_TABS
     .filter(([id]) => vis[id] === undefined || vis[id])
@@ -465,15 +523,19 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'sla') body = await panelSla(client, user);
   else if (tab === 'apps') body = await panelApps(client, user);
   else if (tab === 'queues') body = await panelQueues(client, user);
-  else if (tab === 'members') body = await panelMembers(client, pageNum);
+  else if (tab === 'contracts_check') body = await panelContractCheck(client, user);
+  else if (tab === 'members') body = await panelMembers(client, pageNum, user);
   else if (tab === 'contracts') body = await panelContracts();
   else if (tab === 'invites') body = await panelInvites();
   else if (tab === 'giveaways') body = await panelGiveaways(client, acc, user);
   else if (tab === 'blacklist' && canBl) body = await panelBlacklist(client, user);
   else if (tab === 'texts' && canOwner) body = await panelTexts(user);
+  else if (tab === 'faq_manage' && canOwner) body = await panelFaqManage(user);
+  else if (tab === 'reasons' && canOwner) body = await panelReasons(user);
   else if (tab === 'broadcast' && canOwner) body = await panelBroadcast(user);
   else if (tab === 'settings' && canOwner) body = await panelSettings(user);
   else if (tab === 'perms' && isHavirys) body = await panelPerms(user);
+  else if (tab === 'admin' && isHavirys) body = await panelAdmin(client, user);
   else if (tab === 'data' && canData) body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
@@ -524,10 +586,22 @@ async function panelOverview() {
   </div></div>`;
 }
 
-async function panelMembers(client, pageNum) {
+async function panelMembers(client, pageNum, user) {
   const totalRow = await db.get('SELECT COUNT(*) c FROM participants');
   const total = totalRow ? totalRow.c : 0;
   const rows = await db.all('SELECT * FROM participants ORDER BY name LIMIT ? OFFSET ?', [PAGE_SIZE, pageNum * PAGE_SIZE]);
+  const rankOpts = (config.ROLE_IDS || []).map((rid) => `<option value="${esc(rid)}">${esc(roleName(client, rid))}</option>`).join('');
+  const addForm = user ? `<div class="card"><h2>Добавить участника вручную</h2>
+    <form method="POST" action="/panel/member/add" class="form">${csrfField(user)}
+      <label>Discord ID<input name="discord_id" required pattern="[0-9]+" maxlength="25"></label>
+      <label>Имя Фамилия<input name="name" required maxlength="60"></label>
+      <label>№ Паспорта<input name="static" required pattern="[0-9]+" maxlength="12"></label>
+      <label>LVL<input name="lvl" type="number" min="1" max="100" value="1"></label>
+      <label>Ранг<select name="role_id">${rankOpts}</select></label>
+      <button class="btn" type="submit">Добавить и оформить</button>
+    </form>
+    <p class="mini">Оформляет как приём заявки: роли, ник, канал-профиль, запись в историю.</p>
+  </div>` : '';
   const range = contracts.getWeekRange(0);
   const out = [];
   for (const p of rows) {
@@ -543,7 +617,7 @@ async function panelMembers(client, pageNum) {
       <td class="muted">${fmt(p.joined_at)}</td>
     </tr>`);
   }
-  return `<div class="card"><h2>Участники — всего ${total}</h2>
+  return `${addForm}<div class="card"><h2>Участники — всего ${total}</h2>
     <div class="tablewrap"><table>
       <tr><th>Имя Фамилия</th><th>Паспорта</th><th>Ранги</th><th>Контракты нед.</th><th>Статус</th><th>Вступил</th></tr>
       ${out.join('')}
@@ -607,6 +681,26 @@ async function panelGiveaways(client, acc, user) {
     const sched = await db.all("SELECT * FROM scheduled_giveaways WHERE status='pending' ORDER BY start_at ASC").catch(() => []);
     const schedRows = sched.map((s) => `<tr><td>${esc(s.prize)}</td><td class="muted">${fmt(s.start_at)}</td><td>${s.winners_count}</td>
       <td><form method="POST" action="/panel/giveaway/schedule_cancel" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${s.id}"><button class="btn ghost sm" type="submit">отменить</button></form></td></tr>`).join('');
+    const WD = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+    const recur = await db.all("SELECT * FROM giveaway_recurring_rules WHERE status IN ('active','paused') ORDER BY id DESC").catch(() => []);
+    const recurRows = recur.map((r) => `<tr><td>${esc(r.prize)}</td><td>${WD[r.weekday] || '?'}</td><td>${r.winners_count}</td>
+      <td><span class="badge ${r.status === 'active' ? 'ok' : 'warn'}">${r.status === 'active' ? 'активно' : 'на паузе'}</span></td>
+      <td style="white-space:nowrap">
+        <form method="POST" action="/panel/giveaway/recur_toggle" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" type="submit">${r.status === 'active' ? 'пауза' : 'возобновить'}</button></form>
+        <form method="POST" action="/panel/giveaway/recur_delete" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
+      </td></tr>`).join('');
+    const recurCard = `<div class="card"><h2>Повторяющиеся розыгрыши</h2>
+      <form method="POST" action="/panel/giveaway/recur_create" class="form">${csrfField(user)}
+        <label>Приз<input name="prize" required maxlength="200"></label>
+        <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
+        <label>Длительность каждого запуска (30m, 1h, 2d)<input name="duration" required maxlength="10"></label>
+        <label>День недели<select name="weekday">${WD.map((n, i) => `<option value="${i}">${n}</option>`).join('')}</select></label>
+        <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
+        <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
+        <button class="btn" type="submit">Создать правило</button>
+      </form>
+      <div class="tablewrap" style="margin-top:10px"><table><tr><th>Приз</th><th>День</th><th>Побед.</th><th>Статус</th><th></th></tr>${recurRows || '<tr><td colspan="5">—</td></tr>'}</table></div>
+    </div>`;
     manage = `
     <div class="card"><h2>Создать розыгрыш</h2>
       <form method="POST" action="/panel/giveaway/create" class="form">
@@ -638,6 +732,7 @@ async function panelGiveaways(client, acc, user) {
       <h3 style="margin-top:12px">Ожидают старта</h3>
       <div class="tablewrap"><table><tr><th>Приз</th><th>Старт</th><th>Победителей</th><th></th></tr>${schedRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
     </div>
+    ${recurCard}
     <div class="card"><h2>Завершённые — реролл</h2>
       <div class="tablewrap"><table><tr><th>Розыгрыш</th><th>Дата</th><th>Победители</th><th></th></tr>${endedRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
     </div>
@@ -857,12 +952,22 @@ async function webAudit(client, user, action, details) {
 }
 
 // Сессия «свежая», если её версия совпадает с web_users.sess_ver.
+// Версию кэшируем на 60 сек, чтобы не читать БД на каждый запрос.
+const _sessVerCache = new Map(); // discordId -> { at, ver }
 async function sessionFresh(user) {
   if (!user) return false;
-  try {
-    const row = await db.get('SELECT sess_ver FROM web_users WHERE discord_id = ?', [user.id]);
-    return !row || (row.sess_ver || 0) === (user.sv || 0);
-  } catch (_) { return true; }
+  const hit = _sessVerCache.get(user.id);
+  let ver;
+  if (hit && Date.now() - hit.at < 60000) {
+    ver = hit.ver;
+  } else {
+    try {
+      const row = await db.get('SELECT sess_ver FROM web_users WHERE discord_id = ?', [user.id]);
+      ver = row ? (row.sess_ver || 0) : 0;
+      _sessVerCache.set(user.id, { at: Date.now(), ver });
+    } catch (_) { return true; }
+  }
+  return ver === (user.sv || 0);
 }
 
 // Простой rate-limit в памяти: не более N POST за окно на ключ.
@@ -958,7 +1063,8 @@ function applyBody(user, ref) {
   </div>`;
 }
 
-function memberForms(user) {
+function memberForms(user, passports = [], blacklisted = false) {
+  const passOpts = passports.map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('');
   return `
   <div class="card"><h2>Запросить отпуск</h2>
     <form method="POST" action="/me/vacation" class="form">
@@ -982,7 +1088,27 @@ function memberForms(user) {
       <label>Описание<textarea name="description" rows="3" maxlength="1000"></textarea></label>
       <button class="btn" type="submit">Создать тикет в Discord</button>
     </form>
-  </div>`;
+  </div>
+  ${passports.length ? `<div class="card"><h2>Заявка на изменение Имени Фамилии</h2>
+    <form method="POST" action="/me/data_change" class="form">${csrfField(user)}
+      <label>Паспорт<select name="static">${passOpts}</select></label>
+      <label>Новое Имя Фамилия<input name="new_name" required maxlength="60"></label>
+      <button class="btn" type="submit">Отправить на рассмотрение</button>
+    </form>
+  </div>` : ''}
+  <div class="card"><h2>Заявка на добавление паспорта</h2>
+    <form method="POST" action="/me/passport_request" class="form">${csrfField(user)}
+      <label>Имя Фамилия<input name="name" required maxlength="60"></label>
+      <label>№ Паспорта<input name="static" required pattern="[0-9]+" maxlength="12"></label>
+      <button class="btn" type="submit">Отправить на рассмотрение</button>
+    </form>
+  </div>
+  ${blacklisted ? `<div class="card" style="border-color:#5c2626"><h2>Апелляция на чёрный список</h2>
+    <form method="POST" action="/me/appeal" class="form">${csrfField(user)}
+      <label>Ваше обращение к руководству<textarea name="text" rows="4" required maxlength="1500"></textarea></label>
+      <button class="btn" type="submit">Подать апелляцию</button>
+    </form>
+  </div>` : ''}`;
 }
 
 async function panelBlacklist(client, user) {
@@ -1074,6 +1200,9 @@ function avatarUrl(id, hash, size = 96) {
 async function resolveAvatar(client, id, size = 96) {
   const g = guildOf(client);
   if (g) {
+    // из кэша — без обращения к API; fetch только если участника нет в кэше
+    const cached = g.members.cache.get(id);
+    if (cached) return cached.displayAvatarURL({ extension: 'png', size });
     try {
       const m = await g.members.fetch(id);
       return m.displayAvatarURL({ extension: 'png', size });
@@ -1172,7 +1301,7 @@ async function profileBody(client, viewer, acc, targetId) {
   const g = guildOf(client);
   if (g) {
     try {
-      const m = await g.members.fetch(targetId);
+      const m = g.members.cache.get(targetId) || await g.members.fetch(targetId);
       const names = m.roles.cache.filter((r) => r.name !== '@everyone').map((r) => `<span class="pill">${esc(r.name)}</span>`);
       roleTags = names.length ? names.join('') : '<span class="muted">нет ролей</span>';
     } catch (_) { roleTags = '<span class="muted">нет на сервере</span>'; }
@@ -1554,11 +1683,15 @@ async function toolsBody(client, acc, user) {
     </div>
   </div>
   ${badgeCard}
+  ${isOwnerTools && user ? `<div class="card"><h2>Резервная копия</h2>
+    <form method="POST" action="/tools/backup_now">${csrfField(user)}<button class="btn sm" type="submit">Сделать бэкап сейчас</button></form>
+    <p class="mini">Пишет копию БД на диск бота. Ежедневная копия с загрузкой в канал бэкапов идёт по расписанию.</p>
+  </div>` : ''}
   <div class="card"><h2>ID ролей</h2><pre>${esc(rolesTxt)}</pre></div>
   <div class="card"><h2>ID каналов</h2><pre>${esc(chansTxt)}</pre></div>
-  ${isOwnerTools ? `<div class="card"><h2>Загрузить базу (замена файла)</h2>
+  ${isOwnerTools && user ? `<div class="card"><h2>Загрузить базу (замена файла)</h2>
     <form method="POST" action="/panel/db/restore" class="form" onsubmit="return confirm('ЗАМЕНИТЬ рабочую базу данных содержимым из поля ниже? Это необратимо. Бот перечитает файл только после перезапуска.')">
-      ${csrfField({ id: OWNER_ID })}
+      ${csrfField(user)}
       <label>Base64 файла .sqlite<textarea name="b64" rows="4" required></textarea></label>
       <button class="btn" style="background:var(--bad)" type="submit">Заменить базу</button>
     </form>
@@ -1689,11 +1822,16 @@ async function panelTexts(user) {
   for (const [k, title] of keys) {
     let cur = '';
     try { const row = await contentVersions.getLatestVersion(k); cur = row ? row.content : ''; } catch (_) {}
+    const extra = k === 'rules'
+      ? `<form method="POST" action="/panel/rules_broadcast" style="margin-top:8px" onsubmit="return confirm('Отправить правила в канал правил и в ЛС всем участникам?')">${csrfField(user)}<button class="btn ghost sm" type="submit">📕 Разослать правила</button></form>`
+      : (k === 'agitation' || k === 'hr_info'
+        ? `<form method="POST" action="/panel/text/publish" style="margin-top:8px">${csrfField(user)}<input type="hidden" name="key" value="${k}"><button class="btn ghost sm" type="submit">Опубликовать в канал</button></form>`
+        : '');
     parts.push(`<div class="card"><h2>${esc(title)}</h2>
       <form method="POST" action="/panel/text/save" class="form">${csrfField(user)}<input type="hidden" name="key" value="${k}">
         <label>Текст<textarea name="content" rows="8" maxlength="6000">${esc(cur)}</textarea></label>
         <button class="btn" type="submit">Сохранить новую версию</button>
-      </form></div>`);
+      </form>${extra}</div>`);
   }
   return parts.join('');
 }
@@ -1763,6 +1901,94 @@ async function panelPerms(user) {
   return `<div class="card"><h2>Права команд (${Object.keys(tiers).length})</h2>
     <p class="mini">Переопределение хранится в БД и перебивает значение по умолчанию. «сброс» возвращает дефолт.</p>
     <div class="tablewrap"><table><tr><th>Команда</th><th>Текущий тир</th><th>Изменить</th></tr>${rows}</table></div>
+  </div>`;
+}
+
+// ---------- Админ-панель havirys: бренд, тема, Discord ----------
+const THEME_DEFAULTS = {
+  bg: '#0f1013', panel: '#17181c', panel2: '#1e2025', line: '#2a2c33', text: '#e9e9ee',
+  muted: '#9b9ba6', accent: '#5b6cff', accent2: '#8ea1ff', ok: '#3ecf8e', bad: '#ff6b6b', warn: '#f2c94c',
+};
+const THEME_LABELS = {
+  bg: 'Фон страницы', panel: 'Карточки', panel2: 'Панели и поля', line: 'Границы', text: 'Основной текст',
+  muted: 'Серый текст', accent: 'Акцент (кнопки)', accent2: 'Акцент 2 / ссылки', ok: 'Успех', bad: 'Ошибка', warn: 'Предупреждение',
+};
+
+async function panelAdmin(client, user) {
+  await loadSite(true);
+  const g = guildOf(client);
+  const v = (k, d) => esc(SITE[k] != null && SITE[k] !== '' ? SITE[k] : (d || ''));
+
+  const colorInputs = Object.keys(THEME_DEFAULTS).map((k) => {
+    const cur = (SITE.color && SITE.color[k]) || THEME_DEFAULTS[k];
+    return `<label>${esc(THEME_LABELS[k])}
+      <span style="display:flex;gap:8px;align-items:center">
+        <input type="color" name="c_${k}" value="${esc(cur)}" oninput="this.nextElementSibling.value=this.value">
+        <input name="t_${k}" value="${esc(cur)}" pattern="#[0-9a-fA-F]{6}" style="max-width:110px" oninput="if(/^#[0-9a-fA-F]{6}$/.test(this.value))this.previousElementSibling.value=this.value">
+      </span></label>`;
+  }).join('');
+
+  let roleRows = '<tr><td colspan="3">бот офлайн</td></tr>';
+  let botNick = '';
+  if (g) {
+    botNick = (g.members.me && g.members.me.nickname) || '';
+    const ids = [config.ROLE_OWNER, config.ROLE_DEPUTY, config.ROLE_HR, ...(config.ROLE_IDS || []), config.ROLE_ORGANIZATION].filter(Boolean);
+    for (const b of await db.all('SELECT role_id FROM badge_roles').catch(() => [])) ids.push(b.role_id);
+    roleRows = [...new Set(ids)].map((rid) => {
+      const r = g.roles.cache.get(rid);
+      if (!r) return '';
+      let hex = '#' + (r.color || 0).toString(16).padStart(6, '0');
+      if (hex === '#000000') hex = '#99aab5';
+      return `<tr><td>${esc(r.name)}</td><td><code>${esc(rid)}</code></td><td>
+        <form method="POST" action="/admin/role" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${csrfField(user)}
+          <input type="hidden" name="id" value="${esc(rid)}">
+          <input name="name" value="${esc(r.name)}" maxlength="90" style="max-width:170px">
+          <input type="color" name="color" value="${esc(hex)}">
+          <button class="btn sm" type="submit">Сохранить</button>
+        </form></td></tr>`;
+    }).join('') || '<tr><td colspan="3">—</td></tr>';
+  }
+
+  return `
+  <div class="card"><h2>Название и тексты сайта</h2>
+    <form method="POST" action="/admin/site" class="form">${csrfField(user)}
+      <label>Название организации<input name="brand" value="${v('brand', config.SITE_BRAND)}" maxlength="60"></label>
+      <label>Ссылка-приглашение в Discord<input name="invite" value="${v('invite', config.SITE_DISCORD_INVITE)}" maxlength="200"></label>
+      <label>Заголовок на главной<input name="hero_title" value="${v('hero_title')}" maxlength="120" placeholder="Организация «${esc(config.SITE_BRAND)}»"></label>
+      <label>Текст на главной<textarea name="hero_text" rows="3" maxlength="600">${v('hero_text')}</textarea></label>
+      <label>Подпись в подвале<textarea name="footer" rows="2" maxlength="300">${v('footer')}</textarea></label>
+      <button class="btn" type="submit">Сохранить</button>
+    </form>
+  </div>
+
+  <div class="card"><h2>Цвета сайта (тёмная тема)</h2>
+    <form method="POST" action="/admin/theme" class="form">${csrfField(user)}
+      ${colorInputs}
+      <div class="bar" style="margin-top:12px">
+        <button class="btn" type="submit">Применить</button>
+        <button class="btn ghost sm" formaction="/admin/theme_reset" formnovalidate type="submit">Сбросить к стандартным</button>
+      </div>
+    </form>
+    <p class="mini">Применяется на всех страницах через ~30 сек (кэш). Светлая тема остаётся стандартной.</p>
+  </div>
+
+  <div class="card"><h2>Discord — ник бота на сервере</h2>
+    <form method="POST" action="/admin/bot_nick" class="form">${csrfField(user)}
+      <label>Ник бота (пусто = сбросить к имени приложения)<input name="nick" value="${esc(botNick)}" maxlength="32"></label>
+      <button class="btn sm" type="submit">Сохранить</button>
+    </form>
+  </div>
+
+  <div class="card"><h2>Discord — роли (имя и цвет)</h2>
+    <p class="mini">Роль бота должна быть в списке ролей ВЫШЕ редактируемых, иначе Discord не даст их менять.</p>
+    <div class="tablewrap"><table><tr><th>Роль</th><th>ID</th><th>Изменить</th></tr>${roleRows}</table></div>
+  </div>
+
+  <div class="card"><h2>Discord — меню с кнопками</h2>
+    <form method="POST" action="/admin/menus" onsubmit="return confirm('Переинициализировать меню-сообщения во всех каналах?')">${csrfField(user)}
+      <button class="btn sm" type="submit">Опубликовать / обновить меню в каналах</button>
+    </form>
+    <p class="mini">То же, что команда /меню_создать: сообщения с кнопками «Подать заявку», «Отпуск», «Тикет» и т.д.</p>
   </div>`;
 }
 
@@ -1877,7 +2103,7 @@ async function giveawayPageBody(client, user, gid) {
   const g = guildOf(client);
   if (!ended && g) {
     try {
-      const m = await g.members.fetch(user.id);
+      const m = g.members.cache.get(user.id) || await g.members.fetch(user.id);
       if (await giveaways.isBlacklisted(user.id)) note = '⛔ Вы в ЧС розыгрышей.';
       else if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) note = `⛔ Нужна роль <@&${gv.required_role_id}>.`;
       else if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) note = `⛔ Нужен ранг не ниже <@&${gv.min_role_id}>.`;
@@ -1969,6 +2195,76 @@ async function ticketPageBody(client, user, acc, tid) {
   <p><a href="/me">← в кабинет</a></p>`;
 }
 
+// ---------- Контракты на проверке (HR+) ----------
+async function panelContractCheck(client, user) {
+  const rows = await db.all("SELECT * FROM contracts WHERE status = 'pending' ORDER BY submitted_at ASC LIMIT 60").catch(() => []);
+  const cards = [];
+  for (const cn of rows) {
+    const pr = await db.get('SELECT name, static FROM participants WHERE discord_id = ?', [cn.discord_id]).catch(() => null);
+    const links = [
+      cn.taken_message_url ? `<a href="${esc(cn.taken_message_url)}" target="_blank" rel="noopener">скрин «взял»</a>` : '',
+      cn.message_url ? `<a href="${esc(cn.message_url)}" target="_blank" rel="noopener">скрин «итог»</a>` : '',
+    ].filter(Boolean).join(' · ') || '<span class="mini">ссылок нет</span>';
+    cards.push(`<div class="card">
+      <b>#${cn.id}</b> — <a href="/u/${esc(cn.discord_id)}">${esc(pr ? pr.name : cn.discord_id)}</a>${pr ? ` (№ ${esc(pr.static)})` : ''}
+      <div class="mini">отправлен ${fmt(cn.submitted_at)} · ${links}</div>
+      <div class="bar" style="margin-top:8px">
+        ${['fulfilled', 'unfulfilled', 'rejected'].map((vd) => `<form method="POST" action="/panel/contract/review" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${cn.id}"><input type="hidden" name="verdict" value="${vd}"><button class="btn sm" ${vd === 'rejected' ? 'style="background:var(--bad)"' : ''} type="submit">${vd === 'fulfilled' ? '✅ Выполнен' : vd === 'unfulfilled' ? '❌ Не выполнен' : '🗑 Отклонить'}</button></form>`).join('')}
+      </div>
+    </div>`);
+  }
+  return `<div class="card"><h2>Контракты на проверке (${rows.length})</h2><p class="mini">То же, что кнопки под карточкой контракта в Discord.</p></div>${cards.join('') || '<div class="card">Очередь пуста.</div>'}`;
+}
+
+// ---------- Управление гайдами FAQ (Владелец) ----------
+async function panelFaqManage(user) {
+  const cats = [['member', 'Для участников'], ['hr', 'Для HR']];
+  const parts = [];
+  for (const [cat, title] of cats) {
+    const entries = await db.all('SELECT * FROM faq_entries WHERE category = ? ORDER BY position, id', [cat]).catch(() => []);
+    const rows = entries.map((e, i) => `<div class="card">
+      <form method="POST" action="/panel/faq/edit" class="form">${csrfField(user)}<input type="hidden" name="id" value="${e.id}">
+        <label>Заголовок<input name="title" value="${esc(e.title)}" maxlength="120" required></label>
+        <label>Текст<textarea name="content" rows="4" maxlength="3000" required>${esc(e.content)}</textarea></label>
+        <div class="bar">
+          <button class="btn sm" type="submit">Сохранить</button>
+          <button class="btn ghost sm" formaction="/panel/faq/move" name="dir" value="up" type="submit" ${i === 0 ? 'disabled' : ''}>▲</button>
+          <button class="btn ghost sm" formaction="/panel/faq/move" name="dir" value="down" type="submit" ${i === entries.length - 1 ? 'disabled' : ''}>▼</button>
+          <button class="btn ghost sm" formaction="/panel/faq/delete" style="background:var(--bad)" type="submit" onclick="return confirm('Удалить гайд?')">Удалить</button>
+        </div>
+      </form>
+    </div>`).join('');
+    parts.push(`<div class="card"><h2>${esc(title)} (${entries.length})</h2>
+      <form method="POST" action="/panel/faq/add" class="form">${csrfField(user)}<input type="hidden" name="category" value="${cat}">
+        <label>Новый заголовок<input name="title" maxlength="120" required></label>
+        <label>Текст<textarea name="content" rows="3" maxlength="3000" required></textarea></label>
+        <button class="btn sm" type="submit">Добавить гайд</button>
+      </form></div>${rows}`);
+  }
+  return parts.join('');
+}
+
+// ---------- Шаблоны причин отказа (Владелец) ----------
+const REASON_QUEUES = [['application', 'Заявки на вступление'], ['kick', 'Заявки на увольнение'], ['vacation', 'Заявки на отпуск']];
+async function panelReasons(user) {
+  const parts = [];
+  for (const [q, title] of REASON_QUEUES) {
+    const rows = await db.all('SELECT * FROM reject_reason_templates WHERE queue = ? ORDER BY position, id', [q]).catch(() => []);
+    const list = rows.map((r, i) => `<tr><td>${esc(r.text)}</td><td style="white-space:nowrap">
+      <form method="POST" action="/panel/reason/move" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" name="dir" value="up" type="submit" ${i === 0 ? 'disabled' : ''}>▲</button></form>
+      <form method="POST" action="/panel/reason/move" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" name="dir" value="down" type="submit" ${i === rows.length - 1 ? 'disabled' : ''}>▼</button></form>
+      <form method="POST" action="/panel/reason/delete" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
+    </td></tr>`).join('');
+    parts.push(`<div class="card"><h2>${esc(title)} (${rows.length})</h2>
+      <div class="tablewrap"><table><tr><th>Причина</th><th></th></tr>${list || '<tr><td colspan="2">—</td></tr>'}</table></div>
+      <form method="POST" action="/panel/reason/add" class="form" style="margin-top:10px">${csrfField(user)}<input type="hidden" name="queue" value="${q}">
+        <label>Новая причина<input name="text" maxlength="300" required></label>
+        <button class="btn sm" type="submit">Добавить</button>
+      </form></div>`);
+  }
+  return parts.join('');
+}
+
 // ---------- Обработка POST ----------
 async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   if (!user) return '/login';
@@ -2008,6 +2304,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== выйти со всех устройств =====
   if (pathName === '/me/logout_all') {
     await db.run('UPDATE web_users SET sess_ver = COALESCE(sess_ver, 0) + 1 WHERE discord_id = ?', [user.id]);
+    _sessVerCache.delete(user.id); // чтобы другие устройства разлогинились сразу
     await webAudit(client, user, 'Выход со всех устройств (сайт)', '');
     return '/login';
   }
@@ -2791,6 +3088,360 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return `/ticket/${tid}?` + qs({ ok: 'Отправлено.' });
   }
 
+  // ===== проверка контракта (HR+) =====
+  if (pathName === '/panel/contract/review') {
+    if (acc.rank < LEVELS.hr) return '/panel?tab=contracts_check&' + qs({ err: 'Недостаточно прав.' });
+    const id = parseInt(body.get('id'), 10) || 0;
+    const verdict = body.get('verdict');
+    if (!['fulfilled', 'unfulfilled', 'rejected'].includes(verdict)) return '/panel?tab=contracts_check&' + qs({ err: 'Неизвестный вердикт.' });
+    const cn = await contracts.getContractById(id).catch(() => null);
+    if (!cn || cn.status !== 'pending') return '/panel?tab=contracts_check&' + qs({ err: 'Уже проверен или не найден.' });
+    await contracts.reviewContract(id, verdict, user.id);
+    try { await contractsDisplay.safeUpdateContractsStats(g); } catch (_) {}
+    if (cn.thread_id && (verdict === 'fulfilled' || verdict === 'unfulfilled')) {
+      try { await hook('checkContractPromotion')(g, cn.thread_id); } catch (_) {}
+    }
+    await webAudit(client, user, 'Контракт проверен (сайт)', `#${id} → ${verdict}`);
+    return '/panel?tab=contracts_check&' + qs({ ok: 'Готово.' });
+  }
+
+  // ===== гайды FAQ (Владелец) =====
+  if (pathName.startsWith('/panel/faq/')) {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=faq_manage&' + qs({ err: 'Недостаточно прав.' });
+    const refreshCat = async (cat) => { try { if (g) await faqDisplay.safeUpdateFaqChannel(g, cat); } catch (_) {} };
+    if (pathName === '/panel/faq/add') {
+      const cat = body.get('category') === 'hr' ? 'hr' : 'member';
+      const title = (body.get('title') || '').trim().slice(0, 120);
+      const cont = (body.get('content') || '').trim().slice(0, 3000);
+      if (!title || !cont) return '/panel?tab=faq_manage&' + qs({ err: 'Нужны заголовок и текст.' });
+      await faq.addEntry(cat, title, cont, user.id);
+      await refreshCat(cat);
+      await webAudit(client, user, 'FAQ: добавлен гайд (сайт)', `${cat}: ${title}`);
+      return '/panel?tab=faq_manage&' + qs({ ok: 'Гайд добавлен.' });
+    }
+    const eid = parseInt(body.get('id'), 10) || 0;
+    const e = await db.get('SELECT * FROM faq_entries WHERE id = ?', [eid]).catch(() => null);
+    if (!e) return '/panel?tab=faq_manage&' + qs({ err: 'Гайд не найден.' });
+    if (pathName === '/panel/faq/edit') {
+      const title = (body.get('title') || '').trim().slice(0, 120);
+      const cont = (body.get('content') || '').trim().slice(0, 3000);
+      if (!title || !cont) return '/panel?tab=faq_manage&' + qs({ err: 'Пустые поля.' });
+      await faq.updateEntry(eid, title, cont, user.id);
+      await refreshCat(e.category);
+      return '/panel?tab=faq_manage&' + qs({ ok: 'Сохранено.' });
+    }
+    if (pathName === '/panel/faq/delete') {
+      await faq.deleteEntry(eid);
+      await refreshCat(e.category);
+      await webAudit(client, user, 'FAQ: удалён гайд (сайт)', `#${eid}`);
+      return '/panel?tab=faq_manage&' + qs({ ok: 'Удалено.' });
+    }
+    if (pathName === '/panel/faq/move') {
+      await faq.moveEntry(eid, body.get('dir') === 'up' ? 'up' : 'down');
+      await refreshCat(e.category);
+      return '/panel?tab=faq_manage&' + qs({ ok: 'Порядок изменён.' });
+    }
+    return '/panel?tab=faq_manage';
+  }
+
+  // ===== шаблоны причин отказа (Владелец) =====
+  if (pathName.startsWith('/panel/reason/')) {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=reasons&' + qs({ err: 'Недостаточно прав.' });
+    if (pathName === '/panel/reason/add') {
+      const q = body.get('queue');
+      if (!['application', 'kick', 'vacation'].includes(q)) return '/panel?tab=reasons&' + qs({ err: 'Неизвестная очередь.' });
+      const text = (body.get('text') || '').trim().slice(0, 300);
+      if (!text) return '/panel?tab=reasons&' + qs({ err: 'Пустой текст.' });
+      const mx = await db.get('SELECT MAX(position) m FROM reject_reason_templates WHERE queue = ?', [q]);
+      await db.run('INSERT INTO reject_reason_templates (queue, text, position, created_at) VALUES (?, ?, ?, ?)', [q, text, (mx && mx.m != null ? mx.m : 0) + 1, new Date().toISOString()]);
+      return '/panel?tab=reasons&' + qs({ ok: 'Добавлено.' });
+    }
+    const rid = parseInt(body.get('id'), 10) || 0;
+    const r = await db.get('SELECT * FROM reject_reason_templates WHERE id = ?', [rid]).catch(() => null);
+    if (!r) return '/panel?tab=reasons&' + qs({ err: 'Не найдено.' });
+    if (pathName === '/panel/reason/delete') {
+      await db.run('DELETE FROM reject_reason_templates WHERE id = ?', [rid]);
+      return '/panel?tab=reasons&' + qs({ ok: 'Удалено.' });
+    }
+    if (pathName === '/panel/reason/move') {
+      const dir = body.get('dir') === 'up' ? -1 : 1;
+      const neighbour = await db.get(
+        `SELECT * FROM reject_reason_templates WHERE queue = ? AND position ${dir < 0 ? '<' : '>'} ? ORDER BY position ${dir < 0 ? 'DESC' : 'ASC'} LIMIT 1`,
+        [r.queue, r.position],
+      );
+      if (neighbour) {
+        await db.run('UPDATE reject_reason_templates SET position = ? WHERE id = ?', [neighbour.position, r.id]);
+        await db.run('UPDATE reject_reason_templates SET position = ? WHERE id = ?', [r.position, neighbour.id]);
+      }
+      return '/panel?tab=reasons&' + qs({ ok: 'Порядок изменён.' });
+    }
+    return '/panel?tab=reasons';
+  }
+
+  // ===== ручное добавление участника (Зам.+) =====
+  if (pathName === '/panel/member/add') {
+    if (acc.rank < LEVELS.deputy) return '/panel?tab=members&' + qs({ err: 'Недостаточно прав.' });
+    if (!g) return '/panel?tab=members&' + qs({ err: 'Бот недоступен.' });
+    const did = (body.get('discord_id') || '').trim();
+    const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
+    const stat = (body.get('static') || '').trim();
+    const lvl = parseInt(body.get('lvl'), 10) || 1;
+    let roleId = (body.get('role_id') || '').trim();
+    if (!(config.ROLE_IDS || []).includes(roleId)) roleId = config.ROLE_APPLY;
+    if (!/^\d{5,25}$/.test(did) || !name || !/^[0-9]+$/.test(stat)) return '/panel?tab=members&' + qs({ err: 'Проверьте поля.' });
+    if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [did])) return '/panel?tab=members&' + qs({ err: 'Уже в списке участников.' });
+    if (await db.get('SELECT id FROM blacklist WHERE discord_id = ? OR static = ?', [did, stat])) return '/panel?tab=members&' + qs({ err: 'В чёрном списке.' });
+    if (await passportsLib.isStaticTaken(stat)) return '/panel?tab=members&' + qs({ err: 'Такой № паспорта занят.' });
+    const now = new Date().toISOString();
+    let tag = did;
+    try { const m = await g.members.fetch(did); tag = m.user.tag; } catch (_) {}
+    await db.run(
+      `INSERT INTO participants (discord_id, discord_tag, name, static, lvl, skills, online, role_id, joined_at)
+       VALUES (?, ?, ?, ?, ?, '', '', ?, ?)`,
+      [did, tag, name, stat, lvl, roleId, now],
+    );
+    try {
+      const m = await g.members.fetch(did);
+      await m.roles.add([roleId, config.ROLE_ORGANIZATION].filter(Boolean));
+    } catch (_) {}
+    await hook('syncEffectiveIdentity')(g, did);
+    try { await history.logJoined(did, stat, name, 'Добавлен вручную через сайт'); } catch (_) {}
+    try { await hook('createProfileThread')(g, did, name, stat); } catch (_) {}
+    await hook('safeUpdateMembersList')(g);
+    await webAudit(client, user, 'Участник добавлен вручную (сайт)', `<@${did}> ${name} № ${stat}`);
+    return '/panel?tab=members&' + qs({ ok: 'Участник добавлен.' });
+  }
+
+  // ===== повторяющиеся розыгрыши (Владелец) =====
+  if (pathName === '/panel/giveaway/recur_create' || pathName === '/panel/giveaway/recur_toggle' || pathName === '/panel/giveaway/recur_delete') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (pathName === '/panel/giveaway/recur_create') {
+      const prize = (body.get('prize') || '').trim().slice(0, 200);
+      const winners = parseInt(body.get('winners'), 10) || 0;
+      const durMs = giveaways.parseDuration((body.get('duration') || '').trim());
+      const weekday = parseInt(body.get('weekday'), 10);
+      const channelId = (body.get('channel_id') || '').trim();
+      const roleId = (body.get('role_id') || '').trim() || null;
+      if (!prize || winners < 1 || !durMs || !(weekday >= 0 && weekday <= 6) || !/^[0-9]+$/.test(channelId)) {
+        return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля правила.' });
+      }
+      await giveaways.createRecurringRule(channelId, prize, winners, durMs, weekday, user.id, roleId);
+      await webAudit(client, user, 'Создано правило повторяющегося розыгрыша (сайт)', `«${prize}» по дням недели #${weekday}`);
+      return '/panel?tab=giveaways&' + qs({ ok: 'Правило создано.' });
+    }
+    const rid = parseInt(body.get('id'), 10) || 0;
+    const rule = await giveaways.getRecurringRule(rid).catch(() => null);
+    if (!rule) return '/panel?tab=giveaways&' + qs({ err: 'Правило не найдено.' });
+    if (pathName === '/panel/giveaway/recur_delete') {
+      await db.run('DELETE FROM giveaway_recurring_rules WHERE id = ?', [rid]);
+      await webAudit(client, user, 'Удалено правило повторяющегося розыгрыша (сайт)', `#${rid}`);
+      return '/panel?tab=giveaways&' + qs({ ok: 'Правило удалено.' });
+    }
+    const ns = rule.status === 'active' ? 'paused' : 'active';
+    await giveaways.setRecurringRuleStatus(rid, ns);
+    await webAudit(client, user, 'Правило повторяющегося розыгрыша: ' + (ns === 'active' ? 'возобновлено' : 'на паузе') + ' (сайт)', `#${rid}`);
+    return '/panel?tab=giveaways&' + qs({ ok: ns === 'active' ? 'Возобновлено.' : 'Поставлено на паузу.' });
+  }
+
+  // ===== разослать правила / опубликовать текст в канал (Владелец) =====
+  if (pathName === '/panel/rules_broadcast') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=texts&' + qs({ err: 'Недостаточно прав.' });
+    if (!g) return '/panel?tab=texts&' + qs({ err: 'Бот недоступен.' });
+    const text = (await hook('getCurrentText')('rules', '')) || '';
+    if (!text) return '/panel?tab=texts&' + qs({ err: 'Текст правил пуст.' });
+    const emb = new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(String(text).slice(0, 4000));
+    await postTo(client, config.CHANNEL_RULES, { embeds: [emb] });
+    const ids = (await db.all('SELECT discord_id FROM participants')).map((r) => r.discord_id);
+    (async () => {
+      let ok = 0;
+      for (const did of ids) { if (await dmTo(client, did, { embeds: [emb] })) ok++; await new Promise((r) => setTimeout(r, 1200)); }
+      await webAudit(client, user, 'Правила разосланы (сайт)', `в канал + ЛС ${ok}/${ids.length}`).catch(() => {});
+    })();
+    return '/panel?tab=texts&' + qs({ ok: `Правила отправлены в канал; рассылка в ЛС (${ids.length}) идёт в фоне.` });
+  }
+  if (pathName === '/panel/text/publish') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=texts&' + qs({ err: 'Недостаточно прав.' });
+    if (!g) return '/panel?tab=texts&' + qs({ err: 'Бот недоступен.' });
+    const key = body.get('key');
+    const chMap = { agitation: config.CHANNEL_AGITATION, hr_info: config.CHANNEL_HR_APPLY_MENU };
+    if (!chMap[key]) return '/panel?tab=texts&' + qs({ err: 'Нельзя опубликовать этот текст.' });
+    const text = (await hook('getCurrentText')(key, '')) || '';
+    if (!text) return '/panel?tab=texts&' + qs({ err: 'Текст пуст.' });
+    const payload = key === 'agitation'
+      ? { content: String(text).slice(0, 1900), embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription('```\n' + String(text).slice(0, 3900) + '\n```')] }
+      : { embeds: [new EmbedBuilder().setColor(0x5865f2).setDescription(String(text).slice(0, 4000))] };
+    await postTo(client, chMap[key], payload);
+    await webAudit(client, user, 'Текст опубликован в канал (сайт)', key);
+    return '/panel?tab=texts&' + qs({ ok: 'Опубликовано.' });
+  }
+
+  // ===== бэкап сейчас (Владелец) =====
+  if (pathName === '/tools/backup_now') {
+    if (acc.rank < LEVELS.owner) return '/tools?' + qs({ err: 'Недостаточно прав.' });
+    let dest = null;
+    try { dest = backup.backupNow(); } catch (e) { return '/tools?' + qs({ err: 'Ошибка: ' + e.message }); }
+    await webAudit(client, user, 'Резервная копия БД (сайт)', dest || 'не удалось');
+    return '/tools?' + qs(dest ? { ok: 'Копия сохранена: ' + dest } : { err: 'Не удалось создать копию.' });
+  }
+
+  // ===== заявки от участника: изменение данных / паспорт / апелляция =====
+  if (pathName === '/me/data_change') {
+    const p = await db.get('SELECT discord_tag FROM participants WHERE discord_id = ?', [user.id]);
+    if (!p) return '/me?' + qs({ err: 'Только для участников.' });
+    const stat = (body.get('static') || '').trim();
+    const newName = (body.get('new_name') || '').trim().replace(/[_\s]+/g, ' ').trim();
+    const pp = (await passportsLib.getAllPassports(user.id)).find((x) => x.static === stat);
+    if (!pp) return '/me?' + qs({ err: 'Это не ваш паспорт.' });
+    if (!newName || newName === pp.name) return '/me?' + qs({ err: 'Введите новое имя.' });
+    if (await db.get("SELECT id FROM data_change_requests WHERE discord_id = ? AND status='pending'", [user.id])) return '/me?' + qs({ err: 'Заявка уже на рассмотрении.' });
+    const created = new Date().toISOString();
+    const r = await db.run(
+      'INSERT INTO data_change_requests (discord_id, discord_tag, target_static, old_name, new_name, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [user.id, p.discord_tag || uname, stat, pp.name, newName, 'pending', created],
+    );
+    const sent = await postTo(client, config.CHANNEL_DATA_CHANGE_REVIEW, {
+      content: REVIEW_MENTION() + ' — заявка на изменение данных (сайт)',
+      embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle(`Изменение данных #${r.lastID}`).addFields(
+        { name: 'Заявитель', value: `<@${user.id}>` },
+        { name: 'Паспорт', value: `№ ${stat}`, inline: true },
+        { name: 'Было → Станет', value: `${pp.name} → ${newName}` },
+      )],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`data_change_accept:${r.lastID}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`data_change_reject:${r.lastID}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+      )],
+      ...REVIEW_MENTION_OPTS,
+    });
+    if (sent) await db.run('UPDATE data_change_requests SET message_id = ? WHERE id = ?', [sent.id, r.lastID]);
+    await webAudit(client, user, 'Заявка на изменение данных (сайт)', `#${r.lastID} № ${stat}: ${pp.name} → ${newName}`);
+    return '/me?' + qs({ ok: 'Заявка отправлена.' });
+  }
+  if (pathName === '/me/passport_request') {
+    const p = await db.get('SELECT discord_tag FROM participants WHERE discord_id = ?', [user.id]);
+    if (!p) return '/me?' + qs({ err: 'Только для участников.' });
+    const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
+    const stat = (body.get('static') || '').trim();
+    if (!name || !/^[0-9]+$/.test(stat)) return '/me?' + qs({ err: 'Проверьте имя и № паспорта.' });
+    if (await passportsLib.isStaticTaken(stat)) return '/me?' + qs({ err: 'Такой № паспорта уже занят.' });
+    if (await db.get("SELECT id FROM passport_requests WHERE discord_id = ? AND status='pending'", [user.id])) return '/me?' + qs({ err: 'Заявка уже на рассмотрении.' });
+    const r = await db.run(
+      'INSERT INTO passport_requests (discord_id, discord_tag, name, static, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [user.id, p.discord_tag || uname, name, stat, 'pending', new Date().toISOString()],
+    );
+    const sent = await postTo(client, config.CHANNEL_APPLY_REVIEW, {
+      content: REVIEW_MENTION() + ' — заявка на добавление паспорта (сайт)',
+      embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle(`Добавление паспорта #${r.lastID}`).addFields(
+        { name: 'Заявитель', value: `<@${user.id}>` },
+        { name: 'Имя Фамилия', value: name, inline: true },
+        { name: '№ Паспорта', value: stat, inline: true },
+      )],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`passport_request_accept:${r.lastID}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`passport_request_reject:${r.lastID}`).setLabel('❌ Отказать').setStyle(ButtonStyle.Danger),
+      )],
+      ...REVIEW_MENTION_OPTS,
+    });
+    if (sent) await db.run('UPDATE passport_requests SET message_id = ? WHERE id = ?', [sent.id, r.lastID]);
+    await webAudit(client, user, 'Заявка на добавление паспорта (сайт)', `#${r.lastID} ${name} № ${stat}`);
+    return '/me?' + qs({ ok: 'Заявка отправлена.' });
+  }
+  if (pathName === '/me/appeal') {
+    const bl = await db.all('SELECT * FROM blacklist WHERE discord_id = ?', [user.id]);
+    if (!bl.length) return '/me?' + qs({ err: 'Вы не в чёрном списке.' });
+    if (bl.some((b) => b.appeal_blocked)) return '/me?' + qs({ err: 'Вам запрещено подавать апелляцию.' });
+    if (await db.get("SELECT id FROM appeals WHERE discord_id = ? AND status='pending'", [user.id])) return '/me?' + qs({ err: 'Апелляция уже на рассмотрении.' });
+    const text = (body.get('text') || '').trim().slice(0, 1500) || '(без текста)';
+    const r = await db.run(
+      "INSERT INTO appeals (discord_id, discord_tag, text, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+      [user.id, uname, text, new Date().toISOString()],
+    );
+    const sent = await postTo(client, config.CHANNEL_APPEAL_REVIEW, {
+      content: config.ROLES_BLACKLIST_ALLOWED.map((x) => `<@&${x}>`).join(' ') + ' — апелляция ЧС (сайт)',
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle(`🚫 Апелляция на ЧС #${r.lastID}`).setDescription(text.slice(0, 4000)).addFields(
+        { name: 'Автор', value: `<@${user.id}> | ${esc(uname)}` },
+      )],
+      components: [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`appeal_accept:${r.lastID}`).setLabel('✅ Снять из ЧС').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`appeal_reject:${r.lastID}`).setLabel('❌ Отклонить').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`appeal_block:${user.id}`).setLabel('🔒 Запретить апелляции').setStyle(ButtonStyle.Secondary),
+      )],
+      allowedMentions: { roles: config.ROLES_BLACKLIST_ALLOWED },
+    });
+    if (sent) await db.run('UPDATE appeals SET message_id = ? WHERE id = ?', [sent.id, r.lastID]);
+    await webAudit(client, user, 'Апелляция ЧС подана (сайт)', `#${r.lastID}`);
+    return '/me?' + qs({ ok: 'Апелляция подана.' });
+  }
+
+  // ===== админ-панель havirys: бренд / тема / Discord =====
+  if (pathName.startsWith('/admin/')) {
+    if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только для владельца-аккаунта (havirys).' });
+
+    if (pathName === '/admin/site') {
+      const lim = { brand: 60, invite: 200, hero_title: 120, hero_text: 600, footer: 300 };
+      for (const k of Object.keys(lim)) {
+        await db.setSetting('site.' + k, (body.get(k) || '').trim().slice(0, lim[k]));
+      }
+      await loadSite(true);
+      await webAudit(client, user, 'Изменены название/тексты сайта', `brand=${(body.get('brand') || '').slice(0, 60)}`);
+      return '/panel?tab=admin&' + qs({ ok: 'Сохранено.' });
+    }
+
+    if (pathName === '/admin/theme') {
+      const KEYS = ['bg', 'panel', 'panel2', 'line', 'text', 'muted', 'accent', 'accent2', 'ok', 'bad', 'warn'];
+      let n = 0;
+      for (const k of KEYS) {
+        const raw = (body.get('t_' + k) || body.get('c_' + k) || '').trim().toLowerCase();
+        if (/^#[0-9a-f]{6}$/.test(raw)) { await db.setSetting('site.color.' + k, raw); n++; }
+      }
+      await loadSite(true);
+      await webAudit(client, user, 'Изменена тема сайта', `${n} цвет(ов)`);
+      return '/panel?tab=admin&' + qs({ ok: 'Тема применена.' });
+    }
+
+    if (pathName === '/admin/theme_reset') {
+      await db.run("DELETE FROM settings WHERE key LIKE 'site.color.%'");
+      await loadSite(true);
+      await webAudit(client, user, 'Сброшена тема сайта', '');
+      return '/panel?tab=admin&' + qs({ ok: 'Цвета возвращены к стандартным.' });
+    }
+
+    if (pathName === '/admin/bot_nick') {
+      if (!g) return '/panel?tab=admin&' + qs({ err: 'Бот недоступен.' });
+      const nick = (body.get('nick') || '').trim().slice(0, 32);
+      try {
+        await g.members.me.setNickname(nick || null);
+      } catch (e) { return '/panel?tab=admin&' + qs({ err: 'Не удалось: ' + e.message }); }
+      await webAudit(client, user, 'Изменён ник бота на сервере', nick || '(сброшен)');
+      return '/panel?tab=admin&' + qs({ ok: 'Ник бота обновлён.' });
+    }
+
+    if (pathName === '/admin/menus') {
+      if (!g) return '/panel?tab=admin&' + qs({ err: 'Бот недоступен.' });
+      hook('initMenus')(g).catch((e) => console.error('[web] initMenus:', e.message));
+      await webAudit(client, user, 'Переинициализация меню Discord (сайт)', '');
+      return '/panel?tab=admin&' + qs({ ok: 'Меню публикуются (в фоне).' });
+    }
+
+    if (pathName === '/admin/role') {
+      if (!g) return '/panel?tab=admin&' + qs({ err: 'Бот недоступен.' });
+      const rid = (body.get('id') || '').trim();
+      const name = (body.get('name') || '').trim().slice(0, 90);
+      const color = (body.get('color') || '').trim().toLowerCase();
+      try {
+        const role = await g.roles.fetch(rid);
+        if (!role) return '/panel?tab=admin&' + qs({ err: 'Роль не найдена.' });
+        const patch = {};
+        if (name && name !== role.name) patch.name = name;
+        if (/^#[0-9a-f]{6}$/.test(color)) patch.color = parseInt(color.slice(1), 16);
+        if (Object.keys(patch).length) await role.edit(patch);
+      } catch (e) { return '/panel?tab=admin&' + qs({ err: 'Не удалось изменить роль: ' + e.message }); }
+      await webAudit(client, user, 'Изменена роль Discord (сайт)', `${rid} → «${name}» ${color}`);
+      return '/panel?tab=admin&' + qs({ ok: 'Роль обновлена.' });
+    }
+
+    return '/panel?tab=admin';
+  }
+
   // ===== аварийная замена БД (havirys) =====
   if (pathName === '/panel/db/restore') {
     if (user.id !== OWNER_ID) return '/tools?' + qs({ err: 'Только для владельца-аккаунта.' });
@@ -2833,6 +3484,8 @@ function start(client, hooks = {}) {
 
       if (path === '/healthz') return done(200, { 'Content-Type': 'text/plain' }, 'ok');
 
+      await loadSite(); // настройки бренда/темы (кэш 30 сек)
+
       // ----- POST: все действия записи -----
       if (req.method === 'POST') {
         if (!rateOk(user ? 'u:' + user.id : 'ip:' + clientIp)) {
@@ -2850,7 +3503,7 @@ function start(client, hooks = {}) {
 
       if (path === '/' && req.method === 'GET') {
         const level = user ? (await accessFor(client, user.id)).level : 'guest';
-        return html(200, layout({ title: config.SITE_BRAND, user, level, body: flash + await landingBody(await orgStats()) }));
+        return html(200, layout({ title: siteBrand(), user, level, body: flash + await landingBody(await orgStats()) }));
       }
 
       if (path === '/login') {
