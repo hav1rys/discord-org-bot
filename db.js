@@ -587,6 +587,60 @@ const SCHEMA = {
     },
   },
 
+  // Уведомления пользователю на сайте («колокольчик»).
+  notifications: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      kind: 'TEXT',
+      text: 'TEXT',
+      link: 'TEXT',
+      created_at: 'TEXT',
+      read_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  // Приватные заметки руководства об участнике (видны HR+ на профиле).
+  staff_notes: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      target_id: 'TEXT',
+      author_id: 'TEXT',
+      author_name: 'TEXT',
+      text: 'TEXT',
+      at: 'TEXT',
+    },
+    indexes: [['target_id']],
+  },
+
+  // Редактируемые блоки главной страницы сайта.
+  landing_blocks: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      position: 'INTEGER',
+      kind: 'TEXT', // text | buttons | cards
+      title: 'TEXT',
+      content: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+
+  // Отмена последнего действия (повышение/понижение) в течение окна.
+  undo_actions: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      kind: 'TEXT', // rank
+      actor_id: 'TEXT',
+      target_id: 'TEXT',
+      payload: 'TEXT', // JSON: { static, prevRoleId }
+      created_at: 'TEXT',
+      expires_at: 'TEXT',
+      done_at: 'TEXT',
+    },
+    indexes: [['target_id']],
+  },
+
   // История смены НИКА на сервере (не путать с data_change_requests — там
   // заявки на смену Имени Фамилии по паспорту). Пишется из guildMemberUpdate;
   // изменения, сделанные самим ботом (синхронизация эффективной личности),

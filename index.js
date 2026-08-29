@@ -52,6 +52,7 @@ const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
 const badges = require('./badges');
+const { notify } = require('./notify');
 
 const client = new Client({
   intents: [
@@ -2395,6 +2396,7 @@ async function applyApplicationRejection(interaction, guild, appId, reason) {
     actionSummary(interaction.user.id, '❌ Отклонено', reason),
   );
   await dmUser(guild, app.discord_id, `❌ Ваша заявка на вступление была отклонена. Причина: ${reason}`);
+  await notify(app.discord_id, 'apply', `Заявка на вступление отклонена. Причина: ${reason}`, '/apply');
   await logAudit(guild, interaction.user, 'Заявка отклонена', [
     { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
     { name: 'Чья заявка', value: `<@${app.discord_id}> | № ${appId}`, inline: true },
@@ -5847,6 +5849,10 @@ client.on('interactionCreate', async (interaction) => {
         if (contract.status !== 'pending') return safeReply(interaction, 'Этот скриншот уже проверен.');
 
         await contracts.reviewContract(contractId, status, interaction.user.id);
+        await notify(contract.discord_id, 'contract',
+          status === 'fulfilled' ? 'Ваш контракт проверен и засчитан ✅'
+            : status === 'unfulfilled' ? 'Ваш контракт проверен — не выполнен ❌'
+              : 'Скриншот не засчитан как контракт 🚫', '/me');
 
         const labels = {
           fulfilled: '✅ Контракт выполнен',
@@ -7973,6 +7979,7 @@ client.on('interactionCreate', async (interaction) => {
 
         await refreshReviewMessage(interaction.channel, app.message_id, await applicationReviewEmbed({ ...app, ...fields, status: 'accepted' }, guild.id), [], actionSummary(interaction.user.id, '✅ Принято'));
         await dmUser(guild, app.discord_id, '✅ Ваша заявка на вступление принята! Добро пожаловать в организацию.');
+        await notify(app.discord_id, 'apply', 'Ваша заявка на вступление принята — добро пожаловать!', '/me');
         if (profileChannelUrl) {
           await dmUser(
             guild,
@@ -9307,6 +9314,7 @@ client.once('clientReady', async () => {
       runWeeklyRankAdjustment,
       initMenus,
       checkContractPromotion,
+      syncAllCommandPermissions,
       commandDefaultTiers: COMMAND_DEFAULT_TIERS,
       tierLabels: Object.fromEntries(Object.entries(TIER_INFO).map(([k, v]) => [k, v.label])),
     });
