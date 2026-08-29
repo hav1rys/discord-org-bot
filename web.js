@@ -160,11 +160,28 @@ function nickOf(client, id) {
   const m = g ? g.members.cache.get(String(id)) : null;
   return m ? m.displayName : null;
 }
-// Кликабельное имя/ссылка на профиль вместо сырого <@id>.
+// Кликабельное имя/ссылка на профиль вместо сырого <@id> — в стиле Discord-тега.
 function personLink(client, id) {
   if (!id) return '—';
   const nm = nickOf(client, id) || ('ID ' + String(id).slice(-6));
-  return `<a href="/u/${esc(id)}">${esc(nm)}</a>`;
+  return `<a class="mention" href="/u/${esc(id)}">@${esc(nm)}</a>`;
+}
+// Роль в стиле Discord (цветной чип) вместо сырого <@&id>.
+function roleTag(client, id) {
+  if (!id) return '';
+  const g = client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
+  const r = g ? g.roles.cache.get(String(id)) : null;
+  if (!r) return `<span class="mention role">@${esc(String(id))}</span>`;
+  let hex = '#' + (r.color || 0).toString(16).padStart(6, '0');
+  if (hex === '#000000') hex = '';
+  return `<span class="mention role"${hex ? ` style="color:${hex};border-color:${hex}44;background:${hex}1a"` : ''}>@${esc(r.name)}</span>`;
+}
+// Заменяет сырые <@id> и <@&id> в готовой строке на красивые чипы.
+function renderMentions(client, s) {
+  if (s == null) return s;
+  return String(s)
+    .replace(/<@&(\d+)>/g, (m, rid) => roleTag(client, rid))
+    .replace(/<@!?(\d+)>/g, (m, uid) => personLink(client, uid));
 }
 
 // ---------- Вёрстка ----------
@@ -177,6 +194,12 @@ const STYLE = `
 html[data-theme="light"]{
   --bg:#f5f6f8;--panel:#ffffff;--panel2:#eef0f3;--line:#dcdfe4;--text:#1b1c21;
   --muted:#63656e;--accent:#4353d6;--accent2:#3f51c9;--ok:#1f9d63;--bad:#d64545;--warn:#b8891f;
+}
+@media(prefers-color-scheme:light){
+  html:not([data-theme]){
+    --bg:#f5f6f8;--panel:#ffffff;--panel2:#eef0f3;--line:#dcdfe4;--text:#1b1c21;
+    --muted:#63656e;--accent:#4353d6;--accent2:#3f51c9;--ok:#1f9d63;--bad:#d64545;--warn:#b8891f;
+  }
 }
 html,body{background:var(--bg);color:var(--text)}
 body{font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,sans-serif;-webkit-font-smoothing:antialiased}
@@ -238,6 +261,8 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .form input:focus,.form select:focus,.form textarea:focus{outline:1px solid var(--accent);border-color:var(--accent)}
 .form input[readonly]{opacity:.5}
 .form input[type=color]{width:48px;height:34px;padding:2px;border-radius:8px;cursor:pointer;flex:0 0 auto}
+.form input[type=checkbox]{width:auto;display:inline-block;margin:0;flex:0 0 auto}
+.form label.chk{display:flex;gap:8px;align-items:center;margin:6px 0}
 .form button{margin-top:14px}
 .avatar{border-radius:50%;object-fit:cover;border:1px solid var(--line);background:var(--panel2);flex:0 0 auto}
 .phead{display:flex;gap:16px;align-items:center;margin-bottom:6px}
@@ -247,12 +272,36 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .actions h3{font-size:14px;margin-bottom:2px}
 .tglbtn{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:14px}
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
-.chart{display:flex;align-items:flex-end;gap:10px;height:170px;padding:10px 0;overflow-x:auto}
-.chart .col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:54px}
-.chart .bar2{width:34px;background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:6px 6px 0 0}
-.chart .cap{font-size:11px;color:var(--muted);text-align:center}
+.chart{display:flex;align-items:flex-end;gap:14px;padding:8px 2px 0;overflow-x:auto}
+.chart .col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:46px;flex:0 0 auto}
+.chart .track{height:140px;width:36px;display:flex;align-items:flex-end;background:var(--panel2);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+.chart .bar2{display:block;width:100%;background:linear-gradient(180deg,var(--accent2),var(--accent));border-radius:6px 6px 0 0;min-height:3px}
+.chart .cap{font-size:11px;color:var(--muted);text-align:center;white-space:nowrap;max-width:70px;overflow:hidden;text-overflow:ellipsis}
 .chart .val{font-size:12px;font-weight:700}
 .mini{font-size:12px;color:var(--muted)}
+.mention{display:inline-block;background:var(--panel2);color:var(--accent2);border:1px solid var(--line);border-radius:6px;padding:0 5px;font-weight:600;font-size:.94em;line-height:1.5;text-decoration:none}
+.mention:hover{background:var(--line);text-decoration:none}
+@supports (background:color-mix(in srgb,red,blue)){
+  .mention{background:color-mix(in srgb,var(--accent) 16%,transparent);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+  .mention:hover{background:color-mix(in srgb,var(--accent) 28%,transparent)}
+  .mention.role{background:color-mix(in srgb,var(--accent) 12%,transparent)}
+}
+.sitebanner{position:relative;background:var(--accent);color:#fff;padding:10px 40px 10px 20px;text-align:center;font-size:14px;font-weight:600}
+.sitebanner .md{display:inline}
+.sitebanner .md a{color:#fff;text-decoration:underline}
+.sitebanner .md br{display:none}
+.sitebanner .x{position:absolute;right:14px;top:50%;transform:translateY(-50%);cursor:pointer;opacity:.8;font-weight:400}
+.sitebanner .x:hover{opacity:1}
+.heat{display:grid;grid-template-columns:auto repeat(24,1fr);gap:2px;font-size:10px}
+.heat .hc{width:100%;aspect-ratio:1;border-radius:2px;background:var(--accent)}
+.heat .hl{color:var(--muted);padding-right:4px;white-space:nowrap;align-self:center}
+.progress{height:8px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;overflow:hidden;margin:4px 0}
+.progress>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+@media print{
+  .top,.sitebanner,.tabs,.foot,.form,.btn{display:none!important}
+  .card{break-inside:avoid;border-color:#ccc}
+  body{background:#fff;color:#000}
+}
 @media(max-width:640px){
   .wrap{padding:18px 12px 48px}
   .top{padding:10px 12px}
@@ -263,28 +312,29 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 }
 `;
 
-const THEME_TOGGLE = `<button class="tglbtn" type="button" onclick="fcTheme()" title="Тема">🌓</button>`;
+const THEME_TOGGLE = `<button class="tglbtn" type="button" onclick="fcTheme()" title="Тема: авто → светлая → тёмная">🌓</button>`;
 const CLIENT_SCRIPT = `
 (function(){
-  try{
-    var t=localStorage.getItem('fc_theme');
-    if(t)document.documentElement.setAttribute('data-theme',t);
-  }catch(e){}
+  var d=document.documentElement;
+  function apply(m){ if(m==='light')d.setAttribute('data-theme','light'); else if(m==='dark')d.setAttribute('data-theme','dark'); else d.removeAttribute('data-theme'); }
+  var stored=null; try{stored=localStorage.getItem('fc_theme');}catch(e){}
+  apply(stored||'auto');
   window.fcTheme=function(){
-    var cur=document.documentElement.getAttribute('data-theme')==='light'?'':'light';
-    if(cur)document.documentElement.setAttribute('data-theme','light');
-    else document.documentElement.removeAttribute('data-theme');
-    try{localStorage.setItem('fc_theme',cur);}catch(e){}
+    var cur=stored||'auto', next=cur==='auto'?'light':cur==='light'?'dark':'auto';
+    stored=next; apply(next);
+    try{localStorage.setItem('fc_theme',next);}catch(e){}
   };
   try{
+    var b=document.getElementById('sitebanner');
+    if(b){ var key='fc_ban_'+(b.dataset.h||'');
+      if(localStorage.getItem(key))b.style.display='none';
+      var x=b.querySelector('.x'); if(x)x.onclick=function(){b.style.display='none';try{localStorage.setItem(key,'1');}catch(e){}};
+    }
+  }catch(e){}
+  try{
     var p=location.pathname, s=location.search;
-    if(p==='/panel'&&s.indexOf('tab=')<0){
-      var lt=localStorage.getItem('fc_panel_tab');
-      if(lt)location.replace('/panel?tab='+encodeURIComponent(lt));
-    }
-    if(p==='/panel'){
-      var m=s.match(/tab=([^&]+)/); if(m)localStorage.setItem('fc_panel_tab',decodeURIComponent(m[1]));
-    }
+    if(p==='/panel'&&s.indexOf('tab=')<0){ var lt=localStorage.getItem('fc_panel_tab'); if(lt)location.replace('/panel?tab='+encodeURIComponent(lt)); }
+    if(p==='/panel'){ var m=s.match(/tab=([^&]+)/); if(m)localStorage.setItem('fc_panel_tab',decodeURIComponent(m[1])); }
   }catch(e){}
 })();`;
 
@@ -309,6 +359,7 @@ function mdToHtml(src) {
   for (const raw of t.split('\n')) {
     const line = raw.replace(/\s+$/, '');
     let m;
+    if ((m = line.match(/^\s*-#\s+(.*)$/))) { closeLists(); out.push(`<div class="mini" style="margin:2px 0">${mdInline(m[1])}</div>`); continue; }
     if ((m = line.match(/^\s*[-*]\s+(.*)$/))) { if (!inUl) { closeLists(); out.push('<ul>'); inUl = true; } out.push('<li>' + mdInline(m[1]) + '</li>'); continue; }
     if ((m = line.match(/^\s*\d+\.\s+(.*)$/))) { if (!inOl) { closeLists(); out.push('<ol>'); inOl = true; } out.push('<li>' + mdInline(m[1]) + '</li>'); continue; }
     closeLists();
@@ -327,7 +378,7 @@ let SITE = { color: {} };
 let _siteAt = 0;
 async function loadSite(force) {
   if (!force && Date.now() - _siteAt < 30000) return SITE;
-  const next = { color: {} };
+  const next = { color: {}, _navPages: [] };
   try {
     const rows = await db.all("SELECT key, value FROM settings WHERE key LIKE 'site.%'");
     for (const r of rows) {
@@ -339,6 +390,7 @@ async function loadSite(force) {
         if (r.value != null && r.value !== '') next[k] = r.value;
       }
     }
+    next._navPages = await db.all("SELECT slug, title FROM site_pages WHERE nav = 1").catch(() => []);
   } catch (_) {}
   SITE = next;
   _siteAt = Date.now();
@@ -352,18 +404,24 @@ function themeOverrideCss() {
   return d ? `:root{${d}}` : '';
 }
 function brandHtml() {
+  const logo = SITE.logo && /^(https?:|data:image\/)/.test(SITE.logo)
+    ? `<img src="${esc(SITE.logo)}" alt="" style="height:22px;vertical-align:middle;border-radius:4px;margin-right:6px">` : '';
   const parts = siteBrand().trim().split(/\s+/);
-  return parts.length > 1
+  const txt = parts.length > 1
     ? `<b>${esc(parts[0])}</b> ${esc(parts.slice(1).join(' '))}`
     : `<b>${esc(siteBrand())}</b>`;
+  return logo + txt;
 }
-
-function topbar(user, level, notif) {
-  const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
-  if (!user) {
-    return `<div class="top"><div class="left">${THEME_TOGGLE}<a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
+function navItems(level) {
+  if (SITE.nav) {
+    return SITE.nav.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0] && a[1])
+      .filter(([, , tier]) => {
+        const t = (tier || 'all').toLowerCase();
+        if (t === 'hr') return LEVELS[level] >= LEVELS.hr;
+        if (t === 'member') return LEVELS[level] >= LEVELS.member;
+        return true;
+      }).map(([txt, url]) => `<a href="${esc(url)}">${esc(txt)}</a>`);
   }
-  const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${notif ? `<b style="color:var(--bad)"> ${notif}</b>` : ''}</a>`;
   const nav = ['<a href="/me">Мой профиль</a>'];
   if (LEVELS[level] < LEVELS.member) nav.push('<a href="/apply">Подать заявку</a>');
   if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/people">Участники</a>');
@@ -372,22 +430,42 @@ function topbar(user, level, notif) {
   if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/commands">Команды</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/dashboard">Дашборд</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel">Панель</a>');
+  for (const pg of (SITE._navPages || [])) nav.push(`<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`);
+  return nav;
+}
+
+function topbar(user, level, notif) {
+  const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
+  if (!user) {
+    const gnav = (SITE._navPages || []).map((pg) => `<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`).join('');
+    return `<div class="top"><div class="left nav">${THEME_TOGGLE}${gnav}<a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
+  }
+  const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${notif ? `<b style="color:var(--bad)"> ${notif}</b>` : ''}</a>`;
   return `<div class="top">
-    <div class="left nav">${nav.join('')}<a href="/logout">Выйти</a></div>
+    <div class="left nav">${navItems(level).join('')}<a href="/logout">Выйти</a></div>
     <div class="right">${bell}${THEME_TOGGLE}${brand}</div>
   </div>`;
+}
+function bannerHtml() {
+  if (SITE.banner_on !== '1' || !SITE.banner_text) return '';
+  const h = crypto.createHash('md5').update(SITE.banner_text).digest('hex').slice(0, 8);
+  return `<div id="sitebanner" class="sitebanner" data-h="${h}">${mdToHtml(SITE.banner_text)}<span class="x" title="скрыть">✕</span></div>`;
 }
 
 function layout(opts) {
   const override = themeOverrideCss();
   const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())} · сайт работает на том же сервере, что и Discord-бот`;
+  const favicon = SITE.logo && /^(https?:|data:image\/)/.test(SITE.logo) ? esc(SITE.logo) : '';
+  const customCss = SITE.css ? `<style>${String(SITE.css).replace(/<\//g, '<\\/').slice(0, 20000)}</style>` : '';
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(opts.title)}</title>
 <link rel="manifest" href="/manifest.webmanifest">
+${favicon ? `<link rel="icon" href="${favicon}">` : ''}
 <meta name="theme-color" content="${(SITE.color && SITE.color.bg) || '#0f1013'}">
-<style>${STYLE}${override}</style><script>${CLIENT_SCRIPT}</script></head><body>
+<style>${STYLE}${override}</style>${customCss}<script>${CLIENT_SCRIPT}</script></head><body>
 ${topbar(opts.user, opts.level || 'guest', opts.notif || 0)}
+${bannerHtml()}
 <div class="wrap${opts.wide ? ' wide' : ''}">${opts.body}
 <div class="foot">${foot}</div>
 </div></body></html>`;
@@ -475,19 +553,18 @@ function statsCard(st) {
 async function renderLandingBlocks(inv, st = {}) {
   const rows = await db.all('SELECT * FROM landing_blocks ORDER BY position, id').catch(() => []);
   if (!rows.length) {
+    const DEF_FEAT = 'Контракты от 50 векселей | Без x2. Берёшь сам, когда удобно.\nОфис в Rockford Hills BC | Вексели сдаются там же.\nПомощь в прокачке | Поддержка по навыкам и профессиям.\nНаборы при активности | Можно брать наборы при минимальном онлайне.';
+    const DEF_HOWTO = `Зайти на Discord-сервер по [приглашению](${siteInvite()}).\nНажать «Подать заявку» и заполнить форму.\nДождаться решения HR — ответ придёт в ЛС от бота.`;
+    const featSrc = (SITE.features && SITE.features.trim()) ? SITE.features : DEF_FEAT;
+    const howtoSrc = (SITE.howto && SITE.howto.trim()) ? SITE.howto : DEF_HOWTO;
+    const featCards = featSrc.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0])
+      .map(([t, d]) => `<div class="c"><h3>${esc(t)}</h3><p>${mdInline(esc(d || ''))}</p></div>`).join('');
+    const steps = howtoSrc.split('\n').map((s) => s.trim()).filter(Boolean)
+      .map((s) => `<li>${mdInline(esc(s))}</li>`).join('');
     return `
-  <div class="card"><h2>Преимущества</h2><div class="feat">
-    <div class="c"><h3>Контракты от 50 векселей</h3><p>Без x2. Берёшь сам, когда удобно.</p></div>
-    <div class="c"><h3>Офис в Rockford Hills ВС</h3><p>Вексели сдаются там же.</p></div>
-    <div class="c"><h3>Помощь в прокачке</h3><p>Поддержка по навыкам и профессиям.</p></div>
-    <div class="c"><h3>Наборы при активности</h3><p>Можно брать наборы при минимальном онлайне.</p></div>
-  </div></div>
-  <div class="card"><h2>Как вступить</h2>
-    <ol style="margin-left:18px;color:var(--muted)">
-      <li>Зайти на Discord-сервер по <a href="${esc(inv)}" target="_blank" rel="noopener">приглашению</a>.</li>
-      <li>Нажать «Подать заявку» и заполнить форму.</li>
-      <li>Дождаться решения HR — ответ придёт в ЛС от бота.</li>
-    </ol></div>`;
+  ${featCards ? `<div class="card"><h2>${esc(SITE.features_title || 'Преимущества')}</h2><div class="feat">${featCards}</div></div>` : ''}
+  ${steps ? `<div class="card"><h2>${esc(SITE.howto_title || 'Как вступить')}</h2>
+    <ol style="margin-left:18px;color:var(--muted)">${steps}</ol></div>` : ''}`;
   }
   const subst = (s) => substStats(s, st);
   return rows.map((b) => {
@@ -536,11 +613,13 @@ async function panelLanding(user) {
       </div>
     </form>
   </div>`).join('');
-  const cb = (k, lbl) => `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" name="${k}" value="1" ${SITE[k] === '1' ? 'checked' : ''}> ${esc(lbl)}</label>`;
+  const cb = (k, lbl) => `<label class="chk"><input type="checkbox" name="${k}" value="1" ${SITE[k] === '1' ? 'checked' : ''}><span>${esc(lbl)}</span></label>`;
   return `
   <div class="card"><h2>Публичная главная — что показывать</h2>
     <p class="mini">Эту страницу видят и не-участники. Спрячьте лишнее и соберите блоки под визитёров.</p>
     <form method="POST" action="/admin/landing/settings" class="form">${csrfField(user)}
+      ${cb('banner_on', 'Показывать баннер-объявление вверху всех страниц')}
+      <label>Текст баннера (можно ссылки/жирный как в Discord)<textarea name="banner_text" rows="2" maxlength="400">${esc(SITE.banner_text || '')}</textarea></label>
       ${cb('hide_stats', 'Спрятать «Организация в цифрах»')}
       ${cb('hide_giveaways', 'Спрятать «Идут розыгрыши»')}
       ${cb('hide_agitation', 'Спрятать «Текущую агитацию»')}
@@ -550,16 +629,50 @@ async function panelLanding(user) {
       <label>Заголовок блока агитации<input name="agitation_title" value="${esc(SITE.agitation_title || 'Текущая агитация')}" maxlength="80"></label>
       <label>Мин. высота героя, px (0 = авто)<input name="hero_minh" type="number" min="0" max="900" value="${esc(SITE.hero_minh || '0')}"></label>
       <label>Кнопки в герое — строка «Текст | URL»<textarea name="hero_buttons" rows="3" maxlength="600">${esc(SITE.hero_buttons && SITE.hero_buttons.trim() ? SITE.hero_buttons : 'Подать заявку на вступление | /apply\nВойти через Discord | /login\nDiscord-сервер | ' + siteInvite())}</textarea></label>
+      <label>Заголовок блока «Преимущества»<input name="features_title" value="${esc(SITE.features_title || 'Преимущества')}" maxlength="80"></label>
+      <label>Карточки «Преимущества» — строка «Заголовок | Описание» (показываются, если нет блоков ниже)
+        <textarea name="features" rows="4" maxlength="1500">${esc(SITE.features || 'Контракты от 50 векселей | Без x2. Берёшь сам, когда удобно.\nОфис в Rockford Hills BC | Вексели сдаются там же.\nПомощь в прокачке | Поддержка по навыкам и профессиям.\nНаборы при активности | Можно брать наборы при минимальном онлайне.')}</textarea></label>
+      <label>Заголовок блока «Как вступить»<input name="howto_title" value="${esc(SITE.howto_title || 'Как вступить')}" maxlength="80"></label>
+      <label>Шаги «Как вступить» — по одному в строке (можно [ссылки](url) и **жирный**)
+        <textarea name="howto" rows="3" maxlength="1200">${esc(SITE.howto || 'Зайти на Discord-сервер по [приглашению](' + siteInvite() + ').\nНажать «Подать заявку» и заполнить форму.\nДождаться решения HR — ответ придёт в ЛС от бота.')}</textarea></label>
       <button class="btn" type="submit">Сохранить</button>
     </form>
   </div>
   <div class="card"><h2>Блоки главной страницы</h2>
-    <p class="mini">Блоки идут между цифрами и агитацией. Нет ни одного блока — показываются стандартные «Преимущества» и «Как вступить». Название сайта / текст героя / подвал — на вкладке «Админ».</p>
+    <p class="mini">Блоки идут между цифрами и агитацией. Нет ни одного блока — показываются стандартные «Преимущества» и «Как вступить» (тексты выше). Название сайта / текст героя / подвал — на вкладке «Админ».</p>
     <form method="POST" action="/admin/landing/add" class="form">${csrfField(user)}
       <label>Тип нового блока${kindSel('text')}</label>
       <label>Заголовок<input name="title" maxlength="120"></label>
       <label>Содержимое<textarea name="content" rows="4" maxlength="4000"></textarea></label>
       <button class="btn sm" type="submit">Добавить блок</button>
+    </form>
+  </div>${list}`;
+}
+
+async function panelPages(user) {
+  const pages = await db.all('SELECT * FROM site_pages ORDER BY slug').catch(() => []);
+  const list = pages.map((p) => `<div class="card">
+    <form method="POST" action="/admin/page/save" class="form">${csrfField(user)}<input type="hidden" name="orig" value="${esc(p.slug)}">
+      <label>Адрес (slug) — открывается по /p/slug<input name="slug" value="${esc(p.slug)}" pattern="[a-z0-9-]{1,40}" required></label>
+      <label>Заголовок<input name="title" value="${esc(p.title || '')}" maxlength="120"></label>
+      <label>Содержимое (форматирование как в Discord)<textarea name="content" rows="8" maxlength="20000">${esc(p.content || '')}</textarea></label>
+      <label class="chk"><input type="checkbox" name="nav" value="1" ${p.nav ? 'checked' : ''}><span>Показывать пункт в меню шапки</span></label>
+      <div class="bar">
+        <button class="btn sm" type="submit">Сохранить</button>
+        <a class="btn ghost sm" href="/p/${esc(p.slug)}" target="_blank">Открыть</a>
+        <button class="btn ghost sm" formaction="/admin/page/del" style="background:var(--bad)" type="submit" onclick="return confirm('Удалить страницу?')">Удалить</button>
+      </div>
+    </form>
+  </div>`).join('');
+  return `
+  <div class="card"><h2>Доп. страницы сайта</h2>
+    <p class="mini">Стандартные адреса <code>/rules</code> и <code>/about</code> берут содержимое из страниц со slug <code>rules</code> и <code>about</code>. Любой другой slug доступен по <code>/p/slug</code>.</p>
+    <form method="POST" action="/admin/page/save" class="form">${csrfField(user)}<input type="hidden" name="orig" value="">
+      <label>Адрес (slug)<input name="slug" pattern="[a-z0-9-]{1,40}" placeholder="rules" required></label>
+      <label>Заголовок<input name="title" maxlength="120"></label>
+      <label>Содержимое<textarea name="content" rows="5" maxlength="20000"></textarea></label>
+      <label class="chk"><input type="checkbox" name="nav" value="1"><span>Показывать пункт в меню шапки</span></label>
+      <button class="btn sm" type="submit">Создать страницу</button>
     </form>
   </div>${list}`;
 }
@@ -573,11 +686,22 @@ async function meBody(client, user) {
   const myTicket = await db.get("SELECT id, subject FROM tickets WHERE opener_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [did]).catch(() => null);
   const ticketCard = myTicket ? `<div class="card"><h2>Мой открытый тикет</h2><a class="btn sm" href="/ticket/${myTicket.id}">🎫 ${esc(myTicket.subject || 'Тикет')} — открыть переписку</a></div>` : '';
   const logins = await db.all('SELECT ip, ua, at FROM web_logins WHERE discord_id = ? ORDER BY id DESC LIMIT 10', [did]).catch(() => []);
-  const loginsCard = `<div class="card"><h2>Мои входы</h2>
+  const sessions = await db.all("SELECT sid, ip, ua, created_at, last_seen FROM web_sessions WHERE discord_id = ? AND revoked_at IS NULL ORDER BY last_seen DESC LIMIT 20", [did]).catch(() => []);
+  const sessRows = sessions.map((s) => `<tr>
+    <td class="mini">${esc((s.ua || '—').slice(0, 70))}${s.sid === user.sid ? ' <span class="badge ok">эта</span>' : ''}</td>
+    <td>${esc(s.ip || '—')}</td>
+    <td class="muted">${fmt(s.last_seen || s.created_at)}</td>
+    <td>${s.sid === user.sid ? '' : `<form method="POST" action="/me/session_revoke" style="display:inline">${csrfField(user)}<input type="hidden" name="sid" value="${esc(s.sid)}"><button class="btn ghost sm" type="submit">завершить</button></form>`}</td>
+  </tr>`).join('');
+  const loginsCard = `<div class="card"><h2>Активные сессии</h2>
+    <div class="tablewrap"><table><tr><th>Устройство</th><th>IP</th><th>Активность</th><th></th></tr>
+      ${sessRows || '<tr><td colspan="4">—</td></tr>'}
+    </table></div>
+    <form method="POST" action="/me/logout_all" style="margin-top:10px" onsubmit="return confirm('Выйти со всех устройств? Текущая сессия тоже завершится.')">${csrfField(user)}<button class="btn sm" style="background:var(--bad)" type="submit">Выйти со всех устройств</button></form>
+    <h3 style="margin-top:14px;font-size:14px">Последние входы</h3>
     <div class="tablewrap"><table><tr><th>Когда</th><th>IP</th><th>Браузер</th></tr>
       ${logins.map((l) => `<tr><td class="muted">${fmt(l.at)}</td><td>${esc(l.ip || '—')}</td><td class="mini">${esc((l.ua || '—').slice(0, 90))}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
     </table></div>
-    <form method="POST" action="/me/logout_all" style="margin-top:10px" onsubmit="return confirm('Выйти со всех устройств? Текущая сессия тоже завершится.')">${csrfField(user)}<button class="btn sm" style="background:var(--bad)" type="submit">Выйти со всех устройств</button></form>
   </div>`;
 
   if (!p) {
@@ -616,7 +740,7 @@ async function meBody(client, user) {
   return `
     <div class="phead"><img class="avatar" width="72" height="72" src="${esc(av)}" alt=""><div>
       <h1>${esc(p.name)}</h1>
-      <div class="muted">Discord: ${esc(user.username)} · ID ${esc(did)} · вступил ${fmt(p.joined_at)} · <a href="/u/${esc(did)}">полный профиль</a> · <a href="/u/${esc(did)}/card">карточка</a></div>
+      <div class="muted">Discord: ${esc(user.username)} · ID ${esc(did)} · вступил ${fmt(p.joined_at)} · <a href="/u/${esc(did)}">полный профиль</a> · <a href="/u/${esc(did)}/card">карточка</a> · <a href="/compare">сравнить с другим</a></div>
     </div></div>
     <div class="card"><h2>Роли на сервере</h2>${roleTags}</div>
     ${await myProgressCard(client, did, p)}
@@ -632,6 +756,13 @@ async function meBody(client, user) {
     </div>
     ${badgesCard(bs)}
     <div class="card"><h2>Приглашения</h2>Подтверждённых за всё время: <b>${invRow ? invRow.c : 0}</b></div>
+    <div class="card"><h2>Обо мне</h2>
+      <p class="mini">Короткий текст на вашем публичном профиле (форматирование как в Discord). До 1000 символов.</p>
+      <form method="POST" action="/me/about" class="form">${csrfField(user)}
+        <textarea name="about" rows="4" maxlength="1000" placeholder="Пару слов о себе, часовой пояс, чем занимаюсь…">${esc(p.about || '')}</textarea>
+        <button class="btn sm" type="submit">Сохранить</button>
+      </form>
+    </div>
     ${ticketCard}
     ${inviteCard}
     ${loginsCard}
@@ -660,6 +791,7 @@ const PANEL_TABS = [
   ['perms', 'Права команд'],
   ['admin', 'Админ'],
   ['landing', 'Главная страница'],
+  ['pages', 'Страницы'],
   ['data', 'База данных'],
 ];
 
@@ -671,7 +803,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   const vis = {
     blacklist: canBl, texts: canOwner, faq_manage: canOwner, reasons: canOwner,
     broadcast: canOwner, settings: canOwner, perms: isHavirys, admin: isHavirys, data: canData,
-    role_check: acc.rank >= LEVELS.deputy, hr_payouts: canOwner, landing: isHavirys,
+    role_check: acc.rank >= LEVELS.deputy, hr_payouts: canOwner, landing: isHavirys, pages: isHavirys,
   };
   const tabsHtml = PANEL_TABS
     .filter(([id]) => vis[id] === undefined || vis[id])
@@ -698,6 +830,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'perms' && isHavirys) body = await panelPerms(user);
   else if (tab === 'admin' && isHavirys) body = await panelAdmin(client, user);
   else if (tab === 'landing' && isHavirys) body = await panelLanding(user);
+  else if (tab === 'pages' && isHavirys) body = await panelPages(user);
   else if (tab === 'data' && canData) body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
@@ -885,6 +1018,7 @@ async function panelGiveaways(client, acc, user) {
         <label>ID канала для публикации<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
         <label>ID обязательной роли — только эта роль (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
         <label>ID минимальной роли — этот ранг и ВЫШЕ (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Призовые места (необязательно) — строка «место | приз», напр. «1 | Машина», «2-3 | 500к»<textarea name="prize_tiers" rows="3" maxlength="800" placeholder="1 | Главный приз&#10;2-3 | Утешительный приз"></textarea></label>
         <button class="btn" type="submit">Создать и опубликовать</button>
       </form>
     </div>
@@ -901,6 +1035,7 @@ async function panelGiveaways(client, acc, user) {
         <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
         <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
         <label>ID минимальной роли (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Призовые места (необязательно) — строка «место | приз»<textarea name="prize_tiers" rows="3" maxlength="800" placeholder="1 | Главный приз&#10;2-3 | Утешительный приз"></textarea></label>
         <button class="btn" type="submit">Запланировать</button>
       </form>
       <h3 style="margin-top:12px">Ожидают старта</h3>
@@ -1142,7 +1277,20 @@ async function sessionFresh(user) {
       _sessVerCache.set(user.id, { at: Date.now(), ver });
     } catch (_) { return true; }
   }
-  return ver === (user.sv || 0);
+  if (ver !== (user.sv || 0)) return false;
+  // разлогин конкретной сессии
+  if (user.sid) {
+    const rk = 'sid:' + user.sid;
+    const rh = _sessVerCache.get(rk);
+    if (rh && Date.now() - rh.at < 60000) return !rh.revoked;
+    try {
+      const sr = await db.get('SELECT revoked_at FROM web_sessions WHERE sid = ?', [user.sid]);
+      const revoked = !!(sr && sr.revoked_at);
+      _sessVerCache.set(rk, { at: Date.now(), revoked });
+      return !revoked;
+    } catch (_) { return true; }
+  }
+  return true;
 }
 
 // Простой rate-limit в памяти: не более N POST за окно на ключ.
@@ -1465,6 +1613,7 @@ async function profileBody(client, viewer, acc, targetId) {
   const week = await contracts.getUserWeekStats(targetId, range);
   const invRow = await db.get("SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed'", [targetId]);
   const hist = await history.getHistory(targetId).catch(() => []);
+  const contractHist = await db.all("SELECT status, submitted_at, reviewed_at, message_url FROM contracts WHERE discord_id = ? ORDER BY COALESCE(submitted_at, reviewed_at) DESC LIMIT 40", [targetId]).catch(() => []);
   const nicks = await db.all('SELECT * FROM nickname_history WHERE discord_id = ? ORDER BY id DESC LIMIT 20', [targetId]).catch(() => []);
   const promos = await db.all(
     "SELECT * FROM audit_log WHERE (action LIKE '%овышение%' OR action LIKE '%онижение%') AND details LIKE ? ORDER BY id DESC LIMIT 20",
@@ -1557,6 +1706,14 @@ async function profileBody(client, viewer, acc, targetId) {
   }
 
   const nickRows = nicks.map((n) => `<tr><td class="muted">${fmt(n.at)}</td><td>${esc(n.old_nick || '—')}</td><td>${esc(n.new_nick || '—')}</td><td class="muted">${n.changed_by && n.changed_by !== 'unknown' ? personLink(client, n.changed_by) : '—'}</td></tr>`).join('');
+  const chRows = contractHist.map((c) => `<tr>
+    <td class="muted">${fmt(c.submitted_at || c.reviewed_at)}</td>
+    <td><span class="badge ${c.status === 'fulfilled' ? 'ok' : c.status === 'unfulfilled' ? 'bad' : 'warn'}">${esc(ruStatus(c.status))}</span></td>
+    <td>${c.message_url ? `<a href="${esc(c.message_url)}" target="_blank" rel="noopener">открыть</a>` : '—'}</td>
+  </tr>`).join('');
+  const contractHistCard = `<div class="card"><h2>История контрактов (${contractHist.length})</h2>
+    <div class="tablewrap"><table><tr><th>Когда</th><th>Итог</th><th>Пруф</th></tr>${chRows || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
+  const aboutCard = p.about ? `<div class="card"><h2>Обо мне</h2>${mdToHtml(String(p.about).slice(0, 1000))}</div>` : '';
   const promoRows = promos.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.action)}</td><td>${esc((r.details || '').slice(0, 200))}</td></tr>`).join('');
   const invitedByLine = invitedByRow
     ? `<div class="card"><h2>Пригласил</h2>${personLink(client, invitedByRow.inviter_discord_id)} · ${fmt(invitedByRow.joined_at)}</div>`
@@ -1589,6 +1746,7 @@ async function profileBody(client, viewer, acc, targetId) {
     <div class="muted">Discord: ${esc(p.discord_tag || targetId)} · ID ${esc(targetId)} · вступил ${fmt(p.joined_at)}</div>
   </div></div>
   ${blBox}
+  ${aboutCard}
   <div class="card"><h2>Роли на сервере</h2>${roleTags}</div>
   <div class="card"><h2>Паспорта (${passports.length})</h2>
     <div class="tablewrap"><table><tr><th>Имя Фамилия</th><th>Паспорт</th><th>Ранг</th><th>Статус</th></tr>${passRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
@@ -1606,6 +1764,7 @@ async function profileBody(client, viewer, acc, targetId) {
   ${notesCard}
   ${extraStaffCards}
   ${actions}
+  ${contractHistCard}
   <div class="card"><h2>История паспортов (вступления / увольнения)</h2>
     <div class="tablewrap"><table><tr><th>Когда</th><th>Событие</th><th>Паспорт</th><th>Заметка</th></tr>${histRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
   </div>
@@ -1622,8 +1781,8 @@ async function profileBody(client, viewer, acc, targetId) {
 function barChart(items) {
   const max = Math.max(1, ...items.map((i) => Number(i.value) || 0));
   const cols = items.map((i) => {
-    const h = Math.round(((Number(i.value) || 0) / max) * 140);
-    return `<div class="col"><div class="val">${esc(i.value)}</div><div class="bar2" style="height:${h}px"></div><div class="cap">${esc(i.label)}</div></div>`;
+    const pct = Math.round(((Number(i.value) || 0) / max) * 100);
+    return `<div class="col"><div class="val">${esc(i.value)}</div><div class="track"><i class="bar2" style="height:${pct}%"></i></div><div class="cap">${esc(i.label)}</div></div>`;
   }).join('');
   return `<div class="chart">${cols}</div>`;
 }
@@ -1742,8 +1901,47 @@ async function dashboardBody(client) {
   const lw = await cmp(r1.start.toISOString(), r1.end.toISOString());
   const delta = (n, o) => { const d = n - o; return d === 0 ? '' : ` <span style="color:var(--${d > 0 ? 'ok' : 'bad'})">${d > 0 ? '▲' : '▼'}${Math.abs(d)}</span>`; };
 
+  // ── Retention: доля принятых, кто ещё в организации спустя 1/2/4 недели
+  const accAll = await db.all("SELECT applicant_discord_id, joined_at FROM acceptances WHERE joined_at IS NOT NULL").catch(() => []);
+  const partSet = new Set((await db.all('SELECT discord_id FROM participants').catch(() => [])).map((r) => r.discord_id));
+  const retention = (wk) => {
+    const cutoff = Date.now() - wk * 7 * 864e5;
+    const cohort = accAll.filter((a) => new Date(a.joined_at).getTime() <= cutoff);
+    if (!cohort.length) return null;
+    const stayed = cohort.filter((a) => partSet.has(a.applicant_discord_id)).length;
+    return { n: cohort.length, stayed, pct: Math.round((stayed / cohort.length) * 100) };
+  };
+  const retCard = (() => {
+    const cells = [1, 2, 4].map((w) => {
+      const r = retention(w);
+      return `<div class="tile"><div class="n">${r ? r.pct + '%' : '—'}</div><div class="l">спустя ${w} нед.${r ? ` (${r.stayed}/${r.n})` : ''}</div></div>`;
+    }).join('');
+    return `<div class="card"><h2>Удержание принятых (retention)</h2><div class="grid">${cells}</div>
+      <p class="mini">Доля тех, кто был принят не позже указанного срока назад и до сих пор состоит в организации.</p></div>`;
+  })();
+
+  // ── Тепловая карта: выполненные контракты по дню недели × часу (МСК), 60 дней
+  const chAll = await db.all("SELECT submitted_at FROM contracts WHERE status='fulfilled' AND submitted_at >= ?", [new Date(Date.now() - 60 * 864e5).toISOString()]).catch(() => []);
+  const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const r of chAll) {
+    if (!r.submitted_at) continue;
+    const d = new Date(new Date(r.submitted_at).getTime() + 3 * 3600000);
+    grid[(d.getUTCDay() + 6) % 7][d.getUTCHours()]++;
+  }
+  const maxCell = Math.max(1, ...grid.flat());
+  const WD = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+  const heatHtml = `<div class="card"><h2>Когда выполняют контракты (60 дней, МСК)</h2>
+    <div style="overflow-x:auto"><div class="heat" style="min-width:640px">
+      <div class="hl"></div>${Array.from({ length: 24 }, (_, h) => `<div class="hl" style="text-align:center">${h % 3 === 0 ? h : ''}</div>`).join('')}
+      ${grid.map((row, di) => `<div class="hl">${WD[di]}</div>${row.map((v) => `<div class="hc" title="${v}" style="opacity:${v ? (0.15 + 0.85 * v / maxCell).toFixed(2) : 0.06}"></div>`).join('')}`).join('')}
+    </div></div>
+    <p class="mini">Чем ярче — тем больше выполненных контрактов в этот час.</p></div>`;
+
   return `
-  <h1>Дашборд</h1>
+  <div class="bar" style="justify-content:space-between">
+    <h1 style="margin:0">Дашборд</h1>
+    <button class="btn ghost sm" type="button" onclick="window.print()">🖨️ Печать / PDF</button>
+  </div>
   <div class="card"><h2>Воронка найма за 30 дней</h2>
     <div class="grid">${tile(total, 'заявок')}${tile(accepted, 'принято')}${tile(rejected, 'отказано')}${tile(pending, 'в очереди')}${tile(stayed, 'досидело 3+ дня')}</div>
     ${barChart([{ label: 'подано', value: total }, { label: 'принято', value: accepted }, { label: 'отказ', value: rejected }, { label: '3+ дня', value: stayed }])}
@@ -1760,6 +1958,8 @@ async function dashboardBody(client) {
   <div class="card"><h2>Статусы сейчас</h2>
     <div class="grid">${tile(onVac, 'в отпуске')}${tile(onAfk, 'AFK')}</div>
   </div>
+  ${retCard}
+  ${heatHtml}
   ${await (async () => {
     // Статистика HR по людям за 30 дней
     const rev = await db.all("SELECT accepted_by, rejected_by, status, created_at, reviewed_at FROM applications WHERE reviewed_at >= ?", [since30]).catch(() => []);
@@ -1814,6 +2014,54 @@ async function leaderboardsBody(client) {
     <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Кол-во</th></tr>${itab(iAll) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>
   <div class="card"><h2>Победители розыгрышей (180 дней)</h2>
     <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Побед</th></tr>${gwTop.map(([w, n], i) => `<tr><td>${i + 1}</td><td>${personLink(client, w)}</td><td>${n}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
+}
+
+async function compareBody(client, meId, otherId) {
+  const range = contracts.getWeekRange(0);
+  const gather = async (id) => {
+    const p = await db.get('SELECT name, joined_at FROM participants WHERE discord_id = ?', [id]).catch(() => null);
+    const bs = await computeBadgesAndStreak(client, id);
+    const week = await contracts.getUserWeekStats(id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
+    return {
+      id, name: (p && p.name) || nickOf(client, id) || ('ID ' + String(id).slice(-6)),
+      inOrg: !!p,
+      fulfilled: bs.fulfilled || 0, week: week.fulfilled.length,
+      invites: bs.invConfirmed || 0, streak: bs.streak || 0,
+      days: bs.days || 0, wins: bs.wins || 0, badges: (bs.badges || []).length,
+    };
+  };
+  const me = await gather(meId);
+
+  const people = await db.all('SELECT discord_id, name FROM participants ORDER BY name').catch(() => []);
+  const opts = people.filter((r) => r.discord_id !== meId)
+    .map((r) => `<option value="${esc(r.discord_id)}" ${r.discord_id === otherId ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
+  const picker = `<div class="card"><form method="GET" action="/compare" class="form">
+    <label>Сравнить меня с<select name="with">${opts}</select></label>
+    <button class="btn sm" type="submit">Сравнить</button>
+  </form></div>`;
+
+  if (!otherId || !/^\d{5,25}$/.test(otherId)) return `<h1>Сравнение</h1>${picker}`;
+  const ot = await gather(otherId);
+  const row = (label, a, b, better = 'high') => {
+    const win = a === b ? '' : ((better === 'high') === (a > b) ? 'a' : 'b');
+    return `<tr><td>${esc(label)}</td>
+      <td style="${win === 'a' ? 'color:var(--ok);font-weight:700' : ''}">${a}</td>
+      <td style="${win === 'b' ? 'color:var(--ok);font-weight:700' : ''}">${b}</td></tr>`;
+  };
+  return `<h1>Сравнение</h1>${picker}
+  <div class="card"><h2>${esc(me.name)} vs ${esc(ot.name)}</h2>
+    <div class="tablewrap"><table>
+      <tr><th>Показатель</th><th>${esc(me.name)}</th><th>${esc(ot.name)}</th></tr>
+      ${row('Контракты за всё время', me.fulfilled, ot.fulfilled)}
+      ${row('Контракты на этой неделе', me.week, ot.week)}
+      ${row('Приглашений подтверждено', me.invites, ot.invites)}
+      ${row('Недельный стрик', me.streak, ot.streak)}
+      ${row('Дней в организации', me.days, ot.days)}
+      ${row('Побед в розыгрышах', me.wins, ot.wins)}
+      ${row('Бейджей открыто', me.badges, ot.badges)}
+    </table></div>
+    <p class="mini"><a href="/u/${esc(ot.id)}">профиль ${esc(ot.name)}</a></p>
+  </div>`;
 }
 
 async function calendarBody(client) {
@@ -1911,7 +2159,7 @@ async function toolsBody(client, acc, user) {
   }
   const isOwnerTools = acc.rank >= LEVELS.owner;
   const brRows = await db.all('SELECT * FROM badge_roles ORDER BY badge_key').catch(() => []);
-  const brList = brRows.map((b) => `<tr><td>${esc(badges.LABELS[b.badge_key] || b.badge_key)}</td><td>&lt;@&amp;${esc(b.role_id)}&gt;</td><td class="muted">${fmt(b.created_at)}</td></tr>`).join('');
+  const brList = brRows.map((b) => `<tr><td>${esc(badges.LABELS[b.badge_key] || b.badge_key)}</td><td>${roleTag(client, b.role_id)}</td><td class="muted">${fmt(b.created_at)}</td></tr>`).join('');
   const badgeCard = `<div class="card"><h2>Авто-роли за бейджи</h2>
     <p class="mini">Бот сам создаёт роль, когда первый участник заработал бейдж, и разносит роли по людям (в течение часа + при старте). Отключается в config: <code>BADGE_AUTO_ROLES: false</code>.</p>
     <div class="tablewrap"><table><tr><th>Бейдж</th><th>Роль</th><th>Создана</th></tr>${brList || '<tr><td colspan="3">пока ни одной</td></tr>'}</table></div>
@@ -2266,6 +2514,37 @@ async function panelAdmin(client, user) {
     </form>
   </div>
 
+  <div class="card"><h2>Логотип и favicon</h2>
+    <p class="mini">Картинка ≤ 200 КБ (png/svg/jpg/webp). Ставится в шапку рядом с названием и как иконка вкладки.</p>
+    ${SITE.logo ? `<p><img src="${esc(SITE.logo)}" alt="" style="height:40px;border-radius:6px"></p>` : ''}
+    <form method="POST" action="/admin/logo" class="form" onsubmit="var f=this.file.files[0];if(f){var r=new FileReader();r.onload=function(){document.getElementById('logodata').value=r.result;document.getElementById('logoform2').submit()};r.readAsDataURL(f);return false}return true">${csrfField(user)}
+      <label>Файл<input type="file" name="file" accept="image/*"></label>
+    </form>
+    <form method="POST" action="/admin/logo" id="logoform2" class="form">${csrfField(user)}
+      <input type="hidden" name="data" id="logodata">
+      <div class="bar">
+        <button class="btn sm" type="submit">Загрузить выбранный файл</button>
+        <button class="btn ghost sm" formaction="/admin/logo_clear" formnovalidate type="submit">Убрать логотип</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card"><h2>Пункты меню в шапке</h2>
+    <p class="mini">Один пункт в строке: <code>Текст | /path | tier</code>. tier: <code>all</code> (все), <code>member</code> (участники), <code>hr</code> (HR+). Пусто = стандартное меню.</p>
+    <form method="POST" action="/admin/nav" class="form">${csrfField(user)}
+      <textarea name="nav" rows="7" maxlength="2000" placeholder="Мой профиль | /me | all&#10;Участники | /people | member&#10;Дашборд | /dashboard | hr">${esc(SITE.nav || '')}</textarea>
+      <button class="btn sm" type="submit">Сохранить меню</button>
+    </form>
+  </div>
+
+  <div class="card"><h2>Свой CSS</h2>
+    <p class="mini">Добавляется в конец стилей на всех страницах. Осторожно — можно сломать вёрстку.</p>
+    <form method="POST" action="/admin/css" class="form">${csrfField(user)}
+      <textarea name="css" rows="8" maxlength="20000" placeholder=".card{border-radius:20px}">${esc(SITE.css || '')}</textarea>
+      <button class="btn sm" type="submit">Сохранить CSS</button>
+    </form>
+  </div>
+
   <div class="card"><h2>ID каналов бота</h2>
     <form method="POST" action="/admin/channels" class="form">${csrfField(user)}
       ${Object.keys(config).filter((k) => k.startsWith('CHANNEL_')).map((k) => `<label>${esc(k.replace('CHANNEL_', ''))}<input name="ch_${esc(k)}" value="${esc(String(config[k] || ''))}" pattern="[0-9]*" maxlength="25"></label>`).join('')}
@@ -2380,12 +2659,34 @@ async function computeBadgesAndStreak(client, targetId) {
   try {
     return await badges.compute(targetId);
   } catch (_) {
-    return { badges: [], streak: 0, fulfilled: 0, wins: 0 };
+    return { badges: [], streak: 0, fulfilled: 0, wins: 0, invConfirmed: 0, days: 0 };
   }
 }
 function badgesCard(bs) {
-  if (!bs.badges.length) return `<div class="card"><h2>Бейджи</h2><span class="muted">Пока нет — выполняй контракты и приглашай друзей.</span></div>`;
-  return `<div class="card"><h2>Бейджи${bs.streak >= 2 ? ` · 🔥 стрик ${bs.streak} нед.` : ''}</h2>${bs.badges.map((b) => `<span class="pill">${esc(b)}</span>`).join('')}</div>`;
+  const fams = [
+    { name: 'Контракты', cur: bs.fulfilled || 0, steps: [10, 50, 100], unit: 'контрактов' },
+    { name: 'Приглашения', cur: bs.invConfirmed || 0, steps: [5, 15], unit: 'приглашённых' },
+    { name: 'Стаж', cur: bs.days || 0, steps: [30, 90], unit: 'дней в организации' },
+    { name: 'Победы в розыгрышах', cur: bs.wins || 0, steps: [1, 3], unit: 'побед' },
+    { name: 'Недельный стрик', cur: bs.streak || 0, steps: [2, 4], unit: 'недель подряд' },
+  ];
+  const progress = fams.map((f) => {
+    const next = f.steps.find((s) => f.cur < s);
+    if (!next) return `<div style="margin:8px 0"><div class="mini">${esc(f.name)} — всё открыто ✅</div></div>`;
+    const prev = [0, ...f.steps].filter((s) => s <= f.cur).pop() || 0;
+    const pct = Math.min(100, Math.round(((f.cur - prev) / (next - prev)) * 100));
+    return `<div style="margin:10px 0">
+      <div class="mini">${esc(f.name)}: <b>${f.cur}</b> / ${next} ${esc(f.unit)} — осталось ${next - f.cur}</div>
+      <div class="progress"><i style="width:${pct}%"></i></div>
+    </div>`;
+  }).join('');
+  const earned = bs.badges.length
+    ? `<div style="margin-bottom:6px">${bs.badges.map((b) => `<span class="pill">${esc(b)}</span>`).join('')}</div>`
+    : '<span class="muted">Пока нет — выполняй контракты и приглашай друзей.</span>';
+  return `<div class="card"><h2>Бейджи${bs.streak >= 2 ? ` · 🔥 стрик ${bs.streak} нед.` : ''}</h2>
+    ${earned}
+    <h3 style="margin-top:12px;font-size:14px">Прогресс к следующим</h3>
+    ${progress}</div>`;
 }
 
 // ---------- Розыгрыши: список и участие с сайта ----------
@@ -2396,11 +2697,20 @@ async function giveawaysPublicBody(client) {
     const cnt = await giveaways.countEntries(gv.id);
     list.push(`<div class="card">
       <h3>🎉 ${esc(gv.prize)}</h3>
-      <div class="mini">Победителей: ${gv.winners_count} · Участников: ${cnt} · Закончится ${fmt(gv.ends_at)}${gv.required_role_id ? ` · роль <@&${esc(gv.required_role_id)}>` : ''}${gv.min_role_id ? ` · ранг не ниже <@&${esc(gv.min_role_id)}>` : ''}</div>
-      <a class="btn sm" href="/g/${gv.id}">Открыть</a>
+      <div class="mini">Победителей: ${gv.winners_count} · Участников: ${cnt}${gv.required_role_id ? ` · роль ${roleTag(client, gv.required_role_id)}` : ''}${gv.min_role_id ? ` · ранг не ниже ${roleTag(client, gv.min_role_id)}` : ''}</div>
+      <div class="mini">До конца: <b class="gcd" data-end="${esc(gv.ends_at)}" style="font-variant-numeric:tabular-nums">…</b></div>
+      <a class="btn sm" href="/g/${gv.id}" style="margin-top:8px">Открыть</a>
     </div>`);
   }
-  return `<h1>Активные розыгрыши</h1>${list.join('') || '<div class="card">Сейчас розыгрышей нет.</div>'}`;
+  const cd = `<script>(function(){
+    function upd(){document.querySelectorAll('.gcd').forEach(function(el){
+      var d=new Date(el.dataset.end).getTime()-Date.now();
+      if(d<=0){el.textContent='завершается…';return;}
+      var s=Math.floor(d/1000),dd=Math.floor(s/86400),hh=Math.floor(s%86400/3600),mm=Math.floor(s%3600/60),ss=s%60;
+      el.textContent=(dd?dd+'д ':'')+String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0');
+    });} upd(); setInterval(upd,1000);
+  })();</script>`;
+  return `<h1>Активные розыгрыши</h1>${list.join('') || '<div class="card">Сейчас розыгрышей нет.</div>'}${list.length ? cd : ''}`;
 }
 
 async function giveawayPageBody(client, user, gid, acc) {
@@ -2421,8 +2731,8 @@ async function giveawayPageBody(client, user, gid, acc) {
     try {
       const m = g.members.cache.get(user.id) || await g.members.fetch(user.id);
       if (await giveaways.isBlacklisted(user.id)) note = '⛔ Вы в ЧС розыгрышей.';
-      else if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) note = `⛔ Нужна роль <@&${gv.required_role_id}>.`;
-      else if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) note = `⛔ Нужен ранг не ниже <@&${gv.min_role_id}>.`;
+      else if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) note = `⛔ Нужна роль ${roleTag(client, gv.required_role_id)}.`;
+      else if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) note = `⛔ Нужен ранг не ниже ${roleTag(client, gv.min_role_id)}.`;
     } catch (_) { note = 'Вас нет на Discord-сервере.'; }
   }
   const canToggle = !ended && !note;
@@ -2466,17 +2776,40 @@ async function giveawayPageBody(client, user, gid, acc) {
     </script>`;
   }
 
+  const tiers = giveaways.parsePrizeTiers(gv.prize_tiers);
+  const tiersCard = tiers.length ? `<div class="card"><h2>Призовые места</h2>
+    <div class="tablewrap"><table><tr><th>Место</th><th>Приз</th>${gv.winners ? '<th>Кто</th>' : ''}</tr>
+    ${tiers.map((t) => {
+      const label = t.from === t.to ? `${t.from}` : `${t.from}–${t.to}`;
+      const who = gv.winners ? `<td>${winnerIds.slice(t.from - 1, t.to).map((w) => personLink(client, w)).join(', ') || '—'}</td>` : '';
+      return `<tr><td>${label} место</td><td><b>${esc(t.text)}</b></td>${who}</tr>`;
+    }).join('')}
+    </table></div></div>` : '';
+  const cdScript = !ended ? `<script>(function(){
+    var el=document.getElementById('gcd'); if(!el)return;
+    var end=new Date(${JSON.stringify(gv.ends_at)}).getTime();
+    function tick(){
+      var d=end-Date.now();
+      if(d<=0){el.textContent='розыгрыш завершается…';return;}
+      var s=Math.floor(d/1000),dd=Math.floor(s/86400),hh=Math.floor(s%86400/3600),mm=Math.floor(s%3600/60),ss=s%60;
+      el.textContent=(dd?dd+'д ':'')+String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0')+':'+String(ss).padStart(2,'0');
+      setTimeout(tick,1000);
+    } tick();
+  })();</script>` : '';
   return `
   <h1>🎉 ${esc(gv.prize)}</h1>
   <div class="card">
     <div class="mini">Победителей: ${gv.winners_count} · Участников: <b>${cnt}</b> · ${ended ? 'Завершён' : 'Закончится ' + fmt(gv.ends_at)}</div>
+    ${!ended ? `<div style="font-size:30px;font-weight:800;letter-spacing:1px;margin:10px 0;font-variant-numeric:tabular-nums" id="gcd">…</div>` : ''}
     ${gv.winners ? `<p style="margin-top:8px">Победители: ${winnerIds.map((w) => personLink(client, w)).join(', ')}</p>` : ''}
     ${note ? `<p class="mini" style="color:var(--bad);margin-top:8px">${note}</p>` : ''}
     ${canToggle ? `<form method="POST" action="/g/enter" style="margin-top:10px">${csrfField(user)}<input type="hidden" name="id" value="${gv.id}">
       <button class="btn" type="submit">${inside ? '❌ Выйти из розыгрыша' : '🎉 Участвовать'}</button></form>` : ''}
   </div>
+  ${tiersCard}
   ${listCard}
   ${roulette}
+  ${cdScript}
   <p><a href="/giveaways">← ко всем розыгрышам</a></p>`;
 }
 
@@ -2494,7 +2827,7 @@ async function ticketPageBody(client, user, acc, tid) {
       const arr = [...coll.values()].reverse();
       msgsHtml = arr.map((m) => {
         const att = [...m.attachments.values()].map((a) => `<a href="${esc(a.url)}" target="_blank" rel="noopener">[вложение]</a>`).join(' ');
-        const bodyHtml = esc(m.content || '') + (att ? ' ' + att : '') + (m.embeds.length ? ' <span class="mini">[embed]</span>' : '');
+        const bodyHtml = renderMentions(client, esc(m.content || '')) + (att ? ' ' + att : '') + (m.embeds.length ? ' <span class="mini">[embed]</span>' : '');
         return `<div style="border-left:2px solid var(--line);padding-left:10px;margin:8px 0">
           <b>${esc(m.member ? m.member.displayName : m.author.username)}</b> <span class="mini">${fmt(new Date(m.createdTimestamp).toISOString())}</span><br>
           <span style="white-space:pre-wrap">${bodyHtml || '<span class="mini">—</span>'}</span></div>`;
@@ -2502,13 +2835,46 @@ async function ticketPageBody(client, user, acc, tid) {
     } catch (_) {}
   }
   const closed = t.status !== 'open';
+  const isStaff = acc.rank >= LEVELS.hr;
+  const tpls = await db.all('SELECT id, name, text FROM ticket_reply_templates ORDER BY name').catch(() => []);
+  const tplSelect = tpls.length ? `<label>Шаблон ответа
+    <select onchange="if(this.value){var ta=this.form.text;ta.value=(ta.value?ta.value+'\\n':'')+this.value;this.selectedIndex=0}">
+      <option value="">— вставить шаблон —</option>
+      ${tpls.map((tp) => `<option value="${esc(tp.text)}">${esc(tp.name)}</option>`).join('')}
+    </select></label>` : '';
+  const tplManage = isStaff ? `<div class="card"><h2>Шаблоны ответов</h2>
+    ${tpls.map((tp) => `<div class="bar"><span class="mini"><b>${esc(tp.name)}</b>: ${esc(tp.text.slice(0, 80))}</span>
+      <form method="POST" action="/ticket/tpl_del" style="display:inline">${csrfField(user)}<input type="hidden" name="tid" value="${t.id}"><input type="hidden" name="id" value="${tp.id}"><button class="btn ghost sm" type="submit">✕</button></form></div>`).join('') || '<span class="mini">пусто</span>'}
+    <form method="POST" action="/ticket/tpl_add" class="form" style="margin-top:8px">${csrfField(user)}<input type="hidden" name="tid" value="${t.id}">
+      <label>Название<input name="name" required maxlength="60"></label>
+      <label>Текст<textarea name="text" rows="2" required maxlength="1500"></textarea></label>
+      <button class="btn sm" type="submit">Добавить шаблон</button>
+    </form></div>` : '';
+  const isOpener = t.opener_id === user.id;
+  let ratingCard = '';
+  if (closed && isOpener) {
+    if (t.rating == null) {
+      ratingCard = `<div class="card"><h2>Оцените решение тикета</h2>
+        <form method="POST" action="/ticket/rate" class="bar">${csrfField(user)}<input type="hidden" name="id" value="${t.id}">
+          <button class="btn" name="r" value="1" type="submit">👍 Помогли</button>
+          <button class="btn ghost" name="r" value="0" type="submit">👎 Не помогли</button>
+        </form></div>`;
+    } else {
+      ratingCard = `<div class="card"><h2>Ваша оценка</h2>${t.rating ? '👍 помогли' : '👎 не помогли'} · ${fmt(t.rated_at)}</div>`;
+    }
+  } else if (closed && isStaff && t.rating != null) {
+    ratingCard = `<div class="card"><h2>Оценка автора</h2>${t.rating ? '👍 помогли' : '👎 не помогли'} · ${fmt(t.rated_at)}</div>`;
+  }
   return `
   <h1>🎫 ${esc(t.subject || 'Тикет')} #${t.id}</h1>
   <div class="muted">${esc(TICKET_CAT_RU[t.category] || t.category || '')} · ${closed ? 'закрыт' : 'открыт'} · автор ${personLink(client, t.opener_id)}</div>
   <div class="card">${msgsHtml}</div>
   ${closed ? '' : `<div class="card"><form method="POST" action="/ticket/post" class="form">${csrfField(user)}<input type="hidden" name="id" value="${t.id}">
+    ${tplSelect}
     <label>Ваше сообщение<textarea name="text" rows="3" required maxlength="1800"></textarea></label>
     <button class="btn" type="submit">Отправить в тикет</button></form></div>`}
+  ${ratingCard}
+  ${tplManage}
   <p><a href="/me">← в кабинет</a></p>`;
 }
 
@@ -2725,11 +3091,19 @@ async function boardBody(client) {
 }
 
 // ---------- Уведомления ----------
+const NOTIF_ICONS = {
+  ticket: '🎫', kick: '⚠️', passport: '🪪', appeal: '⚖️', vacation: '🏖️',
+  giveaway: '🎉', apply: '📩', contract: '📄', data_change: '✏️', info: '🔔',
+};
 async function notificationsBody(user) {
   const rows = await db.all('SELECT * FROM notifications WHERE discord_id = ? ORDER BY id DESC LIMIT 100', [user.id]).catch(() => []);
-  const list = rows.map((n) => `<div class="card" style="${n.read_at ? 'opacity:.6' : ''}">
-    <div>${esc(n.text)}</div>
-    <div class="mini">${fmt(n.created_at)}${n.link ? ` · <a href="${esc(n.link)}">открыть</a>` : ''}</div>
+  const list = rows.map((n) => `<div class="card" style="display:flex;gap:12px;align-items:flex-start;${n.read_at ? 'opacity:.55' : ''}">
+    <div style="font-size:20px;flex:0 0 auto">${NOTIF_ICONS[n.kind] || '🔔'}</div>
+    <div style="flex:1">
+      <div>${esc(n.text)}</div>
+      <div class="mini">${fmt(n.created_at)}${n.link ? ` · <a href="${esc(n.link)}">открыть</a>` : ''}</div>
+    </div>
+    ${n.read_at ? '' : '<span class="badge ok" style="flex:0 0 auto">новое</span>'}
   </div>`).join('');
   return `<div class="bar"><h1 style="margin:0">Уведомления</h1>
     <form method="POST" action="/notifications/read_all">${csrfField(user)}<button class="btn sm" type="submit">Отметить все прочитанными</button></form></div>
@@ -2866,9 +3240,28 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== выйти со всех устройств =====
   if (pathName === '/me/logout_all') {
     await db.run('UPDATE web_users SET sess_ver = COALESCE(sess_ver, 0) + 1 WHERE discord_id = ?', [user.id]);
+    await db.run('UPDATE web_sessions SET revoked_at = ? WHERE discord_id = ? AND revoked_at IS NULL', [new Date().toISOString(), user.id]).catch(() => {});
     _sessVerCache.delete(user.id); // чтобы другие устройства разлогинились сразу
     await webAudit(client, user, 'Выход со всех устройств (сайт)', '');
     return '/login';
+  }
+
+  // ===== завершить конкретную сессию =====
+  if (pathName === '/me/session_revoke') {
+    const sid = (body.get('sid') || '').trim();
+    if (sid && sid !== user.sid) {
+      await db.run('UPDATE web_sessions SET revoked_at = ? WHERE sid = ? AND discord_id = ?', [new Date().toISOString(), sid, user.id]).catch(() => {});
+      _sessVerCache.delete('sid:' + sid);
+      await webAudit(client, user, 'Завершена сессия (сайт)', sid.slice(0, 8));
+    }
+    return '/me?' + qs({ ok: 'Сессия завершена.' });
+  }
+
+  // ===== «Обо мне» на публичном профиле =====
+  if (pathName === '/me/about') {
+    if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Только для участников.' });
+    await db.run('UPDATE participants SET about = ? WHERE discord_id = ?', [(body.get('about') || '').slice(0, 1000), user.id]);
+    return '/me?' + qs({ ok: 'Сохранено.' });
   }
 
   // ===== создать свою ссылку-приглашение =====
@@ -2976,11 +3369,14 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const channelId = (body.get('channel_id') || '').trim();
       const roleId = (body.get('role_id') || '').trim() || null;
       const minRoleId = (body.get('min_role_id') || '').trim() || null;
+      const prizeTiersRaw = (body.get('prize_tiers') || '').trim().slice(0, 800);
+      const prizeTiers = giveaways.parsePrizeTiers(prizeTiersRaw).length ? prizeTiersRaw : null;
       if (!prize || winners < 1 || !durMs || !/^[0-9]+$/.test(channelId)) return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля формы (приз, победители, длительность, ID канала).' });
       const endsAt = new Date(Date.now() + durMs);
-      const gid = await giveaways.createGiveaway(channelId, prize, winners, user.id, endsAt.toISOString(), roleId, null, minRoleId);
+      const gid = await giveaways.createGiveaway(channelId, prize, winners, user.id, endsAt.toISOString(), roleId, null, minRoleId, prizeTiers);
+      const tiersDesc = giveaways.parsePrizeTiers(prizeTiers).map((t) => `\n${t.from === t.to ? t.from : t.from + '–' + t.to} место — **${t.text}**`).join('');
       const embed = new EmbedBuilder().setColor(0x57f287).setTitle(`🎉 ${prize}`)
-        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}${minRoleId ? `\nУсловие: роль <@&${minRoleId}> и выше` : ''}`)
+        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}${minRoleId ? `\nУсловие: роль <@&${minRoleId}> и выше` : ''}${tiersDesc}`)
         .addFields(
           { name: 'Победителей', value: String(winners), inline: true },
           { name: 'Участников', value: '0', inline: true },
@@ -3156,6 +3552,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await hook('syncEffectiveIdentity')(g, target);
       await hook('createProfileThread')(g, target, name, stat);
       await hook('safeUpdateMembersList')(g);
+      await pushNotify(target, 'passport', `Добавлен паспорт: ${name} (№ ${stat})`, '/me').catch(() => {});
       await webAudit(client, user, 'Добавлен паспорт (сайт)', `<@${target}>: ${name} № ${stat}`);
       return back + '?' + qs({ ok: 'Паспорт добавлен.' });
     }
@@ -3181,6 +3578,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       }
       await hook('syncStatusRoles')(g, target);
       await hook('safeUpdateMembersList')(g);
+      await pushNotify(target, 'vacation', `Вам выдан отпуск до ${dates.formatDateTime(deadline)}`, '/me').catch(() => {});
       await webAudit(client, user, 'Отпуск выдан (сайт)', `<@${target}> до ${dates.formatDateTime(deadline)}${reason ? ' — ' + reason : ''}`);
       return back + '?' + qs({ ok: 'Отпуск выдан.' });
     }
@@ -3259,6 +3657,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const reason = (body.get('preset') || '').trim() || (body.get('reason') || '').trim() || 'Без указания причины';
       await db.run("UPDATE applications SET status='rejected', rejected_by=?, reject_reason=?, reviewed_at=? WHERE id=?", [user.id, reason, new Date().toISOString(), id]);
       await dmTo(client, app.discord_id, `❌ Ваша заявка на вступление отклонена. Причина: ${reason}`);
+      await pushNotify(app.discord_id, 'apply', `Заявка на вступление отклонена. Причина: ${reason}`, '/apply').catch(() => {});
       await webAudit(client, user, 'Заявка отклонена (сайт)', `#${id} <@${app.discord_id}> — ${reason}`);
       return '/panel?tab=apps&' + qs({ ok: 'Заявка отклонена.' });
     }
@@ -3330,6 +3729,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       if (qkey === 'codeword') await db.run(`UPDATE ${table} SET status='rejected', reviewed_by=?, reviewed_at=? WHERE id=?`, [user.id, new Date().toISOString(), id]);
       else await db.run(`UPDATE ${table} SET status='rejected', reject_reason=? WHERE id=?`, [reason, id]);
       await dmTo(client, rec.discord_id, `❌ Ваша заявка (${def[1]}) отклонена. Причина: ${reason}`);
+      await pushNotify(rec.discord_id, qkey, `«${def[1]}» — отказ. Причина: ${reason}`, '/me').catch(() => {});
       await webAudit(client, user, `Очередь «${def[1]}» — отказ (сайт)`, `#${id} <@${rec.discord_id}> — ${reason}`);
       return '/panel?tab=queues&' + qs({ ok: 'Отклонено.' });
     }
@@ -3364,6 +3764,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await db.run("UPDATE codeword_submissions SET status='approved', reviewed_by=?, reviewed_at=? WHERE id=?", [user.id, new Date().toISOString(), id]);
       await dmTo(client, rec.discord_id, '✅ Кодовое слово засчитано.');
     }
+    await pushNotify(rec.discord_id, qkey, `«${def[1]}» — ваша заявка одобрена`, '/me').catch(() => {});
     await webAudit(client, user, `Очередь «${def[1]}» — одобрено (сайт)`, `#${id} <@${rec.discord_id}>`);
     return '/panel?tab=queues&' + qs({ ok: 'Одобрено.' });
   }
@@ -3628,6 +4029,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const channelId = (body.get('channel_id') || '').trim();
     const roleId = (body.get('role_id') || '').trim() || null;
     const minRoleId = (body.get('min_role_id') || '').trim() || null;
+    const ptRaw = (body.get('prize_tiers') || '').trim().slice(0, 800);
+    const prizeTiers = giveaways.parsePrizeTiers(ptRaw).length ? ptRaw : null;
     const startAt = dates.parseDeadline(body.get('start_at') || '') || (function () {
       const d = new Date(body.get('start_at'));
       return Number.isNaN(d.getTime()) ? null : d;
@@ -3636,9 +4039,9 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля (приз, победители, длительность, ID канала, дата старта).' });
     }
     await db.run(
-      `INSERT INTO scheduled_giveaways (prize, winners_count, channel_id, duration_ms, required_role_id, min_role_id, start_at, host_id, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      [prize, winners, channelId, durMs, roleId, minRoleId, startAt.toISOString(), user.id, new Date().toISOString()],
+      `INSERT INTO scheduled_giveaways (prize, winners_count, channel_id, duration_ms, required_role_id, min_role_id, prize_tiers, start_at, host_id, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      [prize, winners, channelId, durMs, roleId, minRoleId, prizeTiers, startAt.toISOString(), user.id, new Date().toISOString()],
     );
     await webAudit(client, user, 'Запланирован розыгрыш (сайт)', `«${prize}» на ${dates.formatDateTime(startAt)}`);
     return '/panel?tab=giveaways&' + qs({ ok: 'Розыгрыш запланирован.' });
@@ -3660,7 +4063,36 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (!text) return `/ticket/${tid}?` + qs({ err: 'Пустое сообщение.' });
     const sent = await postTo(client, t.channel_id, { content: `**${uname} (сайт):** ${text}`, allowedMentions: { parse: [] } });
     if (!sent) return `/ticket/${tid}?` + qs({ err: 'Не удалось отправить (канал закрыт?).' });
+    if (t.opener_id && t.opener_id !== user.id) await pushNotify(t.opener_id, 'ticket', `Ответ в тикете «${t.subject || 'Тикет'}»`, `/ticket/${tid}`).catch(() => {});
     return `/ticket/${tid}?` + qs({ ok: 'Отправлено.' });
+  }
+
+  // ===== оценка тикета автором (после закрытия) =====
+  if (pathName === '/ticket/rate') {
+    const tid = parseInt(body.get('id'), 10) || 0;
+    const t = await db.get('SELECT * FROM tickets WHERE id = ?', [tid]);
+    if (!t) return '/me?' + qs({ err: 'Тикет не найден.' });
+    if (t.opener_id !== user.id) return `/ticket/${tid}?` + qs({ err: 'Оценить может только автор.' });
+    if (t.status === 'open') return `/ticket/${tid}?` + qs({ err: 'Тикет ещё открыт.' });
+    if (t.rating != null) return `/ticket/${tid}?` + qs({ err: 'Уже оценён.' });
+    const r = body.get('r') === '1' ? 1 : 0;
+    await db.run('UPDATE tickets SET rating = ?, rated_at = ? WHERE id = ?', [r, new Date().toISOString(), tid]);
+    await webAudit(client, user, 'Оценка тикета (сайт)', `#${tid} — ${r ? '👍' : '👎'}`);
+    return `/ticket/${tid}?` + qs({ ok: 'Спасибо за оценку!' });
+  }
+
+  // ===== шаблоны ответов в тикетах (HR+) =====
+  if (pathName === '/ticket/tpl_add' || pathName === '/ticket/tpl_del') {
+    if (acc.rank < LEVELS.hr) return '/me?' + qs({ err: 'Недостаточно прав.' });
+    const tid = parseInt(body.get('tid'), 10) || 0;
+    if (pathName === '/ticket/tpl_add') {
+      const name = (body.get('name') || '').trim().slice(0, 60);
+      const text = (body.get('text') || '').trim().slice(0, 1500);
+      if (name && text) await db.run('INSERT INTO ticket_reply_templates (name, text, created_at) VALUES (?, ?, ?)', [name, text, new Date().toISOString()]);
+    } else {
+      await db.run('DELETE FROM ticket_reply_templates WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
+    }
+    return `/ticket/${tid}?` + qs({ ok: 'Готово.' });
   }
 
   // ===== проверка контракта (HR+) =====
@@ -3980,6 +4412,59 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       return '/panel?tab=admin&' + qs({ ok: 'Цвета возвращены к стандартным.' });
     }
 
+    if (pathName === '/admin/logo') {
+      const data = (body.get('data') || '').trim();
+      if (!/^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,/.test(data)) return '/panel?tab=admin&' + qs({ err: 'Нужен файл-картинка.' });
+      if (data.length > 280000) return '/panel?tab=admin&' + qs({ err: 'Файл больше 200 КБ.' });
+      await db.setSetting('site.logo', data);
+      await loadSite(true);
+      await webAudit(client, user, 'Загружен логотип сайта', `${data.length} симв.`);
+      return '/panel?tab=admin&' + qs({ ok: 'Логотип обновлён.' });
+    }
+    if (pathName === '/admin/logo_clear') {
+      await db.setSetting('site.logo', '');
+      await loadSite(true);
+      await webAudit(client, user, 'Удалён логотип сайта', '');
+      return '/panel?tab=admin&' + qs({ ok: 'Логотип убран.' });
+    }
+    if (pathName === '/admin/nav') {
+      await db.setSetting('site.nav', (body.get('nav') || '').slice(0, 2000));
+      await loadSite(true);
+      await webAudit(client, user, 'Изменено меню сайта', '');
+      return '/panel?tab=admin&' + qs({ ok: 'Меню сохранено.' });
+    }
+    if (pathName === '/admin/css') {
+      await db.setSetting('site.css', (body.get('css') || '').slice(0, 20000));
+      await loadSite(true);
+      await webAudit(client, user, 'Изменён свой CSS сайта', `${(body.get('css') || '').length} симв.`);
+      return '/panel?tab=admin&' + qs({ ok: 'CSS сохранён.' });
+    }
+    if (pathName === '/admin/page/save') {
+      const slug = (body.get('slug') || '').trim().toLowerCase();
+      if (!/^[a-z0-9-]{1,40}$/.test(slug)) return '/panel?tab=pages&' + qs({ err: 'Slug: только a-z, 0-9 и дефис.' });
+      const orig = (body.get('orig') || '').trim().toLowerCase();
+      const title = (body.get('title') || '').slice(0, 120);
+      const contentTxt = (body.get('content') || '').slice(0, 20000);
+      const nav = body.get('nav') === '1' ? 1 : 0;
+      const now = new Date().toISOString();
+      if (orig && orig !== slug) await db.run('DELETE FROM site_pages WHERE slug = ?', [orig]);
+      await db.run(
+        `INSERT INTO site_pages (slug, title, content, nav, updated_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, updated_at = excluded.updated_at`,
+        [slug, title, contentTxt, nav, now],
+      );
+      await loadSite(true);
+      await webAudit(client, user, 'Сохранена доп. страница (сайт)', `/p/${slug}`);
+      return '/panel?tab=pages&' + qs({ ok: 'Страница сохранена.' });
+    }
+    if (pathName === '/admin/page/del') {
+      const slug = (body.get('orig') || body.get('slug') || '').trim().toLowerCase();
+      await db.run('DELETE FROM site_pages WHERE slug = ?', [slug]);
+      await loadSite(true);
+      await webAudit(client, user, 'Удалена доп. страница (сайт)', `/p/${slug}`);
+      return '/panel?tab=pages&' + qs({ ok: 'Страница удалена.' });
+    }
+
     if (pathName === '/admin/bot_nick') {
       if (!g) return '/panel?tab=admin&' + qs({ err: 'Бот недоступен.' });
       const nick = (body.get('nick') || '').trim().slice(0, 32);
@@ -3993,12 +4478,17 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName.startsWith('/admin/landing/')) {
       const KINDS = ['text', 'buttons', 'cards', 'stats'];
       if (pathName === '/admin/landing/settings') {
-        for (const k of ['hide_stats', 'hide_giveaways', 'hide_agitation']) {
+        for (const k of ['hide_stats', 'hide_giveaways', 'hide_agitation', 'banner_on']) {
           await db.setSetting('site.' + k, body.get(k) === '1' ? '1' : '');
         }
+        await db.setSetting('site.banner_text', (body.get('banner_text') || '').slice(0, 400));
         await db.setSetting('site.agitation_title', (body.get('agitation_title') || '').slice(0, 80));
         await db.setSetting('site.stats_title', (body.get('stats_title') || '').slice(0, 80));
         await db.setSetting('site.stats', (body.get('stats') || '').slice(0, 1200));
+        await db.setSetting('site.features_title', (body.get('features_title') || '').slice(0, 80));
+        await db.setSetting('site.features', (body.get('features') || '').slice(0, 1500));
+        await db.setSetting('site.howto_title', (body.get('howto_title') || '').slice(0, 80));
+        await db.setSetting('site.howto', (body.get('howto') || '').slice(0, 1200));
         await db.setSetting('site.hero_minh', String(parseInt(body.get('hero_minh'), 10) || 0));
         await db.setSetting('site.hero_buttons', (body.get('hero_buttons') || '').slice(0, 600));
         await loadSite(true);
@@ -4299,6 +4789,14 @@ function start(client, hooks = {}) {
         return html(200, L({ title: siteBrand(), user, level, body: flash + await landingBody(await orgStats()) }));
       }
 
+      if ((path === '/rules' || path === '/about' || path.startsWith('/p/')) && req.method === 'GET') {
+        const level = user ? (await accessFor(client, user.id)).level : 'guest';
+        const slug = path === '/rules' ? 'rules' : path === '/about' ? 'about' : decodeURIComponent(path.slice(3)).split('/')[0];
+        const pg = await db.get('SELECT * FROM site_pages WHERE slug = ?', [slug]).catch(() => null);
+        if (!pg) return html(404, L({ title: 'Страница не найдена', user, level, body: '<h1>Страница не найдена</h1><a class="btn" href="/">На главную</a>' }));
+        return html(200, L({ title: pg.title || slug, user, level, body: flash + `<h1>${esc(pg.title || slug)}</h1><div class="card">${mdToHtml(pg.content || '')}</div>` }));
+      }
+
       if (path === '/login') {
         if (!process.env.CLIENT_ID) return html(500, L({ title: 'Ошибка', body: '<h1>CLIENT_ID не задан</h1>' }));
         const params = new URLSearchParams({ client_id: process.env.CLIENT_ID, redirect_uri: redirectUri(), response_type: 'code', scope: 'identify' });
@@ -4344,8 +4842,11 @@ function start(client, hooks = {}) {
           accessCache.delete(me.id);
           const svRow = await db.get('SELECT sess_ver FROM web_users WHERE discord_id = ?', [me.id]).catch(() => null);
           const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
-          await db.run('INSERT INTO web_logins (discord_id, ip, ua, at) VALUES (?, ?, ?, ?)', [me.id, ip, (req.headers['user-agent'] || '').slice(0, 300), now]).catch(() => {});
-          const cookie = `fc_sess=${makeSession({ id: me.id, username: uname, avatar: me.avatar || '', sv: svRow ? (svRow.sess_ver || 0) : 0 })}; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`;
+          const ua = (req.headers['user-agent'] || '').slice(0, 300);
+          await db.run('INSERT INTO web_logins (discord_id, ip, ua, at) VALUES (?, ?, ?, ?)', [me.id, ip, ua, now]).catch(() => {});
+          const sid = crypto.randomBytes(9).toString('base64url');
+          await db.run('INSERT INTO web_sessions (sid, discord_id, ip, ua, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)', [sid, me.id, ip, ua, now, now]).catch(() => {});
+          const cookie = `fc_sess=${makeSession({ id: me.id, username: uname, avatar: me.avatar || '', sv: svRow ? (svRow.sess_ver || 0) : 0, sid })}; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`;
           return redirect('/me', { 'Set-Cookie': cookie });
         } catch (err) {
           console.error('[web] OAuth ошибка:', err.message);
@@ -4431,6 +4932,13 @@ function start(client, hooks = {}) {
         else if (path === '/calendar') bodyHtml = await calendarBody(client);
         else bodyHtml = await searchBody(client, u.searchParams.get('q'));
         return html(200, L({ title: 'Аналитика', user, level: acc.level, wide: true, body: flash + bodyHtml }));
+      }
+
+      if (path === '/compare' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для участников организации</h1><a class="btn" href="/me">Мой профиль</a>' }));
+        return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim()) }));
       }
 
       if (path === '/audit' && req.method === 'GET') {

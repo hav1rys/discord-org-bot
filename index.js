@@ -1060,6 +1060,7 @@ async function checkVacationReminders(guild) {
     if (already) continue;
 
     await dmUser(guild, c.discord_id, `⏰ Напоминание: ваш отпуск (${c.name}, № ${c.static}) заканчивается ${formatDateTime(new Date(c.vacation_until))} — меньше чем через сутки.`);
+    await notify(c.discord_id, 'vacation', `Отпуск заканчивается ${formatDateTime(new Date(c.vacation_until))}`, '/me');
     await db.run(
       'INSERT INTO vacation_reminders_sent (discord_id, static, until, sent_at) VALUES (?, ?, ?, ?)',
       [c.discord_id, c.static, c.vacation_until, new Date().toISOString()],
@@ -2021,10 +2022,18 @@ function buildGiveawayEmbed(giveaway, entryCount, ended = false, winners = null)
       { name: 'Участников', value: String(entryCount), inline: true },
       { name: ended ? 'Завершился' : 'Закончится', value: `<t:${endsAtSec}:R>`, inline: true },
     );
+  const tiers = giveaways.parsePrizeTiers(giveaway.prize_tiers);
+  if (tiers.length) {
+    embed.addFields({ name: 'Призовые места', value: tiers.map((t) => `${t.from === t.to ? t.from : `${t.from}-${t.to}`} место — ${t.text}`).join('\n').slice(0, 1024) });
+  }
   if (ended) {
     embed.addFields({
       name: 'Победители',
-      value: winners && winners.length > 0 ? winners.map((w) => `<@${w}>`).join(', ') : 'Никто не участвовал 😔',
+      value: winners && winners.length > 0
+        ? (tiers.length
+          ? winners.map((w, i) => `${i + 1}. <@${w}> — ${giveaways.prizeForPlace(tiers, i + 1, giveaway.prize)}`).join('\n').slice(0, 1024)
+          : winners.map((w) => `<@${w}>`).join(', '))
+        : 'Никто не участвовал 😔',
     });
   }
   return embed;
@@ -2054,9 +2063,19 @@ async function endGiveaway(guild, giveawayId, actor = null) {
     } catch (_) {}
 
     if (winners.length > 0) {
-      await channel.send(`🎉 Поздравляем ${winners.map((w) => `<@${w}>`).join(', ')} — вы выиграли **${giveaway.prize}**!`);
+      const tiers = giveaways.parsePrizeTiers(giveaway.prize_tiers);
+      if (tiers.length) {
+        const lines = winners.map((w, i) => `${i + 1} место — <@${w}> → **${giveaways.prizeForPlace(tiers, i + 1, giveaway.prize)}**`);
+        await channel.send(`🎉 Итоги розыгрыша «${giveaway.prize}»:\n${lines.join('\n')}`);
+      } else {
+        await channel.send(`🎉 Поздравляем ${winners.map((w) => `<@${w}>`).join(', ')} — вы выиграли **${giveaway.prize}**!`);
+      }
     } else {
       await channel.send(`😔 Розыгрыш «${giveaway.prize}» завершён — участников не было.`);
+    }
+    for (let i = 0; i < winners.length; i++) {
+      const tiers = giveaways.parsePrizeTiers(giveaway.prize_tiers);
+      await notify(winners[i], 'giveaway', `Вы выиграли розыгрыш «${giveaway.prize}»${tiers.length ? ` (${i + 1} место — ${giveaways.prizeForPlace(tiers, i + 1, giveaway.prize)})` : ''}!`, giveaway.message_id ? `https://discord.com/channels/${guild.id}/${giveaway.channel_id}/${giveaway.message_id}` : '/giveaways');
     }
   } catch (err) {
     console.error('Не удалось объявить итоги розыгрыша:', err.message);
@@ -2134,12 +2153,12 @@ async function fireScheduledGiveaways(guild) {
       const endsAt = new Date(Date.now() + (s.duration_ms || 3600000));
       const gid = await giveaways.createGiveaway(
         s.channel_id, s.prize, s.winners_count, s.host_id, endsAt.toISOString(),
-        s.required_role_id || null, null, s.min_role_id || null,
+        s.required_role_id || null, null, s.min_role_id || null, s.prize_tiers || null,
       );
       const channel = await guild.channels.fetch(s.channel_id);
       const embed = buildGiveawayEmbed({
         prize: s.prize, winners_count: s.winners_count, ends_at: endsAt.toISOString(),
-        host_id: s.host_id, required_role_id: s.required_role_id,
+        host_id: s.host_id, required_role_id: s.required_role_id, prize_tiers: s.prize_tiers,
       }, 0);
       const sent = await channel.send({
         content: '🎉 **РОЗЫГРЫШ** 🎉',
@@ -2439,6 +2458,7 @@ async function applyVacationRejection(interaction, guild, vId, reason) {
     actionSummary(interaction.user.id, '❌ Отклонено', reason),
   );
   await dmUser(guild, v.discord_id, `❌ Ваша заявка на отпуск отклонена. Причина: ${reason}`);
+  await notify(v.discord_id, 'vacation', `Заявка на отпуск отклонена. Причина: ${reason}`, '/me');
   await logAudit(guild, interaction.user, 'Отпуск отклонён', [
     { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
     { name: 'Чья заявка', value: `<@${v.discord_id}> | № ${vId}`, inline: true },
@@ -6260,6 +6280,7 @@ client.on('interactionCreate', async (interaction) => {
           content: `🏖️ Ваш отпуск одобрен до **${formatDateTime(new Date(v.until))}**.`,
           components: [row(new ButtonBuilder().setCustomId(`vacation_selfcancel:${v.discord_id}`).setLabel('❌ Отменить отпуск').setStyle(ButtonStyle.Danger))],
         });
+        await notify(v.discord_id, 'vacation', `Отпуск одобрен до ${formatDateTime(new Date(v.until))}`, '/me');
         await logAudit(guild, interaction.user, 'Отпуск одобрен', [
           { name: 'Кто одобрил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
           { name: 'Кому', value: `<@${v.discord_id}> | № ${vId}`, inline: true },
@@ -6418,6 +6439,7 @@ client.on('interactionCreate', async (interaction) => {
           actionSummary(interaction.user.id, '✅ Принято'),
         );
         await dmUser(guild, reqRow.discord_id, `✅ Ваша заявка на добавление паспорта (${reqRow.name}, № ${reqRow.static}) принята.`);
+        await notify(reqRow.discord_id, 'passport', `Добавлен паспорт: ${reqRow.name} (№ ${reqRow.static})`, '/me');
         await logAudit(guild, interaction.user, 'Паспорт добавлен по заявке', [
           { name: 'Кто одобрил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
           { name: 'Кому добавили', value: `<@${reqRow.discord_id}> | ${reqRow.name}, № ${reqRow.static}`, inline: true },
@@ -6804,6 +6826,7 @@ client.on('interactionCreate', async (interaction) => {
         await safeUpdateBlacklist(guild);
         await refreshReviewMessage(interaction.channel, a.message_id, appealReviewEmbed({ ...a, status: 'accepted' }, []), [], actionSummary(interaction.user.id, '✅ ЧС снят'));
         await dmUser(guild, a.discord_id, '✅ Ваша апелляция принята — вы убраны из чёрного списка организации.');
+        await notify(a.discord_id, 'appeal', 'Апелляция принята — вы убраны из чёрного списка', '/me');
         await logAudit(guild, interaction.user, 'Апелляция ЧС принята', [
           { name: 'Кто принял', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
           { name: 'Кому', value: `<@${a.discord_id}>`, inline: true },
@@ -8034,6 +8057,12 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'На кого', value: `${k.name}${k.target_static !== 'all' ? ` (паспорт № ${k.target_static})` : ' (все паспорта)'}`, inline: true },
           { name: '№ заявки', value: `#${k.id}`, inline: true },
         ]);
+        try {
+          const tgt = k.target_static !== 'all'
+            ? await db.get('SELECT discord_id FROM participants WHERE static = ?', [k.target_static])
+            : await db.get('SELECT discord_id FROM participants WHERE name = ?', [k.name]);
+          if (tgt && tgt.discord_id) await notify(tgt.discord_id, 'kick', 'На вас подана заявка на увольнение — руководство её рассматривает', '/me');
+        } catch (_) {}
         return safeReply(interaction, 'Заявка на увольнение отправлена на рассмотрение.');
       }
 
@@ -8864,6 +8893,7 @@ client.on('interactionCreate', async (interaction) => {
         await db.run("UPDATE appeals SET status = 'rejected', reject_reason = ?, resolved_by = ?, resolved_at = ? WHERE id = ?", [reason, interaction.user.id, new Date().toISOString(), appealId]);
         await refreshReviewMessage(interaction.channel, a.message_id, appealReviewEmbed({ ...a, status: 'rejected', reject_reason: reason }, null), [], actionSummary(interaction.user.id, '❌ Отклонено', reason));
         await dmUser(guild, a.discord_id, `❌ Ваша апелляция на чёрный список отклонена. Причина: ${reason}`);
+        await notify(a.discord_id, 'appeal', `Апелляция отклонена. Причина: ${reason}`, '/me');
         await logAudit(guild, interaction.user, 'Апелляция ЧС отклонена', [
           { name: 'Кто отклонил', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
           { name: 'Чья апелляция', value: `<@${a.discord_id}> | № ${appealId}`, inline: true },
@@ -9190,6 +9220,16 @@ client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     if (message.channel.type !== ChannelType.GuildText) {
       return;
+    }
+
+    // ---- Ответ в тикете: уведомляем автора тикета, если пишет не он ----
+    if (message.channel.parentId === config.CHANNEL_TICKETS_ACTIVE_CATEGORY) {
+      try {
+        const t = await db.get("SELECT id, opener_id, subject FROM tickets WHERE channel_id = ? AND status = 'open'", [message.channel.id]);
+        if (t && t.opener_id && t.opener_id !== message.author.id) {
+          await notify(t.opener_id, 'ticket', `Ответ в тикете «${t.subject || 'Тикет'}»`, `/ticket/${t.id}`);
+        }
+      } catch (_) {}
     }
 
     // ---- Кодовое слово «контракт» в Weazel News: скриншот на проверку ----

@@ -74,6 +74,7 @@ const SCHEMA = {
       vacation_until: 'TEXT',
       afk_since: 'TEXT',
       profile_thread_id: 'TEXT',
+      about: 'TEXT', // «Обо мне» — короткий текст участника для публичного профиля
     },
     indexes: [['discord_id'], ['static']],
   },
@@ -388,6 +389,7 @@ const SCHEMA = {
       min_role_id: 'TEXT', // если задано — участвовать может эта роль ранга и ВЫШЕ по иерархии ROLE_IDS
       recurring_rule_id: 'INTEGER', // если создан из шаблона повтора — ссылка на giveaway_recurring_rules.id
       winners: 'TEXT', // discord id победителей через запятую (для /розыгрыш_история)
+      prize_tiers: 'TEXT', // необяз. призовые места: строки «диапазон | приз», напр. «1 | X\n2-3 | Y»
       created_at: 'TEXT',
     },
     indexes: [['status'], ['ends_at']],
@@ -557,6 +559,7 @@ const SCHEMA = {
       duration_ms: 'INTEGER',
       required_role_id: 'TEXT',
       min_role_id: 'TEXT',
+      prize_tiers: 'TEXT',
       start_at: 'TEXT',
       host_id: 'TEXT',
       status: "TEXT DEFAULT 'pending'", // pending | fired | cancelled
@@ -584,6 +587,41 @@ const SCHEMA = {
       badge_key: 'TEXT PRIMARY KEY',
       role_id: 'TEXT',
       created_at: 'TEXT',
+    },
+  },
+
+  // Сессии сайта — по одной строке на вход, чтобы разлогинивать по одной.
+  web_sessions: {
+    columns: {
+      sid: 'TEXT PRIMARY KEY',
+      discord_id: 'TEXT',
+      ip: 'TEXT',
+      ua: 'TEXT',
+      created_at: 'TEXT',
+      last_seen: 'TEXT',
+      revoked_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  // Шаблоны ответов в тикетах.
+  ticket_reply_templates: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      name: 'TEXT',
+      text: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+
+  // Редактируемые доп. страницы сайта (/rules, /about и любые /p/<slug>).
+  site_pages: {
+    columns: {
+      slug: 'TEXT PRIMARY KEY',
+      title: 'TEXT',
+      content: 'TEXT',
+      nav: 'INTEGER DEFAULT 0', // 1 — показывать ссылку в шапке
+      updated_at: 'TEXT',
     },
   },
 

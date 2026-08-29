@@ -12,13 +12,31 @@ function parseDuration(input) {
   return amount * multipliers[unit];
 }
 
-async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null, minRoleId = null) {
+async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null, minRoleId = null, prizeTiers = null) {
   const result = await db.run(
-    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, min_role_id, recurring_rule_id, created_at)
-     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
-    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, minRoleId, recurringRuleId, new Date().toISOString()],
+    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, min_role_id, recurring_rule_id, prize_tiers, created_at)
+     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, minRoleId, recurringRuleId, prizeTiers || null, new Date().toISOString()],
   );
   return result.lastID;
+}
+
+// Разбирает поле prize_tiers («1 | Приз X\n2-3 | Приз Y») в [{from,to,text}].
+function parsePrizeTiers(raw) {
+  if (!raw) return [];
+  return String(raw).split('\n').map((l) => {
+    const [range, ...rest] = l.split('|');
+    const txt = rest.join('|').trim();
+    if (!txt) return null;
+    const mm = String(range).trim().match(/^(\d+)\s*(?:-\s*(\d+))?$/);
+    if (!mm) return null;
+    return { from: +mm[1], to: mm[2] ? +mm[2] : +mm[1], text: txt };
+  }).filter(Boolean);
+}
+// Приз для места place (1-based) по разобранным ярусам.
+function prizeForPlace(tiers, place, fallback) {
+  for (const t of tiers) if (place >= t.from && place <= t.to) return t.text;
+  return fallback;
 }
 
 // Проверка «минимальной роли»: у участника есть роль этого ранга или ВЫШЕ
@@ -154,6 +172,8 @@ module.exports = {
   WEEKDAY_NAMES,
   parseDuration,
   createGiveaway,
+  parsePrizeTiers,
+  prizeForPlace,
   meetsMinRole,
   setMessageId,
   getGiveaway,
