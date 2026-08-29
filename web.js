@@ -422,16 +422,20 @@ async function landingBody(st) {
     const row = await contentVersions.getLatestVersion('agitation');
     ag = (row ? row.content : content.DEFAULT_AGITATION) || '';
   } catch (_) { ag = content.DEFAULT_AGITATION; }
+  const heroBtns = SITE.hero_buttons
+    ? SITE.hero_buttons.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0] && a[1])
+      .map(([lb, url]) => `<a class="btn${/подать/i.test(lb) ? '' : ' ghost'}" href="${esc(url)}"${/^https?:/i.test(url) ? ' target="_blank" rel="noopener"' : ''}>${esc(lb)}</a>`).join('')
+    : `<a class="btn" href="/apply">Подать заявку на вступление</a>
+       <a class="btn ghost" href="/login">Войти через Discord</a>
+       <a class="btn ghost" href="${inv}" target="_blank" rel="noopener">Discord-сервер</a>`;
   return `
-  <div class="hero">
+  <div class="hero"${SITE.hero_minh ? ` style="min-height:${parseInt(SITE.hero_minh, 10) || 0}px"` : ''}>
     <h1>${esc(heroTitle)}</h1>
     <p>${esc(heroText)}</p>
-    <a class="btn" href="/apply">Подать заявку на вступление</a>
-    <a class="btn ghost" href="/login">Войти через Discord</a>
-    <a class="btn ghost" href="${inv}" target="_blank" rel="noopener">Discord-сервер</a>
+    ${heroBtns}
   </div>
 
-  <div class="card">
+  ${SITE.hide_stats === '1' ? '' : `<div class="card">
     <h2>Организация в цифрах</h2>
     <div class="grid">
       <div class="tile"><div class="n">${st.accounts}</div><div class="l">участников</div></div>
@@ -439,22 +443,32 @@ async function landingBody(st) {
       <div class="tile"><div class="n">${st.fulfilled} / ${st.unfulfilled}</div><div class="l">контракты ✅/❌ за неделю</div></div>
       <div class="tile"><div class="n">${st.endedGiveaways}</div><div class="l">завершённых розыгрышей</div></div>
     </div>
-  </div>
+  </div>`}
 
-  ${(st.activeGiveaways && st.activeGiveaways.length) ? `<div class="card"><h2>🎉 Идут розыгрыши</h2>
+  ${SITE.hide_giveaways === '1' ? '' : ((st.activeGiveaways && st.activeGiveaways.length) ? `<div class="card"><h2>🎉 Идут розыгрыши</h2>
     ${st.activeGiveaways.map((gw) => `<a class="pill" href="/g/${gw.id}" style="font-size:14px">${esc(gw.prize)}</a>`).join(' ')}
     <div style="margin-top:10px"><a class="btn sm" href="/giveaways">Все розыгрыши · участвовать</a></div>
-  </div>` : ''}
+  </div>` : '')}
 
-  ${await renderLandingBlocks(inv)}
+  ${await renderLandingBlocks(inv, st)}
 
-  <div class="card">
-    <h2>Текущая агитация</h2>
-    <pre>${esc(ag).slice(0, 4000)}</pre>
-  </div>`;
+  ${SITE.hide_agitation === '1' ? '' : `<div class="card">
+    <h2>${esc(SITE.agitation_title || 'Текущая агитация')}</h2>
+    ${mdToHtml(ag.slice(0, 5000))}
+  </div>`}`;
 }
 
-async function renderLandingBlocks(inv) {
+function statPlaceholders(st) {
+  return {
+    '{участников}': st.accounts, '{accounts}': st.accounts,
+    '{паспортов}': st.passports, '{passports}': st.passports,
+    '{контракты}': `${st.fulfilled} / ${st.unfulfilled}`, '{contracts}': `${st.fulfilled} / ${st.unfulfilled}`,
+    '{выполнено}': st.fulfilled, '{невыполнено}': st.unfulfilled,
+    '{розыгрышей}': st.endedGiveaways, '{giveaways}': st.endedGiveaways,
+    '{вебпользователи}': st.webUsers, '{webusers}': st.webUsers,
+  };
+}
+async function renderLandingBlocks(inv, st = {}) {
   const rows = await db.all('SELECT * FROM landing_blocks ORDER BY position, id').catch(() => []);
   if (!rows.length) {
     return `
@@ -471,30 +485,46 @@ async function renderLandingBlocks(inv) {
       <li>Дождаться решения HR — ответ придёт в ЛС от бота.</li>
     </ol></div>`;
   }
+  const ph = statPlaceholders(st);
+  const subst = (s) => String(s).replace(/\{[а-яa-z]+\}/gi, (m) => (ph[m] != null ? ph[m] : m));
   return rows.map((b) => {
     const h = b.title ? `<h2>${esc(b.title)}</h2>` : '';
+    const style = b.min_height ? ` style="min-height:${parseInt(b.min_height, 10) || 0}px"` : '';
     if (b.kind === 'buttons') {
       const btns = (b.content || '').split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0] && a[1])
         .map(([label, url]) => `<a class="btn sm" href="${esc(url)}"${/^https?:/i.test(url) ? ' target="_blank" rel="noopener"' : ''}>${esc(label)}</a>`).join(' ');
-      return `<div class="card">${h}<div class="bar">${btns}</div></div>`;
+      return `<div class="card"${style}>${h}<div class="bar">${btns}</div></div>`;
     }
     if (b.kind === 'cards') {
       const cs = (b.content || '').split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0])
         .map(([t2, d]) => `<div class="c"><h3>${esc(t2)}</h3><p>${esc(d || '')}</p></div>`).join('');
-      return `<div class="card">${h}<div class="feat">${cs}</div></div>`;
+      return `<div class="card"${style}>${h}<div class="feat">${cs}</div></div>`;
     }
-    return `<div class="card">${h}${mdToHtml(b.content || '')}</div>`;
+    if (b.kind === 'stats') {
+      const ts = (b.content || '').split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0])
+        .map(([val, lbl]) => `<div class="tile"><div class="n">${esc(subst(val))}</div><div class="l">${esc(lbl || '')}</div></div>`).join('');
+      return `<div class="card"${style}>${h}<div class="grid">${ts}</div></div>`;
+    }
+    return `<div class="card"${style}>${h}${mdToHtml(b.content || '')}</div>`;
   }).join('');
 }
 
 async function panelLanding(user) {
+  await loadSite(true);
   const rows = await db.all('SELECT * FROM landing_blocks ORDER BY position, id').catch(() => []);
-  const kindSel = (cur) => `<select name="kind">${[['text', 'Текст (Discord-разметка)'], ['buttons', 'Кнопки (строка: Текст | URL)'], ['cards', 'Карточки (строка: Заголовок | Описание)']].map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  const KINDS = [
+    ['text', 'Текст (форматирование как в Discord)'],
+    ['buttons', 'Кнопки — строка: Текст | URL'],
+    ['cards', 'Карточки — строка: Заголовок | Описание'],
+    ['stats', 'Цифры — строка: Значение | Подпись (можно {участников} {паспортов} {контракты} {розыгрышей})'],
+  ];
+  const kindSel = (cur) => `<select name="kind">${KINDS.map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
   const list = rows.map((b, i) => `<div class="card">
     <form method="POST" action="/admin/landing/save" class="form">${csrfField(user)}<input type="hidden" name="id" value="${b.id}">
       <label>Тип${kindSel(b.kind)}</label>
       <label>Заголовок (можно пусто)<input name="title" value="${esc(b.title || '')}" maxlength="120"></label>
       <label>Содержимое<textarea name="content" rows="5" maxlength="4000">${esc(b.content || '')}</textarea></label>
+      <label>Мин. высота блока, px (0 = авто)<input name="min_height" type="number" min="0" max="900" value="${b.min_height || 0}"></label>
       <div class="bar">
         <button class="btn sm" type="submit">Сохранить</button>
         <button class="btn ghost sm" formaction="/admin/landing/move" name="dir" value="up" type="submit" ${i === 0 ? 'disabled' : ''}>▲</button>
@@ -503,8 +533,22 @@ async function panelLanding(user) {
       </div>
     </form>
   </div>`).join('');
-  return `<div class="card"><h2>Блоки главной страницы</h2>
-    <p class="mini">Блоки идут между «Организация в цифрах» и «Текущей агитацией». Если ни одного блока нет — показываются стандартные «Преимущества» и «Как вступить». Заголовок сайта/герой/подвал правятся на вкладке «Админ».</p>
+  const cb = (k, lbl) => `<label style="display:flex;gap:8px;align-items:center;margin:4px 0"><input type="checkbox" name="${k}" value="1" ${SITE[k] === '1' ? 'checked' : ''}> ${esc(lbl)}</label>`;
+  return `
+  <div class="card"><h2>Публичная главная — что показывать</h2>
+    <p class="mini">Эту страницу видят и не-участники. Спрячьте лишнее и соберите блоки под визитёров.</p>
+    <form method="POST" action="/admin/landing/settings" class="form">${csrfField(user)}
+      ${cb('hide_stats', 'Спрятать «Организация в цифрах» (авто-блок)')}
+      ${cb('hide_giveaways', 'Спрятать «Идут розыгрыши»')}
+      ${cb('hide_agitation', 'Спрятать «Текущую агитацию»')}
+      <label>Заголовок блока агитации<input name="agitation_title" value="${esc(SITE.agitation_title || 'Текущая агитация')}" maxlength="80"></label>
+      <label>Мин. высота героя, px (0 = авто)<input name="hero_minh" type="number" min="0" max="900" value="${esc(SITE.hero_minh || '0')}"></label>
+      <label>Кнопки в герое — строка «Текст | URL» (пусто = стандартные три)<textarea name="hero_buttons" rows="3" maxlength="600">${esc(SITE.hero_buttons || '')}</textarea></label>
+      <button class="btn" type="submit">Сохранить</button>
+    </form>
+  </div>
+  <div class="card"><h2>Блоки главной страницы</h2>
+    <p class="mini">Блоки идут между цифрами и агитацией. Нет ни одного блока — показываются стандартные «Преимущества» и «Как вступить». Название сайта / текст героя / подвал — на вкладке «Админ».</p>
     <form method="POST" action="/admin/landing/add" class="form">${csrfField(user)}
       <label>Тип нового блока${kindSel('text')}</label>
       <label>Заголовок<input name="title" maxlength="120"></label>
@@ -3939,18 +3983,30 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     }
 
     if (pathName.startsWith('/admin/landing/')) {
+      const KINDS = ['text', 'buttons', 'cards', 'stats'];
+      if (pathName === '/admin/landing/settings') {
+        for (const k of ['hide_stats', 'hide_giveaways', 'hide_agitation']) {
+          await db.setSetting('site.' + k, body.get(k) === '1' ? '1' : '');
+        }
+        await db.setSetting('site.agitation_title', (body.get('agitation_title') || '').slice(0, 80));
+        await db.setSetting('site.hero_minh', String(parseInt(body.get('hero_minh'), 10) || 0));
+        await db.setSetting('site.hero_buttons', (body.get('hero_buttons') || '').slice(0, 600));
+        await loadSite(true);
+        await webAudit(client, user, 'Настройки главной страницы (сайт)', '');
+        return '/panel?tab=landing&' + qs({ ok: 'Сохранено.' });
+      }
       if (pathName === '/admin/landing/add') {
         const mx = await db.get('SELECT MAX(position) m FROM landing_blocks');
-        await db.run('INSERT INTO landing_blocks (position, kind, title, content, updated_at) VALUES (?, ?, ?, ?, ?)',
-          [(mx && mx.m != null ? mx.m : 0) + 1, ['text', 'buttons', 'cards'].includes(body.get('kind')) ? body.get('kind') : 'text', (body.get('title') || '').slice(0, 120), (body.get('content') || '').slice(0, 4000), new Date().toISOString()]);
+        await db.run('INSERT INTO landing_blocks (position, kind, title, content, min_height, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [(mx && mx.m != null ? mx.m : 0) + 1, KINDS.includes(body.get('kind')) ? body.get('kind') : 'text', (body.get('title') || '').slice(0, 120), (body.get('content') || '').slice(0, 4000), parseInt(body.get('min_height'), 10) || 0, new Date().toISOString()]);
         return '/panel?tab=landing&' + qs({ ok: 'Блок добавлен.' });
       }
       const bid = parseInt(body.get('id'), 10) || 0;
       const blk = await db.get('SELECT * FROM landing_blocks WHERE id = ?', [bid]);
       if (!blk) return '/panel?tab=landing&' + qs({ err: 'Блок не найден.' });
       if (pathName === '/admin/landing/save') {
-        await db.run('UPDATE landing_blocks SET kind = ?, title = ?, content = ?, updated_at = ? WHERE id = ?',
-          [['text', 'buttons', 'cards'].includes(body.get('kind')) ? body.get('kind') : blk.kind, (body.get('title') || '').slice(0, 120), (body.get('content') || '').slice(0, 4000), new Date().toISOString(), bid]);
+        await db.run('UPDATE landing_blocks SET kind = ?, title = ?, content = ?, min_height = ?, updated_at = ? WHERE id = ?',
+          [KINDS.includes(body.get('kind')) ? body.get('kind') : blk.kind, (body.get('title') || '').slice(0, 120), (body.get('content') || '').slice(0, 4000), parseInt(body.get('min_height'), 10) || 0, new Date().toISOString(), bid]);
         return '/panel?tab=landing&' + qs({ ok: 'Сохранено.' });
       }
       if (pathName === '/admin/landing/del') {

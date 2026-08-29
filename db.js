@@ -619,9 +619,10 @@ const SCHEMA = {
     columns: {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
       position: 'INTEGER',
-      kind: 'TEXT', // text | buttons | cards
+      kind: 'TEXT', // text | buttons | cards | stats
       title: 'TEXT',
       content: 'TEXT',
+      min_height: 'INTEGER',
       updated_at: 'TEXT',
     },
   },
