@@ -435,15 +435,7 @@ async function landingBody(st) {
     ${heroBtns}
   </div>
 
-  ${SITE.hide_stats === '1' ? '' : `<div class="card">
-    <h2>Организация в цифрах</h2>
-    <div class="grid">
-      <div class="tile"><div class="n">${st.accounts}</div><div class="l">участников</div></div>
-      <div class="tile"><div class="n">${st.passports}</div><div class="l">паспортов</div></div>
-      <div class="tile"><div class="n">${st.fulfilled} / ${st.unfulfilled}</div><div class="l">контракты ✅/❌ за неделю</div></div>
-      <div class="tile"><div class="n">${st.endedGiveaways}</div><div class="l">завершённых розыгрышей</div></div>
-    </div>
-  </div>`}
+  ${statsCard(st)}
 
   ${SITE.hide_giveaways === '1' ? '' : ((st.activeGiveaways && st.activeGiveaways.length) ? `<div class="card"><h2>🎉 Идут розыгрыши</h2>
     ${st.activeGiveaways.map((gw) => `<a class="pill" href="/g/${gw.id}" style="font-size:14px">${esc(gw.prize)}</a>`).join(' ')}
@@ -468,6 +460,18 @@ function statPlaceholders(st) {
     '{вебпользователи}': st.webUsers, '{webusers}': st.webUsers,
   };
 }
+function substStats(str, st) {
+  const ph = statPlaceholders(st || {});
+  return String(str).replace(/\{[а-яa-z]+\}/gi, (m) => (ph[m] != null ? ph[m] : m));
+}
+const DEFAULT_STATS = '{участников} | участников\n{паспортов} | паспортов\n{контракты} | контракты ✅/❌ за неделю\n{розыгрышей} | завершённых розыгрышей';
+function statsCard(st) {
+  if (SITE.hide_stats === '1') return '';
+  const src = SITE.stats && SITE.stats.trim() ? SITE.stats : DEFAULT_STATS;
+  const tiles = src.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0])
+    .map(([val, lbl]) => `<div class="tile"><div class="n">${esc(substStats(val, st))}</div><div class="l">${esc(lbl || '')}</div></div>`).join('');
+  return `<div class="card"><h2>${esc(SITE.stats_title || 'Организация в цифрах')}</h2><div class="grid">${tiles}</div></div>`;
+}
 async function renderLandingBlocks(inv, st = {}) {
   const rows = await db.all('SELECT * FROM landing_blocks ORDER BY position, id').catch(() => []);
   if (!rows.length) {
@@ -485,8 +489,7 @@ async function renderLandingBlocks(inv, st = {}) {
       <li>Дождаться решения HR — ответ придёт в ЛС от бота.</li>
     </ol></div>`;
   }
-  const ph = statPlaceholders(st);
-  const subst = (s) => String(s).replace(/\{[а-яa-z]+\}/gi, (m) => (ph[m] != null ? ph[m] : m));
+  const subst = (s) => substStats(s, st);
   return rows.map((b) => {
     const h = b.title ? `<h2>${esc(b.title)}</h2>` : '';
     const style = b.min_height ? ` style="min-height:${parseInt(b.min_height, 10) || 0}px"` : '';
@@ -538,12 +541,15 @@ async function panelLanding(user) {
   <div class="card"><h2>Публичная главная — что показывать</h2>
     <p class="mini">Эту страницу видят и не-участники. Спрячьте лишнее и соберите блоки под визитёров.</p>
     <form method="POST" action="/admin/landing/settings" class="form">${csrfField(user)}
-      ${cb('hide_stats', 'Спрятать «Организация в цифрах» (авто-блок)')}
+      ${cb('hide_stats', 'Спрятать «Организация в цифрах»')}
       ${cb('hide_giveaways', 'Спрятать «Идут розыгрыши»')}
       ${cb('hide_agitation', 'Спрятать «Текущую агитацию»')}
+      <label>Заголовок блока «Организация в цифрах»<input name="stats_title" value="${esc(SITE.stats_title || 'Организация в цифрах')}" maxlength="80"></label>
+      <label>Плитки «в цифрах» — строка «Значение | Подпись». Значение: число или {участников} {паспортов} {контракты} {розыгрышей} {выполнено} {невыполнено} {вебпользователи}
+        <textarea name="stats" rows="5" maxlength="1200">${esc(SITE.stats && SITE.stats.trim() ? SITE.stats : DEFAULT_STATS)}</textarea></label>
       <label>Заголовок блока агитации<input name="agitation_title" value="${esc(SITE.agitation_title || 'Текущая агитация')}" maxlength="80"></label>
       <label>Мин. высота героя, px (0 = авто)<input name="hero_minh" type="number" min="0" max="900" value="${esc(SITE.hero_minh || '0')}"></label>
-      <label>Кнопки в герое — строка «Текст | URL» (пусто = стандартные три)<textarea name="hero_buttons" rows="3" maxlength="600">${esc(SITE.hero_buttons || '')}</textarea></label>
+      <label>Кнопки в герое — строка «Текст | URL»<textarea name="hero_buttons" rows="3" maxlength="600">${esc(SITE.hero_buttons && SITE.hero_buttons.trim() ? SITE.hero_buttons : 'Подать заявку на вступление | /apply\nВойти через Discord | /login\nDiscord-сервер | ' + siteInvite())}</textarea></label>
       <button class="btn" type="submit">Сохранить</button>
     </form>
   </div>
@@ -2076,10 +2082,12 @@ async function panelQueues(client, user, pageNum = 0) {
 
 async function panelTexts(user) {
   const keys = [['rules', 'Свод правил'], ['agitation', 'Агитация'], ['hr_info', 'HR-вакансия']];
+  const defaults = { rules: content.DEFAULT_RULES, agitation: content.DEFAULT_AGITATION, hr_info: content.DEFAULT_HR_INFO };
   const parts = [];
   for (const [k, title] of keys) {
     let cur = '';
     try { const row = await contentVersions.getLatestVersion(k); cur = row ? row.content : ''; } catch (_) {}
+    if (!cur || !cur.trim()) cur = defaults[k] || ''; // нет сохранённой версии — подставляем текущий дефолт
     const extra = k === 'rules'
       ? `<form method="POST" action="/panel/rules_broadcast" style="margin-top:8px" onsubmit="return confirm('Отправить правила в канал правил и в ЛС всем участникам?')">${csrfField(user)}<button class="btn ghost sm" type="submit">📕 Разослать правила</button></form>`
       : (k === 'agitation' || k === 'hr_info'
@@ -3989,6 +3997,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
           await db.setSetting('site.' + k, body.get(k) === '1' ? '1' : '');
         }
         await db.setSetting('site.agitation_title', (body.get('agitation_title') || '').slice(0, 80));
+        await db.setSetting('site.stats_title', (body.get('stats_title') || '').slice(0, 80));
+        await db.setSetting('site.stats', (body.get('stats') || '').slice(0, 1200));
         await db.setSetting('site.hero_minh', String(parseInt(body.get('hero_minh'), 10) || 0));
         await db.setSetting('site.hero_buttons', (body.get('hero_buttons') || '').slice(0, 600));
         await loadSite(true);
