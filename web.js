@@ -183,6 +183,31 @@ function renderMentions(client, s) {
     .replace(/<@&(\d+)>/g, (m, rid) => roleTag(client, rid))
     .replace(/<@!?(\d+)>/g, (m, uid) => personLink(client, uid));
 }
+// Онлайн-статус из Discord presence (требует config.ENABLE_PRESENCE + портал-интент).
+const PRESENCE_TITLE = { online: 'в сети', idle: 'неактивен', dnd: 'не беспокоить', offline: 'не в сети' };
+function onlineStatus(client, id) {
+  if (!config.ENABLE_PRESENCE || !id) return null;
+  const g = client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
+  const m = g ? g.members.cache.get(String(id)) : null;
+  return m && m.presence ? m.presence.status : 'offline';
+}
+function onlineDot(client, id) {
+  const s = onlineStatus(client, id);
+  if (!s) return '';
+  return `<span class="pdot ${esc(s)}" title="${esc(PRESENCE_TITLE[s] || s)}"></span>`;
+}
+// Мини-график (inline SVG) по массиву чисел.
+function sparkline(vals, w = 120, h = 26) {
+  const a = (vals || []).map((n) => Number(n) || 0);
+  if (a.length < 2) return '<span class="mini">—</span>';
+  const max = Math.max(1, ...a);
+  const step = w / (a.length - 1);
+  const pts = a.map((v, i) => `${(i * step).toFixed(1)},${(h - 2 - (v / max) * (h - 4)).toFixed(1)}`).join(' ');
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="var(--accent2)" stroke-width="1.6"/>
+    <circle cx="${(w).toFixed(1)}" cy="${(h - 2 - (a[a.length - 1] / max) * (h - 4)).toFixed(1)}" r="2" fill="var(--accent)"/>
+  </svg>`;
+}
 
 // ---------- Вёрстка ----------
 const STYLE = `
@@ -271,6 +296,17 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .actions .form{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:14px}
 .actions h3{font-size:14px;margin-bottom:2px}
 .tglbtn{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:14px}
+.themebox{position:relative;display:inline-block}
+.themepop{position:absolute;right:0;top:calc(100% + 8px);z-index:100;width:250px;max-height:72vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:0 12px 34px rgba(0,0,0,.4)}
+.themepop[hidden]{display:none}
+.themepop .seg{display:flex;gap:4px;margin-bottom:10px}
+.themepop .seg button{flex:1;padding:6px 4px;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);cursor:pointer}
+.themepop .seg button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.themepop .crow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0;font-size:12px;color:var(--text)}
+.themepop .crow input[type=color]{width:42px;height:26px;padding:1px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);cursor:pointer;flex:0 0 auto}
+.themepop .acts{display:flex;gap:6px;margin-top:12px}
+.themepop .acts button{flex:1;padding:7px;font-size:12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);cursor:pointer}
+.themepop .acts button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
 .chart{display:flex;align-items:flex-end;gap:14px;padding:8px 2px 0;overflow-x:auto}
 .chart .col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:46px;flex:0 0 auto}
@@ -297,6 +333,16 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .heat .hl{color:var(--muted);padding-right:4px;white-space:nowrap;align-self:center}
 .progress{height:8px;background:var(--panel2);border:1px solid var(--line);border-radius:999px;overflow:hidden;margin:4px 0}
 .progress>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.mdprev{border:1px dashed var(--line);border-radius:8px;padding:10px 12px;margin-top:6px;background:var(--panel2);font-size:13.5px}
+.mdprev::before{content:"предпросмотр";display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:6px}
+.mdprev img{max-width:100%;border-radius:6px}
+.md img{max-width:100%;border-radius:6px}
+.pdot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#747f8d;vertical-align:middle;margin-right:5px;flex:0 0 auto}
+.pdot.online{background:#3ba55d}.pdot.idle{background:#faa61a}.pdot.dnd{background:#ed4245}.pdot.offline{background:#747f8d}
+.spark{display:inline-block;vertical-align:middle}
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--text)}
+th.sortable .ar{opacity:.5;font-size:10px}
 @media print{
   .top,.sitebanner,.tabs,.foot,.form,.btn{display:none!important}
   .card{break-inside:avoid;border-color:#ccc}
@@ -312,22 +358,58 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 }
 `;
 
-const THEME_TOGGLE = `<button class="tglbtn" type="button" onclick="fcTheme()" title="Тема: авто → светлая → тёмная">🌓</button>`;
+// Кнопка «Оформление» в шапке: режим темы + свои цвета (только этот браузер).
+function themeToggle() {
+  const rows = Object.keys(THEME_DEFAULTS)
+    .map((k) => `<div class="crow"><span>${esc(THEME_LABELS[k])}</span><input type="color" data-k="${k}" value="${THEME_DEFAULTS[k]}"></div>`)
+    .join('');
+  return `<div class="themebox">
+    <button class="tglbtn" type="button" onclick="fcThemeMenu(event)" title="Оформление сайта">🎨</button>
+    <div class="themepop" id="themepop" hidden>
+      <div class="seg" id="fcModeSeg">
+        <button type="button" data-m="auto" onclick="fcSetMode('auto')">Авто</button>
+        <button type="button" data-m="light" onclick="fcSetMode('light')">Светлая</button>
+        <button type="button" data-m="dark" onclick="fcSetMode('dark')">Тёмная</button>
+      </div>
+      <div class="mini" style="margin-bottom:4px">Свои цвета — только в этом браузере</div>
+      ${rows}
+      <div class="acts">
+        <button type="button" class="primary" onclick="fcColorsApply()">Применить</button>
+        <button type="button" onclick="fcColorsReset()">Сброс</button>
+      </div>
+    </div>
+  </div>`;
+}
 const CLIENT_SCRIPT = `
 (function(){
   var d=document.documentElement;
   function apply(m){ if(m==='light')d.setAttribute('data-theme','light'); else if(m==='dark')d.setAttribute('data-theme','dark'); else d.removeAttribute('data-theme'); }
-  var stored=null; try{stored=localStorage.getItem('fc_theme');}catch(e){}
-  apply(stored||'auto');
-  try{
-    var pc=JSON.parse(localStorage.getItem('fc_colors')||'null');
-    if(pc&&typeof pc==='object') for(var k in pc){ if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(pc[k])) d.style.setProperty('--'+k,pc[k]); }
-  }catch(e){}
-  window.fcTheme=function(){
-    var cur=stored||'auto', next=cur==='auto'?'light':cur==='light'?'dark':'auto';
-    stored=next; apply(next);
-    try{localStorage.setItem('fc_theme',next);}catch(e){}
-  };
+  var mode='auto'; try{mode=localStorage.getItem('fc_theme')||'auto';}catch(e){}
+  apply(mode);
+  function readColors(){ try{ var pc=JSON.parse(localStorage.getItem('fc_colors')||'null'); return (pc&&typeof pc==='object')?pc:{}; }catch(e){ return {}; } }
+  function applyColors(pc){ for(var k in pc){ if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(pc[k])) d.style.setProperty('--'+k,pc[k]); } }
+  applyColors(readColors());
+  function pop(){ return document.getElementById('themepop'); }
+  function syncSeg(){ var seg=document.getElementById('fcModeSeg'); if(!seg)return; var b=seg.querySelectorAll('button');
+    for(var i=0;i<b.length;i++) b[i].className=(b[i].getAttribute('data-m')===mode)?'on':''; }
+  function fillInputs(){ var pc=readColors(), cs=getComputedStyle(d), ins=document.querySelectorAll('#themepop input[data-k]');
+    for(var i=0;i<ins.length;i++){ var k=ins[i].getAttribute('data-k');
+      var v=pc[k]||(cs.getPropertyValue('--'+k)||'').trim()||ins[i].value;
+      var mm=v.match(/^#([0-9a-fA-F]{3})$/); if(mm)v='#'+mm[1][0]+mm[1][0]+mm[1][1]+mm[1][1]+mm[1][2]+mm[1][2];
+      if(/^#[0-9a-fA-F]{6}$/.test(v)) ins[i].value=v; } }
+  window.fcThemeMenu=function(ev){ if(ev)ev.stopPropagation(); var p=pop(); if(!p)return;
+    if(p.hasAttribute('hidden')){ p.removeAttribute('hidden'); syncSeg(); fillInputs();
+      p.style.right=''; p.style.left='';
+      var r=p.getBoundingClientRect();
+      if(r.left<6){ p.style.right='auto'; p.style.left='0'; }
+    } else { p.setAttribute('hidden',''); } };
+  window.fcSetMode=function(m){ mode=m; apply(m); try{localStorage.setItem('fc_theme',m);}catch(e){} syncSeg(); };
+  window.fcColorsApply=function(){ var o={}, ins=document.querySelectorAll('#themepop input[data-k]');
+    for(var i=0;i<ins.length;i++) o[ins[i].getAttribute('data-k')]=ins[i].value;
+    try{localStorage.setItem('fc_colors',JSON.stringify(o));}catch(e){} applyColors(o); };
+  window.fcColorsReset=function(){ try{localStorage.removeItem('fc_colors');}catch(e){} location.reload(); };
+  document.addEventListener('click',function(e){ var p=pop(); if(!p||p.hasAttribute('hidden'))return;
+    if(!p.contains(e.target)&&!(e.target.closest&&e.target.closest('.themebox'))) p.setAttribute('hidden',''); });
   try{
     var b=document.getElementById('sitebanner');
     if(b){ var key='fc_ban_'+(b.dataset.h||'');
@@ -335,6 +417,48 @@ const CLIENT_SCRIPT = `
       var x=b.querySelector('.x'); if(x)x.onclick=function(){b.style.display='none';try{localStorage.setItem(key,'1');}catch(e){}};
     }
   }catch(e){}
+  document.addEventListener('DOMContentLoaded',function(){
+    var tas=document.querySelectorAll('textarea[data-md]');
+    for(var i=0;i<tas.length;i++)(function(ta){
+      var pv=document.createElement('div'); pv.className='mdprev';
+      pv.innerHTML='<div class="mini">предпросмотр…</div>';
+      ta.parentNode.insertBefore(pv, ta.nextSibling);
+      var tmr;
+      function upd(){ clearTimeout(tmr); tmr=setTimeout(function(){
+        fetch('/md/preview',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'text='+encodeURIComponent(ta.value)})
+          .then(function(r){return r.text();}).then(function(h){pv.innerHTML=h||'<div class="mini">—</div>';}).catch(function(){});
+      },250); }
+      ta.addEventListener('input',upd); upd();
+    })(tas[i]);
+    // Клиентская сортировка таблиц: клик по заголовку. Пропускаем table[data-nosort].
+    var tbls=document.querySelectorAll('.tablewrap table');
+    for(var t=0;t<tbls.length;t++)(function(tb){
+      if(tb.hasAttribute('data-nosort'))return;
+      var head=tb.rows[0]; if(!head||head.cells.length<2)return;
+      var body=tb.tBodies[0]||tb;
+      if(head.querySelector('a'))return; // серверная сортировка (редактор БД) — не трогаем
+      for(var ci=0;ci<head.cells.length;ci++)(function(idx){
+        var th=head.cells[idx]; if(th.tagName!=='TH')return;
+        th.className=(th.className?th.className+' ':'')+'sortable';
+        th.insertAdjacentHTML('beforeend',' <span class="ar"></span>');
+        th.addEventListener('click',function(){
+          var rows=[]; for(var r=0;r<body.rows.length;r++){ if(body.rows[r]===head)continue; rows.push(body.rows[r]); }
+          var dir=th.getAttribute('data-dir')==='asc'?'desc':'asc';
+          for(var c2=0;c2<head.cells.length;c2++){head.cells[c2].removeAttribute('data-dir');var s=head.cells[c2].querySelector('.ar');if(s)s.textContent='';}
+          th.setAttribute('data-dir',dir);
+          var ar=th.querySelector('.ar'); if(ar)ar.textContent=dir==='asc'?'▲':'▼';
+          rows.sort(function(a,b){
+            var x=(a.cells[idx]?a.cells[idx].textContent:'').trim(), y=(b.cells[idx]?b.cells[idx].textContent:'').trim();
+            var nx=parseFloat(x.replace(/[^0-9.,-]/g,'').replace(',','.')), ny=parseFloat(y.replace(/[^0-9.,-]/g,'').replace(',','.'));
+            var cmp;
+            if(!isNaN(nx)&&!isNaN(ny)&&x!==''&&y!=='') cmp=nx-ny; else cmp=x.localeCompare(y,'ru');
+            return dir==='asc'?cmp:-cmp;
+          });
+          for(var k=0;k<rows.length;k++) body.appendChild(rows[k]);
+        });
+      })(ci);
+    })(tbls[t]);
+  });
   try{
     var p=location.pathname, s=location.search;
     if(p==='/panel'&&s.indexOf('tab=')<0){ var lt=localStorage.getItem('fc_panel_tab'); if(lt)location.replace('/panel?tab='+encodeURIComponent(lt)); }
@@ -345,7 +469,8 @@ const CLIENT_SCRIPT = `
 // ---------- Discord-подобное форматирование текста ----------
 function mdInline(s) {
   return s
-    .replace(/\[([^\]\n]+)\]\((https?:[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/!\[([^\]\n]*)\]\(((?:https?:)?\/[^\s)]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
+    .replace(/\[([^\]\n]+)\]\(((?:https?:)?\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
     .replace(/__([^_\n]+)__/g, '<u>$1</u>')
@@ -394,7 +519,7 @@ async function loadSite(force) {
         if (r.value != null && r.value !== '') next[k] = r.value;
       }
     }
-    next._navPages = await db.all("SELECT slug, title FROM site_pages WHERE nav = 1").catch(() => []);
+    next._navPages = await db.all("SELECT slug, title FROM site_pages WHERE nav = 1 AND COALESCE(published, 1) = 1").catch(() => []);
   } catch (_) {}
   SITE = next;
   _siteAt = Date.now();
@@ -433,6 +558,7 @@ function navItems(level) {
   nav.push('<a href="/faq">FAQ</a>');
   if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/commands">Команды</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/dashboard">Дашборд</a>');
+  if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/tickets">Тикеты</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel">Панель</a>');
   for (const pg of (SITE._navPages || [])) nav.push(`<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`);
   return nav;
@@ -442,16 +568,21 @@ function topbar(user, level, notif) {
   const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
   if (!user) {
     const gnav = (SITE._navPages || []).map((pg) => `<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`).join('');
-    return `<div class="top"><div class="left nav">${THEME_TOGGLE}${gnav}<a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
+    return `<div class="top"><div class="left nav">${themeToggle()}${gnav}<a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
   }
   const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${notif ? `<b style="color:var(--bad)"> ${notif}</b>` : ''}</a>`;
   return `<div class="top">
     <div class="left nav">${navItems(level).join('')}<a href="/logout">Выйти</a></div>
-    <div class="right">${bell}${THEME_TOGGLE}${brand}</div>
+    <div class="right">${bell}${themeToggle()}${brand}</div>
   </div>`;
 }
 function bannerHtml() {
   if (SITE.banner_on !== '1' || !SITE.banner_text) return '';
+  const now = Date.now();
+  const from = SITE.banner_from ? Date.parse(SITE.banner_from) : NaN;
+  const to = SITE.banner_to ? Date.parse(SITE.banner_to) : NaN;
+  if (!Number.isNaN(from) && now < from) return '';
+  if (!Number.isNaN(to) && now > to) return '';
   const h = crypto.createHash('md5').update(SITE.banner_text).digest('hex').slice(0, 8);
   return `<div id="sitebanner" class="sitebanner" data-h="${h}">${mdToHtml(SITE.banner_text)}<span class="x" title="скрыть">✕</span></div>`;
 }
@@ -624,6 +755,8 @@ async function panelLanding(user) {
     <form method="POST" action="/admin/landing/settings" class="form">${csrfField(user)}
       ${cb('banner_on', 'Показывать баннер-объявление вверху всех страниц')}
       <label>Текст баннера (можно ссылки/жирный как в Discord)<textarea name="banner_text" rows="2" maxlength="400">${esc(SITE.banner_text || '')}</textarea></label>
+      <label>Показывать с (необязательно)<input type="datetime-local" name="banner_from" value="${esc(SITE.banner_from || '')}"></label>
+      <label>Показывать до (необязательно)<input type="datetime-local" name="banner_to" value="${esc(SITE.banner_to || '')}"></label>
       ${cb('hide_stats', 'Спрятать «Организация в цифрах»')}
       ${cb('hide_giveaways', 'Спрятать «Идут розыгрыши»')}
       ${cb('hide_agitation', 'Спрятать «Текущую агитацию»')}
@@ -653,32 +786,85 @@ async function panelLanding(user) {
   </div>${list}`;
 }
 
-async function panelPages(user) {
+async function panelPages(client, user) {
   const pages = await db.all('SELECT * FROM site_pages ORDER BY slug').catch(() => []);
-  const list = pages.map((p) => `<div class="card">
+  const assets = await db.all('SELECT id, filename, mime, size, uploaded_at FROM page_assets ORDER BY id DESC LIMIT 100').catch(() => []);
+  const assetCard = `<div class="card"><h2>Картинки для страниц</h2>
+    <p class="mini">Загрузите картинку и вставьте в текст как <code>![подпись](URL)</code>. Ссылку возьмите из таблицы. До 500 КБ.</p>
+    <form method="POST" action="/admin/asset/upload" class="form" onsubmit="var f=this.file.files[0];if(!f)return false;var r=new FileReader();r.onload=function(){document.getElementById('assetdata').value=r.result;document.getElementById('assetname').value=f.name;document.getElementById('assetform2').submit()};r.readAsDataURL(f);return false">${csrfField(user)}
+      <label>Файл<input type="file" name="file" accept="image/*"></label>
+    </form>
+    <form method="POST" action="/admin/asset/upload" id="assetform2" class="form"><input type="hidden" name="data" id="assetdata"><input type="hidden" name="filename" id="assetname">${csrfField(user)}
+      <button class="btn sm" type="submit">Загрузить выбранный файл</button>
+    </form>
+    <div class="tablewrap" style="margin-top:10px"><table><tr><th>Превью</th><th>URL</th><th>Размер</th><th></th></tr>
+      ${assets.map((a) => `<tr>
+        <td><img src="/asset/${a.id}" alt="" style="height:40px;border-radius:4px"></td>
+        <td class="mini"><code>/asset/${a.id}</code></td>
+        <td class="mini">${Math.round((a.size || 0) / 1024)} КБ</td>
+        <td><form method="POST" action="/admin/asset/del" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${a.id}"><button class="btn ghost sm" type="submit">✕</button></form></td>
+      </tr>`).join('') || '<tr><td colspan="4">пусто</td></tr>'}
+    </table></div>
+  </div>`;
+  const list = [];
+  for (const p of pages) {
+    const vers = await db.all('SELECT id, saved_at, saved_by, title FROM site_page_versions WHERE slug = ? ORDER BY id DESC LIMIT 20', [p.slug]).catch(() => []);
+    const verHtml = vers.length ? `<details style="margin-top:8px"><summary class="mini" style="cursor:pointer">история версий (${vers.length})</summary>
+      <div class="tablewrap" style="margin-top:6px"><table><tr><th>Когда</th><th>Кто</th><th></th></tr>
+        ${vers.map((v) => `<tr><td class="muted">${fmt(v.saved_at)}</td><td>${personLink(client, v.saved_by)}</td>
+          <td><form method="POST" action="/admin/page/revert" style="display:inline">${csrfField(user)}<input type="hidden" name="vid" value="${v.id}"><button class="btn ghost sm" type="submit" onclick="return confirm('Откатить страницу к этой версии? Текущая уйдёт в историю.')">откатить</button></form></td></tr>`).join('')}
+      </table></div></details>` : '';
+    list.push(`<div class="card">
     <form method="POST" action="/admin/page/save" class="form">${csrfField(user)}<input type="hidden" name="orig" value="${esc(p.slug)}">
       <label>Адрес (slug) — открывается по /p/slug<input name="slug" value="${esc(p.slug)}" pattern="[a-z0-9-]{1,40}" required></label>
       <label>Заголовок<input name="title" value="${esc(p.title || '')}" maxlength="120"></label>
-      <label>Содержимое (форматирование как в Discord)<textarea name="content" rows="8" maxlength="20000">${esc(p.content || '')}</textarea></label>
+      <label>Содержимое (форматирование как в Discord)<textarea name="content" data-md rows="8" maxlength="20000">${esc(p.content || '')}</textarea></label>
       <label class="chk"><input type="checkbox" name="nav" value="1" ${p.nav ? 'checked' : ''}><span>Показывать пункт в меню шапки</span></label>
+      <label class="chk"><input type="checkbox" name="published" value="1" ${(p.published == null || p.published) ? 'checked' : ''}><span>Опубликована (снять — черновик, видит только havirys)</span></label>
       <div class="bar">
+        ${!p.published && p.published != null ? '<span class="badge warn">черновик</span>' : ''}
         <button class="btn sm" type="submit">Сохранить</button>
         <a class="btn ghost sm" href="/p/${esc(p.slug)}" target="_blank">Открыть</a>
         <button class="btn ghost sm" formaction="/admin/page/del" style="background:var(--bad)" type="submit" onclick="return confirm('Удалить страницу?')">Удалить</button>
       </div>
     </form>
-  </div>`).join('');
+    ${verHtml}
+  </div>`);
+  }
   return `
   <div class="card"><h2>Доп. страницы сайта</h2>
     <p class="mini">Стандартные адреса <code>/rules</code> и <code>/about</code> берут содержимое из страниц со slug <code>rules</code> и <code>about</code>. Любой другой slug доступен по <code>/p/slug</code>.</p>
     <form method="POST" action="/admin/page/save" class="form">${csrfField(user)}<input type="hidden" name="orig" value="">
       <label>Адрес (slug)<input name="slug" pattern="[a-z0-9-]{1,40}" placeholder="rules" required></label>
       <label>Заголовок<input name="title" maxlength="120"></label>
-      <label>Содержимое<textarea name="content" rows="5" maxlength="20000"></textarea></label>
+      <label>Содержимое<textarea name="content" data-md rows="5" maxlength="20000"></textarea></label>
       <label class="chk"><input type="checkbox" name="nav" value="1"><span>Показывать пункт в меню шапки</span></label>
+      <label class="chk"><input type="checkbox" name="published" value="1" checked><span>Опубликована сразу</span></label>
       <button class="btn sm" type="submit">Создать страницу</button>
     </form>
-  </div>${list}`;
+  </div>${assetCard}${list.join('')}`;
+}
+
+async function myGiveawaysCard(did) {
+  const mine = await db.all(
+    `SELECT g.id, g.prize, g.status, g.ends_at, g.winners
+       FROM giveaways g JOIN giveaway_entries e ON e.giveaway_id = g.id
+      WHERE e.discord_id = ? ORDER BY g.id DESC LIMIT 30`, [did]).catch(() => []);
+  const wonExtra = await db.all(
+    "SELECT id, prize, status, ends_at, winners FROM giveaways WHERE status = 'ended' AND winners LIKE ? ORDER BY id DESC LIMIT 30",
+    [`%${did}%`]).catch(() => []);
+  const byId = new Map();
+  for (const g of [...mine, ...wonExtra]) byId.set(g.id, g);
+  const rows = [...byId.values()].sort((a, b) => b.id - a.id);
+  if (!rows.length) return '';
+  const won = rows.filter((g) => (g.winners || '').split(',').includes(did)).length;
+  const list = rows.map((g) => {
+    const iWon = (g.winners || '').split(',').includes(did);
+    const st = g.status === 'active' ? `идёт, до ${fmt(g.ends_at)}` : (iWon ? '🏆 победа' : 'участвовал');
+    return `<tr><td><a href="/g/${g.id}">${esc(g.prize)}</a></td><td>${st}</td></tr>`;
+  }).join('');
+  return `<div class="card"><h2>Мои розыгрыши (${rows.length}${won ? `, побед: ${won}` : ''})</h2>
+    <div class="tablewrap"><table><tr><th>Приз</th><th>Статус</th></tr>${list}</table></div></div>`;
 }
 
 async function meBody(client, user) {
@@ -690,9 +876,16 @@ async function meBody(client, user) {
   const myTicket = await db.get("SELECT id, subject FROM tickets WHERE opener_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [did]).catch(() => null);
   const ticketCard = myTicket ? `<div class="card"><h2>Мой открытый тикет</h2><a class="btn sm" href="/ticket/${myTicket.id}">🎫 ${esc(myTicket.subject || 'Тикет')} — открыть переписку</a></div>` : '';
   const logins = await db.all('SELECT ip, ua, at FROM web_logins WHERE discord_id = ? ORDER BY id DESC LIMIT 10', [did]).catch(() => []);
-  const sessions = await db.all("SELECT sid, ip, ua, created_at, last_seen FROM web_sessions WHERE discord_id = ? AND revoked_at IS NULL ORDER BY last_seen DESC LIMIT 20", [did]).catch(() => []);
+  const sessions = await db.all("SELECT sid, ip, ua, created_at, last_seen, label FROM web_sessions WHERE discord_id = ? AND revoked_at IS NULL ORDER BY last_seen DESC LIMIT 20", [did]).catch(() => []);
   const sessRows = sessions.map((s) => `<tr>
-    <td class="mini">${esc((s.ua || '—').slice(0, 70))}${s.sid === user.sid ? ' <span class="badge ok">эта</span>' : ''}</td>
+    <td class="mini">
+      <form method="POST" action="/me/session_label" class="bar" style="margin:0;gap:4px">${csrfField(user)}<input type="hidden" name="sid" value="${esc(s.sid)}">
+        <input name="label" value="${esc(s.label || '')}" placeholder="${esc((s.ua || 'устройство').slice(0, 40))}" maxlength="40" style="max-width:150px">
+        <button class="btn ghost sm" type="submit" title="Сохранить имя">✓</button>
+      </form>
+      ${s.sid === user.sid ? '<span class="badge ok">эта</span>' : ''}
+      <div class="mini" style="opacity:.6">${esc((s.ua || '—').slice(0, 60))}</div>
+    </td>
     <td>${esc(s.ip || '—')}</td>
     <td class="muted">${fmt(s.last_seen || s.created_at)}</td>
     <td>${s.sid === user.sid ? '' : `<form method="POST" action="/me/session_revoke" style="display:inline">${csrfField(user)}<input type="hidden" name="sid" value="${esc(s.sid)}"><button class="btn ghost sm" type="submit">завершить</button></form>`}</td>
@@ -716,7 +909,6 @@ async function meBody(client, user) {
         <div class="muted" style="margin-top:6px">Уровень доступа: ${esc(acc.level)}. Роли на сервере: ${roleTags}</div>
       </div>
       <a class="btn" href="/apply">Подать заявку на вступление</a>
-      ${personalThemeCard()}
       ${loginsCard}`;
   }
 
@@ -761,16 +953,18 @@ async function meBody(client, user) {
     </div>
     ${badgesCard(bs)}
     <div class="card"><h2>Приглашения</h2>Подтверждённых за всё время: <b>${invRow ? invRow.c : 0}</b></div>
-    <div class="card"><h2>Обо мне</h2>
+    <div class="card"><h2>Обо мне и приватность</h2>
       <p class="mini">Короткий текст на вашем публичном профиле (форматирование как в Discord). До 1000 символов.</p>
       <form method="POST" action="/me/about" class="form">${csrfField(user)}
         <textarea name="about" rows="4" maxlength="1000" placeholder="Пару слов о себе, часовой пояс, чем занимаюсь…">${esc(p.about || '')}</textarea>
+        <label class="chk"><input type="checkbox" name="about_private" value="1" ${p.about_private ? 'checked' : ''}><span>Скрыть «Обо мне» от всех, кроме меня и HR+</span></label>
+        <label class="chk"><input type="checkbox" name="contracts_private" value="1" ${p.contracts_private ? 'checked' : ''}><span>Скрыть контракты и их историю от всех, кроме меня и HR+</span></label>
         <button class="btn sm" type="submit">Сохранить</button>
       </form>
     </div>
     ${ticketCard}
     ${inviteCard}
-    ${personalThemeCard()}
+    ${await myGiveawaysCard(did)}
     ${loginsCard}
     ${memberForms(user, passports, canAppeal)}`;
 }
@@ -836,7 +1030,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'perms' && isHavirys) body = await panelPerms(user);
   else if (tab === 'admin' && isHavirys) body = await panelAdmin(client, user);
   else if (tab === 'landing' && isHavirys) body = await panelLanding(user);
-  else if (tab === 'pages' && isHavirys) body = await panelPages(user);
+  else if (tab === 'pages' && isHavirys) body = await panelPages(client, user);
   else if (tab === 'data' && canData) body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
@@ -1014,9 +1208,30 @@ async function panelGiveaways(client, acc, user) {
       </form>
       <div class="tablewrap" style="margin-top:10px"><table><tr><th>Приз</th><th>День</th><th>Побед.</th><th>Статус</th><th></th></tr>${recurRows || '<tr><td colspan="5">—</td></tr>'}</table></div>
     </div>`;
+    const tpls = await db.all('SELECT * FROM giveaway_templates ORDER BY name').catch(() => []);
+    const tplRows = tpls.map((t) => `<tr>
+      <td><b>${esc(t.name)}</b><div class="mini">${esc(t.prize)} · ${t.winners_count} побед. · ${esc(t.duration || '—')}</div></td>
+      <td style="white-space:nowrap">
+        <button class="btn ghost sm" type="button" onclick='fcGwTpl(${JSON.stringify({ prize: t.prize || '', winners: t.winners_count || 1, duration: t.duration || '', role_id: t.required_role_id || '', min_role_id: t.min_role_id || '', prize_tiers: t.prize_tiers || '' })})'>заполнить форму</button>
+        <form method="POST" action="/panel/giveaway/tpl_del" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${t.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
+      </td></tr>`).join('');
+    const tplCard = `<div class="card"><h2>Шаблоны розыгрышей</h2>
+      <div class="tablewrap"><table><tr><th>Шаблон</th><th></th></tr>${tplRows || '<tr><td colspan="2">пока нет</td></tr>'}</table></div>
+      <form method="POST" action="/panel/giveaway/tpl_save" class="form" style="margin-top:10px">${csrfField(user)}
+        <label>Название шаблона<input name="name" required maxlength="60"></label>
+        <label>Приз<input name="prize" required maxlength="200"></label>
+        <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
+        <label>Длительность (30m, 1h, 2d)<input name="duration" maxlength="10"></label>
+        <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>ID минимальной роли (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Призовые места (необязательно)<textarea name="prize_tiers" rows="2" maxlength="800"></textarea></label>
+        <button class="btn sm" type="submit">Сохранить шаблон</button>
+      </form>
+      <script>function fcGwTpl(t){var f=document.getElementById('gwCreateForm');if(!f)return;for(var k in t){if(f[k]!==undefined)f[k].value=t[k];}f.scrollIntoView({behavior:'smooth'});}</script>
+    </div>`;
     manage = `
     <div class="card"><h2>Создать розыгрыш</h2>
-      <form method="POST" action="/panel/giveaway/create" class="form">
+      <form method="POST" action="/panel/giveaway/create" class="form" id="gwCreateForm">
         ${csrfField(user)}
         <label>Приз<input name="prize" required maxlength="200"></label>
         <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
@@ -1028,6 +1243,7 @@ async function panelGiveaways(client, acc, user) {
         <button class="btn" type="submit">Создать и опубликовать</button>
       </form>
     </div>
+    ${tplCard}
     <div class="card"><h2>Активные розыгрыши</h2>
       <div class="tablewrap"><table><tr><th>Розыгрыш</th><th>Конец</th><th>Уч.</th><th>Действия</th></tr>${activeRows.join('') || '<tr><td colspan="4">—</td></tr>'}</table></div>
     </div>
@@ -1170,7 +1386,7 @@ async function panelData(client, table, pageNum, user, sp) {
       ${q ? `<a class="btn ghost sm" href="/panel?tab=data&table=${esc(table)}">сброс</a>` : ''}
     </form>
     <h2>${esc(title)} — найдено ${total}</h2>
-    ${canEdit ? `<p class="muted" style="margin-bottom:10px">Режим редактирования (havirys): ✏️ — изменить строку. ${addBtn}</p>` : ''}
+    ${canEdit ? `<p class="muted" style="margin-bottom:10px">Режим редактирования (havirys): ✏️ — изменить строку. ${addBtn} <a class="btn ghost sm" href="/export/table/${esc(table)}.csv">⬇ Скачать всю таблицу CSV</a></p>` : ''}
     <div class="tablewrap"><table><tr>${head}</tr>${trs || '<tr><td>—</td></tr>'}</table></div>
     ${pager(`/panel?tab=data&${baseQ}&sort=${sortCol}&dir=${dir.toLowerCase()}`, pageNum, total)}
   </div>`;
@@ -1260,6 +1476,27 @@ async function webAudit(client, user, action, details) {
   } catch (e) { console.error('[web] audit', e.message); }
   await postTo(client, config.CHANNEL_AUDIT, {
     embeds: [new EmbedBuilder().setColor(0x5b6cff).setTitle('🌐 Действие с сайта').addFields(
+      { name: 'Кто', value: `<@${user.id}> (${String(user.username || user.id).slice(0, 80)})` },
+      { name: 'Действие', value: String(action).slice(0, 1000) },
+      { name: 'Детали', value: String(details || '—').slice(0, 1000) },
+    ).setTimestamp()],
+  });
+}
+
+// Служебные/настроечные действия сайта (тема, страницы, меню, CSS, правка БД,
+// импорт конфигурации, права команд, экспорты и т.п.). Пишется в audit_log с
+// префиксом «⚙ » — на странице /аудит по умолчанию скрыто — и уходит в
+// CHANNEL_SYSTEM_LOG, а НЕ в общий аудит-канал, чтобы не засорять его.
+const META_PREFIX = '⚙ ';
+async function webAuditMeta(client, user, action, details) {
+  try {
+    await db.run(
+      'INSERT INTO audit_log (actor_id, actor_tag, action, details, at) VALUES (?, ?, ?, ?, ?)',
+      [user.id, `${user.username || user.id} (сайт)`, META_PREFIX + action, details || '', new Date().toISOString()],
+    );
+  } catch (e) { console.error('[web] audit-meta', e.message); }
+  await postTo(client, config.CHANNEL_SYSTEM_LOG || config.CHANNEL_AUDIT, {
+    embeds: [new EmbedBuilder().setColor(0x99aab5).setTitle('⚙ Служебное действие (сайт)').addFields(
       { name: 'Кто', value: `<@${user.id}> (${String(user.username || user.id).slice(0, 80)})` },
       { name: 'Действие', value: String(action).slice(0, 1000) },
       { name: 'Детали', value: String(details || '—').slice(0, 1000) },
@@ -1560,7 +1797,7 @@ async function peopleBody(client, acc, query, pageNum, user) {
   const bulk = acc.rank >= LEVELS.deputy && user;
   const list = rows.map((p) => `<tr>
     ${bulk ? `<td><input type="checkbox" name="ids" value="${esc(p.discord_id)}"></td>` : ''}
-    <td><a href="/u/${esc(p.discord_id)}">${esc(p.name)}</a></td>
+    <td>${onlineDot(client, p.discord_id)}<a href="/u/${esc(p.discord_id)}">${esc(p.name)}</a></td>
     <td>№ ${esc(p.static)}</td>
     <td>${esc(roleName(client, p.role_id))}</td>
     <td class="muted">${fmt(p.joined_at)}</td>
@@ -1620,6 +1857,16 @@ async function profileBody(client, viewer, acc, targetId) {
   const invRow = await db.get("SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed'", [targetId]);
   const hist = await history.getHistory(targetId).catch(() => []);
   const contractHist = await db.all("SELECT status, submitted_at, reviewed_at, message_url FROM contracts WHERE discord_id = ? ORDER BY COALESCE(submitted_at, reviewed_at) DESC LIMIT 40", [targetId]).catch(() => []);
+  const thanksRows = await db.all('SELECT from_id, note, created_at FROM thanks WHERE to_id = ? ORDER BY id DESC LIMIT 30', [targetId]).catch(() => []);
+  const thanksCnt = thanksRows.length;
+  const badgeAwards = await db.all('SELECT badge_key, awarded_at FROM badge_awards WHERE discord_id = ? ORDER BY awarded_at DESC LIMIT 20', [targetId]).catch(() => []);
+  // 12 недель контрактов для спарклайна
+  const sparkWeeks = [];
+  for (let w = 11; w >= 0; w--) {
+    const r = contracts.getWeekRange(w);
+    const c = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [targetId, r.start.toISOString(), r.end.toISOString()]).catch(() => null);
+    sparkWeeks.push(c ? c.c : 0);
+  }
   const nicks = await db.all('SELECT * FROM nickname_history WHERE discord_id = ? ORDER BY id DESC LIMIT 20', [targetId]).catch(() => []);
   const promos = await db.all(
     "SELECT * FROM audit_log WHERE (action LIKE '%овышение%' OR action LIKE '%онижение%') AND details LIKE ? ORDER BY id DESC LIMIT 20",
@@ -1722,9 +1969,40 @@ async function profileBody(client, viewer, acc, targetId) {
     <td><span class="badge ${c.status === 'fulfilled' ? 'ok' : c.status === 'unfulfilled' ? 'bad' : 'warn'}">${esc(ruStatus(c.status))}</span></td>
     <td>${c.message_url ? `<a href="${esc(c.message_url)}" target="_blank" rel="noopener">открыть</a>` : '—'}</td>
   </tr>`).join('');
-  const contractHistCard = `<div class="card"><h2>История контрактов (${contractHist.length})</h2>
+  const selfOrHr = (viewer && viewer.id === targetId) || canHr;
+  const aboutHidden = p.about_private && !selfOrHr;
+  const contractsHidden = p.contracts_private && !selfOrHr;
+  const contractHistCard = contractsHidden ? '' : `<div class="card"><h2>История контрактов (${contractHist.length})</h2>
     <div class="tablewrap"><table><tr><th>Когда</th><th>Итог</th><th>Пруф</th></tr>${chRows || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
-  const aboutCard = p.about ? `<div class="card"><h2>Обо мне</h2>${mdToHtml(String(p.about).slice(0, 1000))}</div>` : '';
+  const aboutCard = (p.about && !aboutHidden) ? `<div class="card"><h2>Обо мне</h2>${mdToHtml(String(p.about).slice(0, 1000))}</div>` : '';
+  const weekContractsCard = contractsHidden
+    ? `<div class="card"><h2>Контракты</h2><span class="muted">Участник скрыл контракты.</span> · Приглашений подтверждено: <b>${invRow ? invRow.c : 0}</b></div>`
+    : `<div class="card"><h2>Контракты за ${esc(contracts.formatWeekLabel(range))}</h2>
+    <span class="badge ok">✅ ${week.fulfilled.length}</span> <span class="badge bad">❌ ${week.unfulfilled.length}</span>
+    &nbsp;·&nbsp; Приглашений подтверждено: <b>${invRow ? invRow.c : 0}</b>
+    <div class="mini" style="margin-top:8px">Контракты по неделям (12 нед.): ${sparkline(sparkWeeks)} <b>${sparkWeeks.reduce((a, b) => a + b, 0)}</b></div>
+  </div>`;
+
+  // Благодарности
+  const canThank = viewer && viewer.id !== targetId && (acc.rank >= LEVELS.member) && !bl.length;
+  const thanksCard = `<div class="card"><h2>Благодарности${thanksCnt ? ` · ${thanksCnt}` : ''}</h2>
+    ${canThank ? `<form method="POST" action="/u/thank" class="bar" style="margin-bottom:8px">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
+      <input name="note" placeholder="за что (необязательно)" maxlength="200" style="flex:1"><button class="btn sm" type="submit">🙏 Поблагодарить</button></form>` : ''}
+    ${thanksRows.length ? thanksRows.map((th) => `<div class="mini" style="border-left:2px solid var(--line);padding-left:8px;margin:5px 0">${personLink(client, th.from_id)} · ${fmt(th.created_at)}${th.note ? `<br>${esc(th.note)}` : ''}</div>`).join('') : '<span class="mini">пока нет</span>'}
+  </div>`;
+
+  // Лента активности: контракты + бейджи + благодарности, единый список по дате
+  const feed = [];
+  for (const c of contractHist.slice(0, 30)) feed.push({ at: c.submitted_at || c.reviewed_at, txt: c.status === 'fulfilled' ? '✅ контракт выполнен' : c.status === 'unfulfilled' ? '❌ контракт не выполнен' : '📄 контракт на проверке' });
+  for (const b of badgeAwards) feed.push({ at: b.awarded_at, txt: `🏅 бейдж «${esc((badges.LABELS && badges.LABELS[b.badge_key]) || b.badge_key)}»` });
+  for (const th of thanksRows) feed.push({ at: th.created_at, txt: `🙏 благодарность от ${nickOf(client, th.from_id) || 'участника'}` });
+  feed.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+  const activityCard = (contractsHidden && !selfOrHr)
+    ? ''
+    : `<div class="card"><h2>Лента активности</h2>
+      ${feed.slice(0, 20).map((f) => `<div class="mini" style="margin:4px 0"><span class="muted">${fmt(f.at)}</span> — ${f.txt}</div>`).join('') || '<span class="mini">пусто</span>'}
+    </div>`;
+
   const promoRows = promos.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.action)}</td><td>${renderMentions(client, esc((r.details || '').slice(0, 200)))}</td></tr>`).join('');
   const invitedByLine = invitedByRow
     ? `<div class="card"><h2>Пригласил</h2>${personLink(client, invitedByRow.inviter_discord_id)} · ${fmt(invitedByRow.joined_at)}</div>`
@@ -1753,19 +2031,18 @@ async function profileBody(client, viewer, acc, targetId) {
 
   return `
   <div class="phead"><img class="avatar" width="72" height="72" src="${esc(av)}" alt=""><div>
-    <h1>${esc(ident ? ident.name + ' | ' + ident.static : p.name)}</h1>
+    <h1>${onlineDot(client, targetId)}${esc(ident ? ident.name + ' | ' + ident.static : p.name)}</h1>
     <div class="muted">Discord: ${esc(p.discord_tag || targetId)} · ID ${esc(targetId)} · вступил ${fmt(p.joined_at)}</div>
   </div></div>
   ${blBox}
   ${aboutCard}
+  ${thanksCard}
+  ${activityCard}
   <div class="card"><h2>Роли на сервере</h2>${roleTags}</div>
   <div class="card"><h2>Паспорта (${passports.length})</h2>
     <div class="tablewrap"><table><tr><th>Имя Фамилия</th><th>Паспорт</th><th>Ранг</th><th>Статус</th></tr>${passRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
   </div>
-  <div class="card"><h2>Контракты за ${esc(contracts.formatWeekLabel(range))}</h2>
-    <span class="badge ok">✅ ${week.fulfilled.length}</span> <span class="badge bad">❌ ${week.unfulfilled.length}</span>
-    &nbsp;·&nbsp; Приглашений подтверждено: <b>${invRow ? invRow.c : 0}</b>
-  </div>
+  ${weekContractsCard}
   ${badgesCard(bs)}
   <div class="card"><h2>Карточка для Discord</h2>
     <pre id="mcard">${esc((ident ? ident.name + ' | ' + ident.static : p.name) + '\nРанг: ' + roleName(client, (ident && ident.roleId) || p.role_id) + '\nDiscord: <@' + targetId + '>\nКонтракты (всего): ' + bs.fulfilled + '\nЗа неделю: +' + week.fulfilled.length + ' / -' + week.unfulfilled.length + '\nПриглашений: ' + (invRow ? invRow.c : 0) + '\nВступил: ' + fmt(p.joined_at))}</pre>
@@ -1873,9 +2150,11 @@ function zipStore(files) {
 }
 
 // ---------- Дашборд / аналитика (HR+) ----------
-async function dashboardBody(client) {
+async function dashboardBody(client, periodDays) {
   const c = (sql, p = []) => db.get(sql, p).then((r) => (r ? r.c : 0));
-  const since30 = new Date(Date.now() - 30 * 864e5).toISOString();
+  const days = [7, 30, 90].includes(+periodDays) ? +periodDays : 30;
+  const since30 = new Date(Date.now() - days * 864e5).toISOString();
+  const periodBar = `<div class="bar"><span class="mini">Период:</span>${[7, 30, 90].map((d) => `<a class="btn ${d === days ? '' : 'ghost '}sm" href="/dashboard?days=${d}">${d} дн.</a>`).join('')}</div>`;
 
   const apps = await db.all('SELECT status, created_at, reviewed_at FROM applications WHERE created_at >= ?', [since30]);
   const total = apps.length;
@@ -1952,11 +2231,12 @@ async function dashboardBody(client) {
   <div class="bar" style="justify-content:space-between;flex-wrap:wrap">
     <h1 style="margin:0">Дашборд</h1>
     <span class="bar" style="margin:0">
-      <a class="btn ghost sm" href="/export/dashboard.html">💾 Скачать (HTML)</a>
+      <a class="btn ghost sm" href="/export/dashboard.html?days=${days}">💾 Скачать (HTML)</a>
       <button class="btn ghost sm" type="button" onclick="fcDashPng(this)">🖼️ Картинкой (PNG)</button>
       <button class="btn ghost sm" type="button" onclick="window.print()">🖨️ Печать / PDF</button>
     </span>
   </div>
+  ${periodBar}
   <script>
   function fcDashPng(btn){
     var node=document.querySelector('.wrap'); if(!node)return;
@@ -1989,12 +2269,12 @@ async function dashboardBody(client) {
     }catch(e){btn.textContent='не вышло — используйте HTML';setTimeout(function(){btn.textContent=old;btn.disabled=false},2500);}
   }
   </script>
-  <div class="card"><h2>Воронка найма за 30 дней</h2>
+  <div class="card"><h2>Воронка найма за ${days} дн.</h2>
     <div class="grid">${tile(total, 'заявок')}${tile(accepted, 'принято')}${tile(rejected, 'отказано')}${tile(pending, 'в очереди')}${tile(stayed, 'досидело 3+ дня')}</div>
     ${barChart([{ label: 'подано', value: total }, { label: 'принято', value: accepted }, { label: 'отказ', value: rejected }, { label: '3+ дня', value: stayed }])}
   </div>
   <div class="card"><h2>Скорость рассмотрения заявок</h2>
-    <p class="mini">Среднее время до решения за 30 дней: <b>${avgH} ч</b> · рассмотрено ${reviewed.length} из ${total}</p>
+    <p class="mini">Среднее время до решения за ${days} дн.: <b>${avgH} ч</b> · рассмотрено ${reviewed.length} из ${total}</p>
   </div>
   <div class="card"><h2>Выполненные контракты по неделям</h2>${barChart(weeks)}</div>
   <div class="card"><h2>Эта неделя vs прошлая</h2><div class="grid">
@@ -2026,16 +2306,16 @@ async function dashboardBody(client) {
     const vAcc = vac.filter((v) => v.status === 'accepted');
     const vRej = vac.filter((v) => v.status === 'rejected').length;
     const avgDays = vAcc.length ? Math.round(vAcc.reduce((s, v) => s + Math.max(0, (new Date(v.until) - new Date(v.created_at)) / 864e5), 0) / vAcc.length) : 0;
-    return `<div class="card"><h2>HR за 30 дней (по людям)</h2>
+    return `<div class="card"><h2>HR за ${days} дн. (по людям)</h2>
       <div class="tablewrap"><table><tr><th>Сотрудник</th><th>Принял</th><th>Отклонил</th><th>Ср. время</th></tr>${hrRows || '<tr><td colspan="4">—</td></tr>'}</table></div></div>
-    <div class="card"><h2>Отпуска за 30 дней</h2><div class="grid">
+    <div class="card"><h2>Отпуска за ${days} дн.</h2><div class="grid">
       ${tile(vac.length, 'заявок')}${tile(vAcc.length, 'одобрено')}${tile(vRej, 'отклонено')}${tile(avgDays + ' дн.', 'средняя длина')}${tile(onVac, 'в отпуске сейчас')}
     </div></div>`;
   })()}
   <p class="bar"><a href="/leaderboards">Лидерборды</a> · <a href="/calendar">Календарь отпусков</a> · <a href="/search">Поиск везде</a> · <a href="/commands">Команды</a> · <a href="/audit">Аудит</a> · <a href="/tools">Экспорт и обслуживание</a> · <a href="/health">Здоровье системы</a> · <a href="/panel">Панель</a></p>`;
 }
 
-async function leaderboardsBody(client) {
+async function leaderboardsBody(client, viewerId) {
   const range = contracts.getWeekRange(0);
   const cAll = await contracts.getAllTimeLeaderboard();
   const cWeek = await contracts.getWeekLeaderboard(range);
@@ -2047,20 +2327,30 @@ async function leaderboardsBody(client) {
   for (const r of wr) for (const w of (r.winners || '').split(',').filter(Boolean)) wc.set(w, (wc.get(w) || 0) + 1);
   const gwTop = [...wc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 20);
 
-  const ctab = (arr) => arr.slice(0, 20).map((r, i) => `<tr><td>${i + 1}</td><td>${personLink(client, r.discord_id)}</td><td>✅ ${r.fulfilled} / ❌ ${r.unfulfilled}</td></tr>`).join('');
-  const itab = (arr) => arr.slice(0, 20).map((r, i) => `<tr><td>${i + 1}</td><td>${personLink(client, r.inviter_discord_id)}</td><td>${r.cnt}</td></tr>`).join('');
+  // Место зрителя в полном списке (не только в топ-20) + плашка.
+  const myRank = (arr, key) => {
+    const idx = arr.findIndex((r) => r[key] === viewerId);
+    return idx < 0 ? null : { pos: idx + 1, total: arr.length };
+  };
+  const meLine = (mr, unit) => mr
+    ? `<p class="mini" style="margin-top:6px">Ты — <b>#${mr.pos}</b> из ${mr.total} ${unit}</p>`
+    : `<p class="mini" style="margin-top:6px">Тебя пока нет в этом списке</p>`;
+  const rowCls = (id) => (id && id === viewerId ? ' style="background:color-mix(in srgb,var(--accent) 14%,transparent)"' : '');
+
+  const ctab = (arr) => arr.slice(0, 20).map((r, i) => `<tr${rowCls(r.discord_id)}><td>${i + 1}</td><td>${personLink(client, r.discord_id)}</td><td>✅ ${r.fulfilled} / ❌ ${r.unfulfilled}</td></tr>`).join('');
+  const itab = (arr) => arr.slice(0, 20).map((r, i) => `<tr${rowCls(r.inviter_discord_id)}><td>${i + 1}</td><td>${personLink(client, r.inviter_discord_id)}</td><td>${r.cnt}</td></tr>`).join('');
   return `
   <h1>Лидерборды</h1>
   <div class="card"><h2>Контракты — неделя (${esc(contracts.formatWeekLabel(range))})</h2>
-    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Контракты</th></tr>${ctab(cWeek) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>
+    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Контракты</th></tr>${ctab(cWeek) || '<tr><td colspan="3">—</td></tr>'}</table></div>${meLine(myRank(cWeek, 'discord_id'), 'по контрактам за неделю')}</div>
   <div class="card"><h2>Контракты — всё время</h2>
-    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Контракты</th></tr>${ctab(cAll) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>
+    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Контракты</th></tr>${ctab(cAll) || '<tr><td colspan="3">—</td></tr>'}</table></div>${meLine(myRank(cAll, 'discord_id'), 'по контрактам за всё время')}</div>
   <div class="card"><h2>Приглашения — неделя</h2>
-    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Кол-во</th></tr>${itab(iWeek) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>
+    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Кол-во</th></tr>${itab(iWeek) || '<tr><td colspan="3">—</td></tr>'}</table></div>${meLine(myRank(iWeek, 'inviter_discord_id'), 'по приглашениям за неделю')}</div>
   <div class="card"><h2>Приглашения — всё время</h2>
-    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Кол-во</th></tr>${itab(iAll) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>
+    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Кол-во</th></tr>${itab(iAll) || '<tr><td colspan="3">—</td></tr>'}</table></div>${meLine(myRank(iAll, 'inviter_discord_id'), 'по приглашениям за всё время')}</div>
   <div class="card"><h2>Победители розыгрышей (180 дней)</h2>
-    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Побед</th></tr>${gwTop.map(([w, n], i) => `<tr><td>${i + 1}</td><td>${personLink(client, w)}</td><td>${n}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
+    <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Побед</th></tr>${gwTop.map(([w, n], i) => `<tr${rowCls(w)}><td>${i + 1}</td><td>${personLink(client, w)}</td><td>${n}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
 }
 
 async function compareBody(client, meId, otherId) {
@@ -2154,22 +2444,30 @@ async function searchBody(client, query) {
 async function auditBody(client, sp, pageNum, user) {
   const who = (sp.get('who') || '').trim();
   const act = (sp.get('act') || '').trim();
+  const showSys = sp.get('sys') === '1';
   const days = parseInt(sp.get('days') || '14', 10) || 14;
   const since = new Date(Date.now() - days * 864e5).toISOString();
   const cond = ['at >= ?'];
   const par = [since];
   if (who) { cond.push('(actor_id = ? OR actor_tag LIKE ?)'); par.push(who, `%${who}%`); }
   if (act) { cond.push('action LIKE ?'); par.push(`%${act}%`); }
+  if (!showSys && !act) { cond.push("action NOT LIKE ?"); par.push(META_PREFIX + '%'); }
   const where = 'WHERE ' + cond.join(' AND ');
   const totalRow = await db.get(`SELECT COUNT(*) c FROM audit_log ${where}`, par);
   const total = totalRow ? totalRow.c : 0;
   const rows = await db.all(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...par, PAGE_SIZE, pageNum * PAGE_SIZE]);
   const trs = rows.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.actor_tag || r.actor_id || '—')}</td><td>${esc(r.action || '')}</td><td>${renderMentions(client, esc((r.details || '').slice(0, 300)))}</td></tr>`).join('');
-  const qkeep = qs({ who, act, days });
+  const qkeep = qs({ who, act, days, ...(showSys ? { sys: '1' } : {}) });
   const undoable = await db.all("SELECT * FROM undo_actions WHERE done_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 10", [new Date().toISOString()]).catch(() => []);
   const undoCard = undoable.length ? `<div class="card"><h2>Можно отменить (5 мин)</h2>
-    ${undoable.map((u2) => `<div class="bar"><span class="mini">${u2.kind === 'rank' ? 'смена ранга' : u2.kind} · ${personLink(client, u2.target_id)} · ${fmt(u2.created_at)}</span>
-      <form method="POST" action="/undo" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${u2.id}"><button class="btn ghost sm" type="submit">Отменить</button></form></div>`).join('')}
+    ${undoable.map((u2) => {
+      const label = u2.kind === 'rank' ? 'смена ранга'
+        : u2.kind === 'dbrow' ? (() => { try { const p = JSON.parse(u2.payload || '{}'); return `правка БД: ${esc(p.table || '')} #${esc(String(p.pk || ''))} (${p.op === 'delete' ? 'удаление' : 'изменение'})`; } catch (_) { return 'правка БД'; } })()
+        : u2.kind;
+      const who = u2.kind === 'dbrow' ? '' : ` · ${personLink(client, u2.target_id)}`;
+      return `<div class="bar"><span class="mini">${label}${who} · ${fmt(u2.created_at)}</span>
+      <form method="POST" action="/undo" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${u2.id}"><button class="btn ghost sm" type="submit">Отменить</button></form></div>`;
+    }).join('')}
   </div>` : '';
   return `
   <h1>Аудит</h1>
@@ -2178,6 +2476,7 @@ async function auditBody(client, sp, pageNum, user) {
     <label>Кто (Discord ID или часть тега)<input name="who" value="${esc(who)}" maxlength="60"></label>
     <label>Действие содержит<input name="act" value="${esc(act)}" maxlength="60"></label>
     <label>За сколько дней<input name="days" type="number" min="1" max="365" value="${days}"></label>
+    <label class="chk"><input type="checkbox" name="sys" value="1" ${showSys ? 'checked' : ''}><span>Показывать служебные (⚙ тема, страницы, правка БД и т.п.)</span></label>
     <button class="btn" type="submit">Применить</button>
     <a class="btn ghost sm" href="/audit.csv?${qkeep}">Экспорт CSV</a>
   </form>
@@ -2187,6 +2486,7 @@ async function auditBody(client, sp, pageNum, user) {
     <a class="btn ghost sm" href="/audit?act=ЧС">Изменения ЧС</a>
     <a class="btn ghost sm" href="/audit?act=Розыгрыш">Розыгрыши</a>
     <a class="btn ghost sm" href="/audit?act=сайт">Действия с сайта</a>
+    <a class="btn ghost sm" href="/audit?sys=1&act=${encodeURIComponent(META_PREFIX)}">Служебные ⚙</a>
     <a class="btn ghost sm" href="/audit?who=${esc(OWNER_ID)}">Действия havirys</a>
     <a class="btn ghost sm" href="/audit?act=Отказ доступа">Отказы доступа</a>
   </div></div>
@@ -2390,7 +2690,7 @@ async function panelTexts(user) {
         : '');
     parts.push(`<div class="card"><h2>${esc(title)}</h2>
       <form method="POST" action="/panel/text/save" class="form">${csrfField(user)}<input type="hidden" name="key" value="${k}">
-        <label>Текст<textarea name="content" rows="8" maxlength="6000">${esc(cur)}</textarea></label>
+        <label>Текст<textarea name="content" data-md rows="8" maxlength="6000">${esc(cur)}</textarea></label>
         <button class="btn" type="submit">Сохранить новую версию</button>
       </form>${extra}</div>`);
   }
@@ -2507,44 +2807,6 @@ function activePreset(colors) {
     if (Object.keys(THEME_DEFAULTS).every((k) => (cur[k] || '').toLowerCase() === (eff[k] || '').toLowerCase())) return name;
   }
   return null;
-}
-
-// Персональная тема (только для этого браузера, без сервера) — блок для /me.
-function personalThemeCard() {
-  const rows = Object.keys(THEME_DEFAULTS).map((k) => `<label class="chk" style="justify-content:space-between">
-    <span>${esc(THEME_LABELS[k])}</span>
-    <input type="color" data-k="${k}" value="${THEME_DEFAULTS[k]}">
-  </label>`).join('');
-  return `<div class="card"><h2>Свой вид сайта</h2>
-    <p class="mini">Цвета меняются <b>только в этом браузере</b> и не видны другим. Общий вид сайта настраивает havirys.</p>
-    <div class="form" id="mytheme">${rows}
-      <div class="bar" style="margin-top:12px">
-        <button class="btn sm" type="button" onclick="fcMyThemeSave()">Применить</button>
-        <button class="btn ghost sm" type="button" onclick="fcMyThemeReset()">Сбросить</button>
-      </div>
-    </div>
-    <script>
-    (function(){
-      var box=document.getElementById('mytheme'); if(!box)return;
-      var cur={}; try{cur=JSON.parse(localStorage.getItem('fc_colors')||'{}')}catch(e){}
-      var cs=getComputedStyle(document.documentElement);
-      box.querySelectorAll('input[data-k]').forEach(function(inp){
-        var k=inp.dataset.k;
-        var val=cur[k]|| (cs.getPropertyValue('--'+k)||'').trim() || inp.value;
-        if(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(val)) inp.value=val.length===4?('#'+val[1]+val[1]+val[2]+val[2]+val[3]+val[3]):val;
-      });
-      window.fcMyThemeSave=function(){
-        var o={}; box.querySelectorAll('input[data-k]').forEach(function(inp){o[inp.dataset.k]=inp.value;});
-        try{localStorage.setItem('fc_colors',JSON.stringify(o));}catch(e){}
-        for(var k in o) document.documentElement.style.setProperty('--'+k,o[k]);
-      };
-      window.fcMyThemeReset=function(){
-        try{localStorage.removeItem('fc_colors');}catch(e){}
-        location.reload();
-      };
-    })();
-    </script>
-  </div>`;
 }
 
 async function panelAdmin(client, user) {
@@ -2772,7 +3034,7 @@ function badgesCard(bs) {
   const fams = [
     { name: 'Контракты', cur: bs.fulfilled || 0, steps: [10, 50, 100], unit: 'контрактов' },
     { name: 'Приглашения', cur: bs.invConfirmed || 0, steps: [5, 15], unit: 'приглашённых' },
-    { name: 'Стаж', cur: bs.days || 0, steps: [30, 90], unit: 'дней в организации' },
+    { name: 'Стаж', cur: bs.days || 0, steps: [30, 90, 365], unit: 'дней в организации' },
     { name: 'Победы в розыгрышах', cur: bs.wins || 0, steps: [1, 3], unit: 'побед' },
     { name: 'Недельный стрик', cur: bs.streak || 0, steps: [2, 4], unit: 'недель подряд' },
   ];
@@ -2786,8 +3048,14 @@ function badgesCard(bs) {
       <div class="progress"><i style="width:${pct}%"></i></div>
     </div>`;
   }).join('');
-  const earned = bs.badges.length
-    ? `<div style="margin-bottom:6px">${bs.badges.map((b) => `<span class="pill">${esc(b)}</span>`).join('')}</div>`
+  const awardedAt = bs.awardedAt || {};
+  const labels = bs.LABELS || {};
+  const earnedKeys = bs.has ? Object.keys(bs.has).filter((k) => bs.has[k]) : [];
+  const earned = earnedKeys.length
+    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">${earnedKeys.map((k) => {
+        const d = awardedAt[k] ? fmt(awardedAt[k]) : null;
+        return `<span class="pill" ${d ? `title="получен ${esc(d)}"` : ''}>${esc(labels[k] || k)}${d ? ` <span class="mini">· ${esc(d)}</span>` : ''}</span>`;
+      }).join('')}</div>`
     : '<span class="muted">Пока нет — выполняй контракты и приглашай друзей.</span>';
   return `<div class="card"><h2>Бейджи${bs.streak >= 2 ? ` · 🔥 стрик ${bs.streak} нед.` : ''}</h2>
     ${earned}
@@ -2920,6 +3188,44 @@ async function giveawayPageBody(client, user, gid, acc) {
 }
 
 // ---------- Тикет целиком на сайте ----------
+// ---------- Список тикетов для HR ----------
+async function ticketsListBody(client, sp, user) {
+  const st = sp.get('st') || 'open'; // open | archived | all
+  const pri = sp.get('pri') || ''; // '' | high | normal | low
+  const mine = sp.get('mine') === '1';
+  const cond = []; const par = [];
+  if (st === 'open') cond.push("status = 'open'");
+  else if (st === 'archived') cond.push("status = 'archived'");
+  if (pri === 'high' || pri === 'low') { cond.push('priority = ?'); par.push(pri); }
+  else if (pri === 'normal') cond.push('(priority IS NULL OR priority = ?)'), par.push('normal');
+  if (mine) { cond.push('assigned_to = ?'); par.push(user.id); }
+  const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+  const rows = await db.all(`SELECT * FROM tickets ${where} ORDER BY (status='open') DESC, CASE priority WHEN 'high' THEN 0 WHEN 'low' THEN 2 ELSE 1 END, id DESC LIMIT 200`, par).catch(() => []);
+  const PRI = { high: '<span class="badge bad">высокий</span>', low: '<span class="badge">низкий</span>' };
+  const trs = rows.map((t) => `<tr>
+    <td>#${t.id}</td>
+    <td><a href="/ticket/${t.id}">${esc(t.subject || 'Тикет')}</a></td>
+    <td>${esc(TICKET_CAT_RU[t.category] || t.category || '—')}</td>
+    <td>${onlineDot(client, t.opener_id)}${personLink(client, t.opener_id)}</td>
+    <td>${PRI[t.priority] || '<span class="badge">обычный</span>'}</td>
+    <td>${t.assigned_to ? personLink(client, t.assigned_to) : '<span class="mini">—</span>'}</td>
+    <td>${t.status === 'open' ? '<span class="badge ok">открыт</span>' : '<span class="badge">закрыт</span>'}</td>
+    <td class="muted">${fmt(t.closed_at || t.created_at)}</td>
+  </tr>`).join('');
+  const seg = (name, val, cur, label) => `<a class="btn ${val === cur ? '' : 'ghost '}sm" href="/tickets?${qs({ st: name === 'st' ? val : st, pri: name === 'pri' ? val : pri, ...(mine ? { mine: '1' } : {}) })}">${esc(label)}</a>`;
+  return `
+  <h1>Тикеты</h1>
+  <div class="bar"><span class="mini">Статус:</span>${seg('st', 'open', st, 'открытые')}${seg('st', 'archived', st, 'закрытые')}${seg('st', 'all', st, 'все')}</div>
+  <div class="bar"><span class="mini">Приоритет:</span>${seg('pri', '', pri, 'любой')}${seg('pri', 'high', pri, 'высокий')}${seg('pri', 'normal', pri, 'обычный')}${seg('pri', 'low', pri, 'низкий')}</div>
+  <div class="bar"><a class="btn ${mine ? '' : 'ghost '}sm" href="/tickets?${qs({ st, pri, ...(mine ? {} : { mine: '1' }) })}">${mine ? '✓ только мои' : 'только мои'}</a></div>
+  <div class="card"><h2>Найдено: ${rows.length}</h2>
+    <div class="tablewrap"><table>
+      <tr><th>#</th><th>Тема</th><th>Тип</th><th>Автор</th><th>Приоритет</th><th>Ведёт</th><th>Статус</th><th>Обновлён</th></tr>
+      ${trs || '<tr><td colspan="8">—</td></tr>'}
+    </table></div>
+  </div>`;
+}
+
 async function ticketPageBody(client, user, acc, tid) {
   const t = await db.get('SELECT * FROM tickets WHERE id = ?', [tid]);
   if (!t) return '<div class="card">Тикет не найден.</div><p><a href="/me">← в кабинет</a></p>';
@@ -2957,6 +3263,40 @@ async function ticketPageBody(client, user, acc, tid) {
       <button class="btn sm" type="submit">Добавить шаблон</button>
     </form></div>` : '';
   const isOpener = t.opener_id === user.id;
+  const PRI = { high: '<span class="badge bad">высокий</span>', low: '<span class="badge">низкий</span>', normal: '<span class="badge">обычный</span>' };
+  const priBadge = PRI[t.priority] || PRI.normal;
+  let staffCard = '';
+  if (isStaff) {
+    const reasons = await db.all('SELECT id, text FROM ticket_close_reasons ORDER BY id').catch(() => []);
+    const reasonOpts = reasons.map((rr) => `<option value="${esc(rr.text)}">${esc(rr.text.slice(0, 60))}</option>`).join('');
+    const assignedLine = t.assigned_to
+      ? `назначен: ${personLink(client, t.assigned_to)} <form method="POST" action="/ticket/assign" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${t.id}"><input type="hidden" name="clear" value="1"><button class="btn ghost sm" type="submit">снять</button></form>`
+      : `<form method="POST" action="/ticket/assign" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${t.id}"><button class="btn ghost sm" type="submit">взять на себя</button></form>`;
+    staffCard = `<div class="card"><h2>Управление (HR+)</h2>
+      <form method="POST" action="/ticket/meta" class="bar" style="margin-bottom:8px">${csrfField(user)}<input type="hidden" name="id" value="${t.id}">
+        <label style="margin:0">Приоритет
+          <select name="priority">
+            ${['normal', 'high', 'low'].map((p) => `<option value="${p}" ${(t.priority || 'normal') === p ? 'selected' : ''}>${p === 'normal' ? 'обычный' : p === 'high' ? 'высокий' : 'низкий'}</option>`).join('')}
+          </select></label>
+        <button class="btn sm" type="submit">Сохранить</button>
+      </form>
+      <div class="bar" style="margin-bottom:8px">${assignedLine}</div>
+      ${closed
+        ? `<form method="POST" action="/ticket/reopen">${csrfField(user)}<input type="hidden" name="id" value="${t.id}"><button class="btn sm" type="submit">🔓 Переоткрыть тикет</button></form>
+           ${t.close_reason ? `<p class="mini" style="margin-top:6px">Причина закрытия: ${esc(t.close_reason)}</p>` : ''}`
+        : `<form method="POST" action="/ticket/close" class="form">${csrfField(user)}<input type="hidden" name="id" value="${t.id}">
+             ${reasons.length ? `<label>Причина из шаблона<select onchange="if(this.value)this.form.reason.value=this.value"><option value="">— выбрать —</option>${reasonOpts}</select></label>` : ''}
+             <label>Причина / комментарий<textarea name="reason" rows="2" maxlength="500"></textarea></label>
+             <button class="btn" style="background:var(--bad)" type="submit">🔒 Закрыть тикет</button>
+           </form>`}
+    </div>
+    <div class="card"><h2>Шаблоны причин закрытия</h2>
+      ${reasons.map((rr) => `<div class="bar"><span class="mini">${esc(rr.text.slice(0, 90))}</span>
+        <form method="POST" action="/ticket/close_reason_del" style="display:inline">${csrfField(user)}<input type="hidden" name="tid" value="${t.id}"><input type="hidden" name="id" value="${rr.id}"><button class="btn ghost sm" type="submit">✕</button></form></div>`).join('') || '<span class="mini">пусто</span>'}
+      <form method="POST" action="/ticket/close_reason_add" class="bar" style="margin-top:8px">${csrfField(user)}<input type="hidden" name="tid" value="${t.id}">
+        <input name="text" placeholder="новая причина" maxlength="200" style="flex:1"><button class="btn ghost sm" type="submit">Добавить</button></form>
+    </div>`;
+  }
   let ratingCard = '';
   if (closed && isOpener) {
     if (t.rating == null) {
@@ -2973,12 +3313,13 @@ async function ticketPageBody(client, user, acc, tid) {
   }
   return `
   <h1>🎫 ${esc(t.subject || 'Тикет')} #${t.id}</h1>
-  <div class="muted">${esc(TICKET_CAT_RU[t.category] || t.category || '')} · ${closed ? 'закрыт' : 'открыт'} · автор ${personLink(client, t.opener_id)}</div>
+  <div class="muted">${esc(TICKET_CAT_RU[t.category] || t.category || '')} · ${closed ? 'закрыт' : 'открыт'} · приоритет ${priBadge} · автор ${personLink(client, t.opener_id)}${t.assigned_to ? ` · ведёт ${personLink(client, t.assigned_to)}` : ''}</div>
   <div class="card">${msgsHtml}</div>
   ${closed ? '' : `<div class="card"><form method="POST" action="/ticket/post" class="form">${csrfField(user)}<input type="hidden" name="id" value="${t.id}">
     ${tplSelect}
     <label>Ваше сообщение<textarea name="text" rows="3" required maxlength="1800"></textarea></label>
     <button class="btn" type="submit">Отправить в тикет</button></form></div>`}
+  ${staffCard}
   ${ratingCard}
   ${tplManage}
   <p><a href="/me">← в кабинет</a></p>`;
@@ -3016,7 +3357,7 @@ async function panelFaqManage(user) {
     const rows = entries.map((e, i) => `<div class="card">
       <form method="POST" action="/panel/faq/edit" class="form">${csrfField(user)}<input type="hidden" name="id" value="${e.id}">
         <label>Заголовок<input name="title" value="${esc(e.title)}" maxlength="120" required></label>
-        <label>Текст<textarea name="content" rows="4" maxlength="3000" required>${esc(e.content)}</textarea></label>
+        <label>Текст<textarea name="content" data-md rows="4" maxlength="3000" required>${esc(e.content)}</textarea></label>
         <div class="bar">
           <button class="btn sm" type="submit">Сохранить</button>
           <button class="btn ghost sm" formaction="/panel/faq/move" name="dir" value="up" type="submit" ${i === 0 ? 'disabled' : ''}>▲</button>
@@ -3028,7 +3369,7 @@ async function panelFaqManage(user) {
     parts.push(`<div class="card"><h2>${esc(title)} (${entries.length})</h2>
       <form method="POST" action="/panel/faq/add" class="form">${csrfField(user)}<input type="hidden" name="category" value="${cat}">
         <label>Новый заголовок<input name="title" maxlength="120" required></label>
-        <label>Текст<textarea name="content" rows="3" maxlength="3000" required></textarea></label>
+        <label>Текст<textarea name="content" data-md rows="3" maxlength="3000" required></textarea></label>
         <button class="btn sm" type="submit">Добавить гайд</button>
       </form></div>${rows}`);
   }
@@ -3363,10 +3704,22 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/me?' + qs({ ok: 'Сессия завершена.' });
   }
 
+  if (pathName === '/me/session_label') {
+    const sid = (body.get('sid') || '').trim();
+    const label = (body.get('label') || '').trim().slice(0, 40);
+    if (sid) await db.run('UPDATE web_sessions SET label = ? WHERE sid = ? AND discord_id = ?', [label || null, sid, user.id]).catch(() => {});
+    return '/me?' + qs({ ok: 'Имя устройства сохранено.' });
+  }
+
   // ===== «Обо мне» на публичном профиле =====
   if (pathName === '/me/about') {
     if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Только для участников.' });
-    await db.run('UPDATE participants SET about = ? WHERE discord_id = ?', [(body.get('about') || '').slice(0, 1000), user.id]);
+    await db.run('UPDATE participants SET about = ?, about_private = ?, contracts_private = ? WHERE discord_id = ?', [
+      (body.get('about') || '').slice(0, 1000),
+      body.get('about_private') === '1' ? 1 : 0,
+      body.get('contracts_private') === '1' ? 1 : 0,
+      user.id,
+    ]);
     return '/me?' + qs({ ok: 'Сохранено.' });
   }
 
@@ -3568,24 +3921,38 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const table = body.get('table');
     if (!DATA_TABLES[table]) return '/panel?tab=data&' + qs({ err: 'Неизвестная таблица.' });
     const info = await db.all(`PRAGMA table_info(${table})`);
+    const snapshotRow = async (kind) => {
+      try {
+        const old = await db.get(`SELECT * FROM ${table} WHERE rowid = ?`, [body.get('pk')]);
+        if (old) {
+          await db.run(
+            'INSERT INTO undo_actions (kind, actor_id, target_id, payload, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+            ['dbrow', user.id, `${table}#${body.get('pk')}`, JSON.stringify({ op: kind, table, pk: body.get('pk'), row: old }),
+             new Date().toISOString(), new Date(Date.now() + 5 * 60000).toISOString()],
+          );
+        }
+      } catch (_) {}
+    };
     if (pathName === '/panel/row/save') {
       const pk = body.get('pk');
       const setCols = info.filter((ci) => !ci.pk);
       if (!setCols.length) return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ err: 'Нет изменяемых столбцов.' });
+      await snapshotRow('update');
       const sets = setCols.map((ci) => `${ci.name} = ?`).join(', ');
       const vals = setCols.map((ci) => {
         const raw = body.get('f_' + ci.name);
         return raw === '' || raw == null ? null : raw;
       });
       await db.run(`UPDATE ${table} SET ${sets} WHERE rowid = ?`, [...vals, pk]);
-      await webAudit(client, user, 'Правка БД (сайт)', `${table} rowid=${pk}: ${setCols.map((c) => c.name).join(', ')}`);
-      return '/panel/row?' + qs({ table, pk, ok: 'Строка сохранена.' });
+      await webAuditMeta(client, user, 'Правка БД (сайт)', `${table} rowid=${pk}: ${setCols.map((c) => c.name).join(', ')}`);
+      return '/panel/row?' + qs({ table, pk, ok: 'Строка сохранена. Откат — на странице «Аудит» в течение 5 мин.' });
     }
     if (pathName === '/panel/row/delete') {
       const pk = body.get('pk');
+      await snapshotRow('delete');
       await db.run(`DELETE FROM ${table} WHERE rowid = ?`, [pk]);
-      await webAudit(client, user, 'Удаление строки БД (сайт)', `${table} rowid=${pk}`);
-      return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ ok: 'Строка удалена.' });
+      await webAuditMeta(client, user, 'Удаление строки БД (сайт)', `${table} rowid=${pk}`);
+      return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ ok: 'Строка удалена. Откат — на «Аудит» в течение 5 мин.' });
     }
     if (pathName === '/panel/row/add') {
       const addCols = info.filter((ci) => !(ci.pk && /INT/i.test(ci.type)));
@@ -3596,7 +3963,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         `INSERT INTO ${table} (${present.map((c) => c.name).join(', ')}) VALUES (${placeholders})`,
         present.map((c) => body.get('f_' + c.name)),
       );
-      await webAudit(client, user, 'Добавление строки БД (сайт)', `${table}: ${present.map((c) => c.name).join(', ')}`);
+      await webAuditMeta(client, user, 'Добавление строки БД (сайт)', `${table}: ${present.map((c) => c.name).join(', ')}`);
       return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ ok: 'Строка добавлена.' });
     }
     return '/panel?tab=data&table=' + encodeURIComponent(table);
@@ -3892,7 +4259,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const contentText = (body.get('content') || '').trim();
     if (!contentText) return '/panel?tab=texts&' + qs({ err: 'Пустой текст.' });
     await contentVersions.saveVersion(key, contentText, user.id);
-    await webAudit(client, user, 'Текст обновлён (сайт)', `${key} (${contentText.length} симв.)`);
+    await webAuditMeta(client, user, 'Текст обновлён (сайт)', `${key} (${contentText.length} симв.)`);
     return '/panel?tab=texts&' + qs({ ok: 'Сохранена новая версия.' });
   }
 
@@ -3933,7 +4300,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const key = (body.get('key') || '').trim();
     if (!FEATURE_FLAGS.some(([k]) => k === key)) return '/panel?tab=settings&' + qs({ err: 'Неизвестный переключатель.' });
     await db.setSetting(`feature_${key}_enabled`, body.get('on') === '1' ? 'true' : 'false');
-    await webAudit(client, user, 'Переключатель фичи (сайт)', `${key} → ${body.get('on') === '1' ? 'вкл' : 'выкл'}`);
+    await webAuditMeta(client, user, 'Переключатель фичи (сайт)', `${key} → ${body.get('on') === '1' ? 'вкл' : 'выкл'}`);
     return '/panel?tab=settings&' + qs({ ok: 'Готово.' });
   }
 
@@ -3943,7 +4310,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const key = (body.get('key') || '').trim();
     if (!key) return '/panel?tab=settings&' + qs({ err: 'Пустой ключ.' });
     await db.setSetting(key, (body.get('value') || '').trim());
-    await webAudit(client, user, 'Настройка изменена (сайт)', `${key} = ${(body.get('value') || '').slice(0, 100)}`);
+    await webAuditMeta(client, user, 'Настройка изменена (сайт)', `${key} = ${(body.get('value') || '').slice(0, 100)}`);
     return '/panel?tab=settings&' + qs({ ok: 'Сохранено.' });
   }
 
@@ -3954,7 +4321,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (!name || !(HOOKS.commandDefaultTiers || {})[name]) return '/panel?tab=perms&' + qs({ err: 'Неизвестная команда.' });
     if (pathName === '/panel/perm/reset') {
       await db.run('DELETE FROM command_permission_overrides WHERE command_name = ?', [name]);
-      await webAudit(client, user, 'Право команды сброшено (сайт)', `/${name}`);
+      await webAuditMeta(client, user, 'Право команды сброшено (сайт)', `/${name}`);
       return '/panel?tab=perms&' + qs({ ok: 'Сброшено к значению по умолчанию.' });
     }
     const tier = body.get('tier');
@@ -3964,7 +4331,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
        ON CONFLICT(command_name) DO UPDATE SET tier = excluded.tier`,
       [name, tier],
     );
-    await webAudit(client, user, 'Право команды изменено (сайт)', `/${name} → ${tier}`);
+    await webAuditMeta(client, user, 'Право команды изменено (сайт)', `/${name} → ${tier}`);
     return '/panel?tab=perms&' + qs({ ok: 'Тир обновлён.' });
   }
 
@@ -4103,7 +4470,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   if (pathName === '/tools/badge_sync') {
     if (acc.rank < LEVELS.owner) return '/tools?' + qs({ err: 'Недостаточно прав.' });
     if (!g) return '/tools?' + qs({ err: 'Бот недоступен.' });
-    webAudit(client, user, 'Синхронизация бейдж-ролей (сайт)', 'запущено').catch(() => {});
+    webAuditMeta(client, user, 'Синхронизация бейдж-ролей (сайт)', 'запущено').catch(() => {});
     badges.syncAllRoles(g).catch((e) => console.error('[web] badge sync:', e.message));
     return '/tools?' + qs({ ok: 'Синхронизация запущена (идёт в фоне, создаст недостающие роли).' });
   }
@@ -4167,6 +4534,23 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     await webAudit(client, user, 'Отменён отложенный розыгрыш (сайт)', `#${body.get('id')}`);
     return '/panel?tab=giveaways&' + qs({ ok: 'Отменено.' });
   }
+  if (pathName === '/panel/giveaway/tpl_save' || pathName === '/panel/giveaway/tpl_del') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (pathName === '/panel/giveaway/tpl_del') {
+      await db.run('DELETE FROM giveaway_templates WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
+      return '/panel?tab=giveaways&' + qs({ ok: 'Шаблон удалён.' });
+    }
+    const name = (body.get('name') || '').trim().slice(0, 60);
+    const prize = (body.get('prize') || '').trim().slice(0, 200);
+    if (!name || !prize) return '/panel?tab=giveaways&' + qs({ err: 'Нужны название и приз.' });
+    await db.run(
+      'INSERT INTO giveaway_templates (name, prize, winners_count, duration, required_role_id, min_role_id, prize_tiers, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [name, prize, parseInt(body.get('winners'), 10) || 1, (body.get('duration') || '').trim().slice(0, 10),
+       (body.get('role_id') || '').trim() || null, (body.get('min_role_id') || '').trim() || null,
+       (body.get('prize_tiers') || '').trim().slice(0, 800) || null, new Date().toISOString()],
+    );
+    return '/panel?tab=giveaways&' + qs({ ok: 'Шаблон сохранён.' });
+  }
 
   // ===== сообщение в тикет с сайта =====
   if (pathName === '/ticket/post') {
@@ -4210,6 +4594,73 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return `/ticket/${tid}?` + qs({ ok: 'Готово.' });
   }
 
+  // ===== приоритет / назначение / закрытие / переоткрытие тикета (HR+) =====
+  if (['/ticket/meta', '/ticket/assign', '/ticket/close', '/ticket/reopen', '/ticket/close_reason_add', '/ticket/close_reason_del'].includes(pathName)) {
+    if (acc.rank < LEVELS.hr) return '/me?' + qs({ err: 'Недостаточно прав.' });
+    const tid = parseInt(body.get('id') || body.get('tid'), 10) || 0;
+    const back = `/ticket/${tid}?`;
+    if (pathName === '/ticket/close_reason_add') {
+      const text = (body.get('text') || '').trim().slice(0, 200);
+      if (text) await db.run('INSERT INTO ticket_close_reasons (text, created_at) VALUES (?, ?)', [text, new Date().toISOString()]);
+      return back + qs({ ok: 'Добавлено.' });
+    }
+    if (pathName === '/ticket/close_reason_del') {
+      await db.run('DELETE FROM ticket_close_reasons WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
+      return back + qs({ ok: 'Удалено.' });
+    }
+    const t = await db.get('SELECT * FROM tickets WHERE id = ?', [tid]);
+    if (!t) return '/me?' + qs({ err: 'Тикет не найден.' });
+    if (pathName === '/ticket/meta') {
+      const pri = ['normal', 'high', 'low'].includes(body.get('priority')) ? body.get('priority') : 'normal';
+      await db.run('UPDATE tickets SET priority = ? WHERE id = ?', [pri === 'normal' ? null : pri, tid]);
+      await webAudit(client, user, 'Тикет: приоритет (сайт)', `#${tid} → ${pri}`);
+      return back + qs({ ok: 'Сохранено.' });
+    }
+    if (pathName === '/ticket/assign') {
+      if (body.get('clear') === '1') {
+        await db.run('UPDATE tickets SET assigned_to = NULL, assigned_at = NULL WHERE id = ?', [tid]);
+      } else {
+        await db.run('UPDATE tickets SET assigned_to = ?, assigned_at = ? WHERE id = ?', [user.id, new Date().toISOString(), tid]);
+      }
+      await webAudit(client, user, 'Тикет: назначение (сайт)', `#${tid} → ${body.get('clear') === '1' ? 'снято' : user.username}`);
+      return back + qs({ ok: 'Готово.' });
+    }
+    if (pathName === '/ticket/close') {
+      if (t.status !== 'open') return back + qs({ err: 'Тикет уже закрыт.' });
+      const reason = (body.get('reason') || '').trim().slice(0, 500);
+      await db.run("UPDATE tickets SET status = 'archived', closed_at = ?, closed_by = ?, close_reason = ? WHERE id = ?",
+        [new Date().toISOString(), user.id, reason || null, tid]);
+      if (g && t.channel_id) {
+        try {
+          const ch = await g.channels.fetch(t.channel_id);
+          await ch.permissionOverwrites.edit(t.opener_id, { ViewChannel: false, SendMessages: false }).catch(() => {});
+          await ch.setParent(config.CHANNEL_TICKETS_ARCHIVE_CATEGORY, { lockPermissions: false }).catch(() => {});
+          if (!ch.name.startsWith('закрыт-')) await ch.setName(`закрыт-${ch.name}`.slice(0, 100)).catch(() => {});
+          await ch.send({ content: `🔒 Тикет закрыт с сайта — ${uname}${reason ? `\nПричина: ${reason}` : ''}` }).catch(() => {});
+        } catch (_) {}
+      }
+      if (t.opener_id && t.opener_id !== user.id) await pushNotify(t.opener_id, 'ticket', `Тикет «${t.subject || 'Тикет'}» закрыт${reason ? `: ${reason}` : ''}`, `/ticket/${tid}`).catch(() => {});
+      await webAudit(client, user, 'Тикет закрыт (сайт)', `#${tid}${reason ? ' — ' + reason : ''}`);
+      return back + qs({ ok: 'Тикет закрыт.' });
+    }
+    if (pathName === '/ticket/reopen') {
+      await db.run("UPDATE tickets SET status = 'open', closed_at = NULL, closed_by = NULL WHERE id = ?", [tid]);
+      if (g && t.channel_id) {
+        try {
+          const ch = await g.channels.fetch(t.channel_id);
+          await ch.permissionOverwrites.edit(t.opener_id, { ViewChannel: true, SendMessages: true }).catch(() => {});
+          await ch.setParent(config.CHANNEL_TICKETS_ACTIVE_CATEGORY, { lockPermissions: false }).catch(() => {});
+          if (ch.name.startsWith('закрыт-')) await ch.setName(ch.name.replace(/^закрыт-/, '').slice(0, 100)).catch(() => {});
+          await ch.send({ content: `🔓 Тикет переоткрыт с сайта — ${uname}` }).catch(() => {});
+        } catch (_) {}
+      }
+      if (t.opener_id && t.opener_id !== user.id) await pushNotify(t.opener_id, 'ticket', `Тикет «${t.subject || 'Тикет'}» переоткрыт`, `/ticket/${tid}`).catch(() => {});
+      await webAudit(client, user, 'Тикет переоткрыт (сайт)', `#${tid}`);
+      return back + qs({ ok: 'Тикет переоткрыт.' });
+    }
+    return back;
+  }
+
   // ===== проверка контракта (HR+) =====
   if (pathName === '/panel/contract/review') {
     if (acc.rank < LEVELS.hr) return '/panel?tab=contracts_check&' + qs({ err: 'Недостаточно прав.' });
@@ -4238,7 +4689,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       if (!title || !cont) return '/panel?tab=faq_manage&' + qs({ err: 'Нужны заголовок и текст.' });
       await faq.addEntry(cat, title, cont, user.id);
       await refreshCat(cat);
-      await webAudit(client, user, 'FAQ: добавлен гайд (сайт)', `${cat}: ${title}`);
+      await webAuditMeta(client, user, 'FAQ: добавлен гайд (сайт)', `${cat}: ${title}`);
       return '/panel?tab=faq_manage&' + qs({ ok: 'Гайд добавлен.' });
     }
     const eid = parseInt(body.get('id'), 10) || 0;
@@ -4255,7 +4706,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName === '/panel/faq/delete') {
       await faq.deleteEntry(eid);
       await refreshCat(e.category);
-      await webAudit(client, user, 'FAQ: удалён гайд (сайт)', `#${eid}`);
+      await webAuditMeta(client, user, 'FAQ: удалён гайд (сайт)', `#${eid}`);
       return '/panel?tab=faq_manage&' + qs({ ok: 'Удалено.' });
     }
     if (pathName === '/panel/faq/move') {
@@ -4402,7 +4853,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (acc.rank < LEVELS.owner) return '/tools?' + qs({ err: 'Недостаточно прав.' });
     let dest = null;
     try { dest = backup.backupNow(); } catch (e) { return '/tools?' + qs({ err: 'Ошибка: ' + e.message }); }
-    await webAudit(client, user, 'Резервная копия БД (сайт)', dest || 'не удалось');
+    await webAuditMeta(client, user, 'Резервная копия БД (сайт)', dest || 'не удалось');
     return '/tools?' + qs(dest ? { ok: 'Копия сохранена: ' + dest } : { err: 'Не удалось создать копию.' });
   }
 
@@ -4504,7 +4955,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         await db.setSetting('site.' + k, (body.get(k) || '').trim().slice(0, lim[k]));
       }
       await loadSite(true);
-      await webAudit(client, user, 'Изменены название/тексты сайта', `brand=${(body.get('brand') || '').slice(0, 60)}`);
+      await webAuditMeta(client, user, 'Изменены название/тексты сайта', `brand=${(body.get('brand') || '').slice(0, 60)}`);
       return '/panel?tab=admin&' + qs({ ok: 'Сохранено.' });
     }
 
@@ -4516,14 +4967,14 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         if (/^#[0-9a-f]{6}$/.test(raw)) { await db.setSetting('site.color.' + k, raw); n++; }
       }
       await loadSite(true);
-      await webAudit(client, user, 'Изменена тема сайта', `${n} цвет(ов)`);
+      await webAuditMeta(client, user, 'Изменена тема сайта', `${n} цвет(ов)`);
       return '/panel?tab=admin&' + qs({ ok: 'Тема применена.' });
     }
 
     if (pathName === '/admin/theme_reset') {
       await db.run("DELETE FROM settings WHERE key LIKE 'site.color.%'");
       await loadSite(true);
-      await webAudit(client, user, 'Сброшена тема сайта', '');
+      await webAuditMeta(client, user, 'Сброшена тема сайта', '');
       return '/panel?tab=admin&' + qs({ ok: 'Цвета возвращены к стандартным.' });
     }
 
@@ -4533,51 +4984,93 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       if (data.length > 280000) return '/panel?tab=admin&' + qs({ err: 'Файл больше 200 КБ.' });
       await db.setSetting('site.logo', data);
       await loadSite(true);
-      await webAudit(client, user, 'Загружен логотип сайта', `${data.length} симв.`);
+      await webAuditMeta(client, user, 'Загружен логотип сайта', `${data.length} симв.`);
       return '/panel?tab=admin&' + qs({ ok: 'Логотип обновлён.' });
     }
     if (pathName === '/admin/logo_clear') {
       await db.setSetting('site.logo', '');
       await loadSite(true);
-      await webAudit(client, user, 'Удалён логотип сайта', '');
+      await webAuditMeta(client, user, 'Удалён логотип сайта', '');
       return '/panel?tab=admin&' + qs({ ok: 'Логотип убран.' });
     }
     if (pathName === '/admin/nav') {
       await db.setSetting('site.nav', (body.get('nav') || '').slice(0, 2000));
       await loadSite(true);
-      await webAudit(client, user, 'Изменено меню сайта', '');
+      await webAuditMeta(client, user, 'Изменено меню сайта', '');
       return '/panel?tab=admin&' + qs({ ok: 'Меню сохранено.' });
     }
     if (pathName === '/admin/css') {
       await db.setSetting('site.css', (body.get('css') || '').slice(0, 20000));
       await loadSite(true);
-      await webAudit(client, user, 'Изменён свой CSS сайта', `${(body.get('css') || '').length} симв.`);
+      await webAuditMeta(client, user, 'Изменён свой CSS сайта', `${(body.get('css') || '').length} симв.`);
       return '/panel?tab=admin&' + qs({ ok: 'CSS сохранён.' });
     }
-    if (pathName === '/admin/page/save') {
+    if (pathName === '/admin/page/save' || pathName === '/admin/page/revert') {
+      const snapshotPage = async (sl) => {
+        const cur = await db.get('SELECT * FROM site_pages WHERE slug = ?', [sl]).catch(() => null);
+        if (cur) {
+          await db.run('INSERT INTO site_page_versions (slug, title, content, nav, saved_at, saved_by) VALUES (?, ?, ?, ?, ?, ?)',
+            [sl, cur.title || '', cur.content || '', cur.nav || 0, new Date().toISOString(), user.id]).catch(() => {});
+          // храним не больше 20 версий на страницу
+          await db.run("DELETE FROM site_page_versions WHERE slug = ? AND id NOT IN (SELECT id FROM site_page_versions WHERE slug = ? ORDER BY id DESC LIMIT 20)", [sl, sl]).catch(() => {});
+        }
+      };
+      if (pathName === '/admin/page/revert') {
+        const vid = parseInt(body.get('vid'), 10) || 0;
+        const ver = await db.get('SELECT * FROM site_page_versions WHERE id = ?', [vid]);
+        if (!ver) return '/panel?tab=pages&' + qs({ err: 'Версия не найдена.' });
+        await snapshotPage(ver.slug);
+        await db.run(
+          `INSERT INTO site_pages (slug, title, content, nav, updated_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, updated_at = excluded.updated_at`,
+          [ver.slug, ver.title || '', ver.content || '', ver.nav || 0, new Date().toISOString()],
+        );
+        await loadSite(true);
+        await webAuditMeta(client, user, 'Откат доп. страницы к версии (сайт)', `/p/${ver.slug} → v#${vid}`);
+        return '/panel?tab=pages&' + qs({ ok: 'Страница откачена к выбранной версии.' });
+      }
       const slug = (body.get('slug') || '').trim().toLowerCase();
       if (!/^[a-z0-9-]{1,40}$/.test(slug)) return '/panel?tab=pages&' + qs({ err: 'Slug: только a-z, 0-9 и дефис.' });
       const orig = (body.get('orig') || '').trim().toLowerCase();
       const title = (body.get('title') || '').slice(0, 120);
       const contentTxt = (body.get('content') || '').slice(0, 20000);
       const nav = body.get('nav') === '1' ? 1 : 0;
+      const published = body.get('published') === '1' ? 1 : 0;
       const now = new Date().toISOString();
+      await snapshotPage(orig && orig !== slug ? orig : slug);
       if (orig && orig !== slug) await db.run('DELETE FROM site_pages WHERE slug = ?', [orig]);
       await db.run(
-        `INSERT INTO site_pages (slug, title, content, nav, updated_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, updated_at = excluded.updated_at`,
-        [slug, title, contentTxt, nav, now],
+        `INSERT INTO site_pages (slug, title, content, nav, published, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, published = excluded.published, updated_at = excluded.updated_at`,
+        [slug, title, contentTxt, nav, published, now],
       );
       await loadSite(true);
-      await webAudit(client, user, 'Сохранена доп. страница (сайт)', `/p/${slug}`);
+      await webAuditMeta(client, user, 'Сохранена доп. страница (сайт)', `/p/${slug}`);
       return '/panel?tab=pages&' + qs({ ok: 'Страница сохранена.' });
     }
     if (pathName === '/admin/page/del') {
       const slug = (body.get('orig') || body.get('slug') || '').trim().toLowerCase();
       await db.run('DELETE FROM site_pages WHERE slug = ?', [slug]);
       await loadSite(true);
-      await webAudit(client, user, 'Удалена доп. страница (сайт)', `/p/${slug}`);
+      await webAuditMeta(client, user, 'Удалена доп. страница (сайт)', `/p/${slug}`);
       return '/panel?tab=pages&' + qs({ ok: 'Страница удалена.' });
+    }
+    if (pathName === '/admin/asset/upload') {
+      const data = (body.get('data') || '').trim();
+      const m = /^data:(image\/(png|jpeg|jpg|webp|gif|svg\+xml));base64,(.+)$/i.exec(data);
+      if (!m) return '/panel?tab=pages&' + qs({ err: 'Нужен файл-картинка.' });
+      let buf;
+      try { buf = Buffer.from(m[3], 'base64'); } catch (_) { return '/panel?tab=pages&' + qs({ err: 'Не удалось прочитать файл.' }); }
+      if (buf.length > 512 * 1024) return '/panel?tab=pages&' + qs({ err: 'Файл больше 500 КБ.' });
+      await db.run('INSERT INTO page_assets (filename, mime, data, size, uploaded_by, uploaded_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [(body.get('filename') || 'image').slice(0, 120), m[1], buf, buf.length, user.id, new Date().toISOString()]);
+      await webAuditMeta(client, user, 'Загружена картинка страницы (сайт)', `${buf.length} байт`);
+      return '/panel?tab=pages&' + qs({ ok: 'Картинка загружена.' });
+    }
+    if (pathName === '/admin/asset/del') {
+      await db.run('DELETE FROM page_assets WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
+      await webAuditMeta(client, user, 'Удалена картинка страницы (сайт)', `#${body.get('id')}`);
+      return '/panel?tab=pages&' + qs({ ok: 'Удалено.' });
     }
 
     if (pathName === '/admin/bot_nick') {
@@ -4586,7 +5079,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       try {
         await g.members.me.setNickname(nick || null);
       } catch (e) { return '/panel?tab=admin&' + qs({ err: 'Не удалось: ' + e.message }); }
-      await webAudit(client, user, 'Изменён ник бота на сервере', nick || '(сброшен)');
+      await webAuditMeta(client, user, 'Изменён ник бота на сервере', nick || '(сброшен)');
       return '/panel?tab=admin&' + qs({ ok: 'Ник бота обновлён.' });
     }
 
@@ -4597,6 +5090,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
           await db.setSetting('site.' + k, body.get(k) === '1' ? '1' : '');
         }
         await db.setSetting('site.banner_text', (body.get('banner_text') || '').slice(0, 400));
+        await db.setSetting('site.banner_from', (body.get('banner_from') || '').slice(0, 40));
+        await db.setSetting('site.banner_to', (body.get('banner_to') || '').slice(0, 40));
         await db.setSetting('site.agitation_title', (body.get('agitation_title') || '').slice(0, 80));
         await db.setSetting('site.stats_title', (body.get('stats_title') || '').slice(0, 80));
         await db.setSetting('site.stats', (body.get('stats') || '').slice(0, 1200));
@@ -4607,7 +5102,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         await db.setSetting('site.hero_minh', String(parseInt(body.get('hero_minh'), 10) || 0));
         await db.setSetting('site.hero_buttons', (body.get('hero_buttons') || '').slice(0, 600));
         await loadSite(true);
-        await webAudit(client, user, 'Настройки главной страницы (сайт)', '');
+        await webAuditMeta(client, user, 'Настройки главной страницы (сайт)', '');
         return '/panel?tab=landing&' + qs({ ok: 'Сохранено.' });
       }
       if (pathName === '/admin/landing/add') {
@@ -4644,7 +5139,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName === '/admin/menus') {
       if (!g) return '/panel?tab=admin&' + qs({ err: 'Бот недоступен.' });
       hook('initMenus')(g).catch((e) => console.error('[web] initMenus:', e.message));
-      await webAudit(client, user, 'Переинициализация меню Discord (сайт)', '');
+      await webAuditMeta(client, user, 'Переинициализация меню Discord (сайт)', '');
       return '/panel?tab=admin&' + qs({ ok: 'Меню публикуются (в фоне).' });
     }
 
@@ -4661,8 +5156,56 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         if (/^#[0-9a-f]{6}$/.test(color)) patch.color = parseInt(color.slice(1), 16);
         if (Object.keys(patch).length) await role.edit(patch);
       } catch (e) { return '/panel?tab=admin&' + qs({ err: 'Не удалось изменить роль: ' + e.message }); }
-      await webAudit(client, user, 'Изменена роль Discord (сайт)', `${rid} → «${name}» ${color}`);
+      await webAuditMeta(client, user, 'Изменена роль Discord (сайт)', `${rid} → «${name}» ${color}`);
       return '/panel?tab=admin&' + qs({ ok: 'Роль обновлена.' });
+    }
+
+    if (pathName === '/admin/theme_preset') {
+      if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
+      const pr = THEME_PRESETS[body.get('preset')] || null;
+      if (!pr) return '/panel?tab=admin&' + qs({ err: 'Неизвестный пресет.' });
+      await db.run("DELETE FROM settings WHERE key LIKE 'site.color.%'");
+      for (const [k, v] of Object.entries(pr)) await db.setSetting('site.color.' + k, v);
+      await loadSite(true);
+      await webAuditMeta(client, user, 'Применён пресет темы', body.get('preset'));
+      return '/panel?tab=admin&' + qs({ ok: 'Пресет применён.' });
+    }
+    if (pathName === '/admin/config_import') {
+      if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
+      let obj;
+      try { obj = JSON.parse(body.get('json') || '{}'); } catch (e) { return '/panel?tab=admin&' + qs({ err: 'Неверный JSON.' }); }
+      let n = 0;
+      if (obj.site && typeof obj.site === 'object') {
+        for (const [k, v] of Object.entries(obj.site)) {
+          if (!k.startsWith('site.')) continue;
+          if (k.startsWith('site.color.') && !/^#[0-9a-fA-F]{6}$/.test(String(v))) continue;
+          await db.setSetting(k, String(v).slice(0, 600)); n++;
+        }
+      }
+      if (obj.channels && typeof obj.channels === 'object') {
+        for (const [k, v] of Object.entries(obj.channels)) {
+          if (!k.startsWith('CHANNEL_') || !/^[0-9]{5,25}$/.test(String(v))) continue;
+          try { await configStore.setOverride(k, String(v), user.id); n++; } catch (_) {}
+        }
+      }
+      await loadSite(true);
+      await webAuditMeta(client, user, 'Импорт конфигурации сайта (сайт)', `${n} ключ(ей)`);
+      return '/panel?tab=admin&' + qs({ ok: `Применено: ${n}.` });
+    }
+    if (pathName === '/admin/channels') {
+      if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
+      let n = 0;
+      for (const [key, val] of body.entries()) {
+        if (!key.startsWith('ch_')) continue;
+        const cfgKey = key.slice(3);
+        if (!cfgKey.startsWith('CHANNEL_')) continue;
+        const v = (val || '').trim();
+        if (!/^[0-9]{5,25}$/.test(v)) continue;
+        if (String(config[cfgKey]) === v) continue;
+        try { await configStore.setOverride(cfgKey, v, user.id); n++; } catch (_) {}
+      }
+      await webAuditMeta(client, user, 'Изменены ID каналов (сайт)', `${n} шт.`);
+      return '/panel?tab=admin&' + qs({ ok: `Обновлено каналов: ${n}.` });
     }
 
     return '/panel?tab=admin';
@@ -4679,7 +5222,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const fs = require('fs');
       fs.writeFileSync(db.dbPath + '.incoming', buf);
       fs.renameSync(db.dbPath + '.incoming', db.dbPath);
-      await webAudit(client, user, 'АВАРИЙНАЯ замена БД (сайт)', `${buf.length} байт записано в ${db.dbPath}. Требуется перезапуск бота.`);
+      await webAuditMeta(client, user, 'АВАРИЙНАЯ замена БД (сайт)', `${buf.length} байт записано в ${db.dbPath}. Требуется перезапуск бота.`);
       return '/tools?' + qs({ ok: 'Файл записан. Перезапустите бота, чтобы он перечитал базу.' });
     } catch (e) {
       return '/tools?' + qs({ err: 'Ошибка записи: ' + e.message });
@@ -4744,61 +5287,12 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=members&' + qs({ ok: `Добавлено ${ok}. Пропущено ${skipped.length}${skipped.length ? ': ' + skipped.slice(0, 10).join(', ') : ''}` });
   }
 
-  // ===== пресеты темы + редактор каналов (havirys) =====
-  if (pathName === '/admin/theme_preset') {
-    if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
-    const pr = THEME_PRESETS[body.get('preset')] || null;
-    if (!pr) return '/panel?tab=admin&' + qs({ err: 'Неизвестный пресет.' });
-    await db.run("DELETE FROM settings WHERE key LIKE 'site.color.%'");
-    for (const [k, v] of Object.entries(pr)) await db.setSetting('site.color.' + k, v);
-    await loadSite(true);
-    await webAudit(client, user, 'Применён пресет темы', body.get('preset'));
-    return '/panel?tab=admin&' + qs({ ok: 'Пресет применён.' });
-  }
-  if (pathName === '/admin/config_import') {
-    if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
-    let obj;
-    try { obj = JSON.parse(body.get('json') || '{}'); } catch (e) { return '/panel?tab=admin&' + qs({ err: 'Неверный JSON.' }); }
-    let n = 0;
-    if (obj.site && typeof obj.site === 'object') {
-      for (const [k, v] of Object.entries(obj.site)) {
-        if (!k.startsWith('site.')) continue;
-        if (k.startsWith('site.color.') && !/^#[0-9a-fA-F]{6}$/.test(String(v))) continue;
-        await db.setSetting(k, String(v).slice(0, 600)); n++;
-      }
-    }
-    if (obj.channels && typeof obj.channels === 'object') {
-      for (const [k, v] of Object.entries(obj.channels)) {
-        if (!k.startsWith('CHANNEL_') || !/^[0-9]{5,25}$/.test(String(v))) continue;
-        try { await configStore.setOverride(k, String(v), user.id); n++; } catch (_) {}
-      }
-    }
-    await loadSite(true);
-    await webAudit(client, user, 'Импорт конфигурации сайта (сайт)', `${n} ключ(ей)`);
-    return '/panel?tab=admin&' + qs({ ok: `Применено: ${n}.` });
-  }
-  if (pathName === '/admin/channels') {
-    if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только владелец-аккаунт.' });
-    let n = 0;
-    for (const [key, val] of body.entries()) {
-      if (!key.startsWith('ch_')) continue;
-      const cfgKey = key.slice(3);
-      if (!cfgKey.startsWith('CHANNEL_')) continue;
-      const v = (val || '').trim();
-      if (!/^[0-9]{5,25}$/.test(v)) continue;
-      if (String(config[cfgKey]) === v) continue;
-      try { await configStore.setOverride(cfgKey, v, user.id); n++; } catch (_) {}
-    }
-    await webAudit(client, user, 'Изменены ID каналов (сайт)', `${n} шт.`);
-    return '/panel?tab=admin&' + qs({ ok: `Обновлено каналов: ${n}.` });
-  }
-
   // ===== синхронизация видимости команд в Discord (havirys) =====
   if (pathName === '/panel/perm/sync') {
     if (user.id !== OWNER_ID) return '/panel?tab=perms&' + qs({ err: 'Только владелец-аккаунт.' });
     if (!g) return '/panel?tab=perms&' + qs({ err: 'Бот недоступен.' });
     hook('syncAllCommandPermissions')(g).catch((e) => console.error('[web] perm sync:', e.message));
-    await webAudit(client, user, 'Синхронизация видимости команд (сайт)', '');
+    await webAuditMeta(client, user, 'Синхронизация видимости команд (сайт)', '');
     return '/panel?tab=perms&' + qs({ ok: 'Синхронизация запущена (в фоне).' });
   }
 
@@ -4818,6 +5312,24 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return back + '?' + qs({ ok: 'Заметка удалена.' });
   }
 
+  // ===== благодарность участнику =====
+  if (pathName === '/u/thank') {
+    const target = (body.get('target') || '').trim();
+    const back = '/u/' + target;
+    if (acc.rank < LEVELS.member) return back + '?' + qs({ err: 'Только для участников организации.' });
+    if (!/^\d{5,25}$/.test(target) || target === user.id) return back + '?' + qs({ err: 'Нельзя.' });
+    if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [target]))) return back + '?' + qs({ err: 'Участник не найден.' });
+    const dayAgo = new Date(Date.now() - 864e5).toISOString();
+    const dup = await db.get('SELECT id FROM thanks WHERE from_id = ? AND to_id = ? AND created_at > ?', [user.id, target, dayAgo]);
+    if (dup) return back + '?' + qs({ err: 'Вы уже благодарили этого участника за последние сутки.' });
+    const cntRow = await db.get('SELECT COUNT(*) c FROM thanks WHERE from_id = ? AND created_at > ?', [user.id, dayAgo]);
+    if (cntRow && cntRow.c >= 5) return back + '?' + qs({ err: 'Лимит: не больше 5 благодарностей в сутки.' });
+    const note = (body.get('note') || '').trim().slice(0, 200);
+    await db.run('INSERT INTO thanks (from_id, to_id, note, created_at) VALUES (?, ?, ?, ?)', [user.id, target, note || null, new Date().toISOString()]);
+    await pushNotify(target, 'info', `🙏 ${uname} поблагодарил вас${note ? `: ${note}` : ''}`, `/u/${target}`).catch(() => {});
+    return back + '?' + qs({ ok: 'Спасибо! Благодарность отправлена.' });
+  }
+
   // ===== отмена последнего действия (Зам.+, окно 5 мин) =====
   if (pathName === '/undo') {
     if (acc.rank < LEVELS.deputy) return '/audit?' + qs({ err: 'Недостаточно прав.' });
@@ -4832,6 +5344,17 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await passportsLib.updatePassportFields(rec.target_id, payload.static, { role_id: payload.prevRoleId });
       await hook('syncEffectiveIdentity')(g, rec.target_id);
       await hook('safeUpdateMembersList')(g);
+    } else if (rec.kind === 'dbrow' && payload.table && payload.row && DATA_TABLES[payload.table]) {
+      if (user.id !== OWNER_ID) return '/audit?' + qs({ err: 'Откат правки БД — только havirys.' });
+      try {
+        const cols = Object.keys(payload.row);
+        const exists = await db.get(`SELECT 1 x FROM ${payload.table} WHERE rowid = ?`, [payload.pk]);
+        if (exists) {
+          await db.run(`UPDATE ${payload.table} SET ${cols.map((cn) => `${cn} = ?`).join(', ')} WHERE rowid = ?`, [...cols.map((cn) => payload.row[cn]), payload.pk]);
+        } else {
+          await db.run(`INSERT INTO ${payload.table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`, cols.map((cn) => payload.row[cn]));
+        }
+      } catch (e) { return '/audit?' + qs({ err: 'Не удалось откатить: ' + e.message }); }
     }
     await db.run('UPDATE undo_actions SET done_at = ? WHERE id = ?', [new Date().toISOString(), uid]);
     await webAudit(client, user, 'Отмена действия (сайт)', `${rec.kind} #${uid} для <@${rec.target_id}>`);
@@ -4878,6 +5401,12 @@ function start(client, hooks = {}) {
       }
 
       // ----- POST: все действия записи -----
+      if (path === '/md/preview' && req.method === 'POST') {
+        if (!user) return done(401, { 'Content-Type': 'text/plain' }, '');
+        const b = await readBody(req);
+        return done(200, { 'Content-Type': 'text/html; charset=utf-8' }, mdToHtml((b.get('text') || '').slice(0, 20000)));
+      }
+
       if (req.method === 'POST') {
         if (!rateOk(user ? 'u:' + user.id : 'ip:' + clientIp)) {
           await logDenial(client, user, `${path} (rate limit, ${clientIp})`).catch(() => {});
@@ -4897,12 +5426,20 @@ function start(client, hooks = {}) {
         return html(200, L({ title: siteBrand(), user, level, body: flash + await landingBody(await orgStats()) }));
       }
 
+      if (path.startsWith('/asset/') && req.method === 'GET') {
+        const aid = parseInt(path.slice(7), 10) || 0;
+        const a = await db.get('SELECT mime, data FROM page_assets WHERE id = ?', [aid]).catch(() => null);
+        if (!a || !a.data) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
+        return done(200, { 'Content-Type': a.mime || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' }, a.data);
+      }
+
       if ((path === '/rules' || path === '/about' || path.startsWith('/p/')) && req.method === 'GET') {
         const level = user ? (await accessFor(client, user.id)).level : 'guest';
         const slug = path === '/rules' ? 'rules' : path === '/about' ? 'about' : decodeURIComponent(path.slice(3)).split('/')[0];
         const pg = await db.get('SELECT * FROM site_pages WHERE slug = ?', [slug]).catch(() => null);
-        if (!pg) return html(404, L({ title: 'Страница не найдена', user, level, body: '<h1>Страница не найдена</h1><a class="btn" href="/">На главную</a>' }));
-        return html(200, L({ title: pg.title || slug, user, level, body: flash + `<h1>${esc(pg.title || slug)}</h1><div class="card">${mdToHtml(pg.content || '')}</div>` }));
+        const draftHidden = pg && !pg.published && (!user || user.id !== OWNER_ID);
+        if (!pg || draftHidden) return html(404, L({ title: 'Страница не найдена', user, level, body: '<h1>Страница не найдена</h1><a class="btn" href="/">На главную</a>' }));
+        return html(200, L({ title: pg.title || slug, user, level, body: flash + `${!pg.published ? '<div class="card" style="border-color:var(--warn)"><b>Черновик</b> — виден только вам (havirys).</div>' : ''}<h1>${esc(pg.title || slug)}</h1><div class="card">${mdToHtml(pg.content || '')}</div>` }));
       }
 
       if (path === '/login') {
@@ -4951,9 +5488,16 @@ function start(client, hooks = {}) {
           const svRow = await db.get('SELECT sess_ver FROM web_users WHERE discord_id = ?', [me.id]).catch(() => null);
           const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
           const ua = (req.headers['user-agent'] || '').slice(0, 300);
+          // Новое устройство: этот UA у пользователя раньше не встречался.
+          const seenBefore = await db.get('SELECT 1 x FROM web_logins WHERE discord_id = ? AND ua = ? LIMIT 1', [me.id, ua]).catch(() => null);
           await db.run('INSERT INTO web_logins (discord_id, ip, ua, at) VALUES (?, ?, ?, ?)', [me.id, ip, ua, now]).catch(() => {});
           const sid = crypto.randomBytes(9).toString('base64url');
           await db.run('INSERT INTO web_sessions (sid, discord_id, ip, ua, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)', [sid, me.id, ip, ua, now, now]).catch(() => {});
+          if (!seenBefore) {
+            const short = (ua || 'неизвестный браузер').slice(0, 80);
+            await pushNotify(me.id, 'info', `Вход с нового устройства: ${short}${ip ? ` (IP ${ip})` : ''}. Если это не вы — «Выйти со всех устройств» в разделе «Активные сессии».`, '/me').catch(() => {});
+            await dmTo(client, me.id, `🔐 Новый вход на сайт «${siteBrand()}»\nУстройство: ${short}\nIP: ${ip || '—'}\nВремя: ${new Date().toLocaleString('ru-RU')}\n\nЕсли это не вы — зайдите в «Мой профиль» → «Активные сессии» и нажмите «Выйти со всех устройств».`).catch(() => {});
+          }
           const cookie = `fc_sess=${makeSession({ id: me.id, username: uname, avatar: me.avatar || '', sv: svRow ? (svRow.sess_ver || 0) : 0, sid })}; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`;
           return redirect('/me', { 'Set-Cookie': cookie });
         } catch (err) {
@@ -5035,8 +5579,8 @@ function start(client, hooks = {}) {
         const acc = await accessFor(client, user.id);
         if (acc.rank < LEVELS.hr) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для HR-Менеджера и выше</h1><a class="btn" href="/me">Мой профиль</a>' }));
         let bodyHtml;
-        if (path === '/dashboard') bodyHtml = await dashboardBody(client);
-        else if (path === '/leaderboards') bodyHtml = await leaderboardsBody(client);
+        if (path === '/dashboard') bodyHtml = await dashboardBody(client, u.searchParams.get('days'));
+        else if (path === '/leaderboards') bodyHtml = await leaderboardsBody(client, user.id);
         else if (path === '/calendar') bodyHtml = await calendarBody(client);
         else bodyHtml = await searchBody(client, u.searchParams.get('q'));
         return html(200, L({ title: 'Аналитика', user, level: acc.level, wide: true, body: flash + bodyHtml }));
@@ -5047,6 +5591,13 @@ function start(client, hooks = {}) {
         const acc = await accessFor(client, user.id);
         if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для участников организации</h1><a class="btn" href="/me">Мой профиль</a>' }));
         return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim()) }));
+      }
+
+      if (path === '/tickets' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (acc.rank < LEVELS.hr) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Список тикетов — для HR и выше</h1><a class="btn" href="/me">Мой профиль</a>' }));
+        return html(200, L({ title: 'Тикеты', user, level: acc.level, wide: true, body: flash + await ticketsListBody(client, u.searchParams, user) }));
       }
 
       if (path === '/audit' && req.method === 'GET') {
@@ -5126,6 +5677,16 @@ function start(client, hooks = {}) {
         if (acc.rank < LEVELS.hr) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Нет доступа');
         const sendCsv = (name, text) => done(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${name}"` }, text);
 
+        if (path.startsWith('/export/table/') && path.endsWith('.csv')) {
+          if (user.id !== OWNER_ID) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Только havirys');
+          const tbl = path.slice('/export/table/'.length, -'.csv'.length);
+          if (!DATA_TABLES[tbl]) return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Неизвестная таблица');
+          const rows = await db.all(`SELECT * FROM ${tbl} LIMIT 50000`).catch(() => []);
+          const cols = rows.length ? Object.keys(rows[0]).map((k) => ({ key: k, label: k })) : [{ key: 'empty', label: 'empty' }];
+          await webAuditMeta(client, user, 'Экспорт таблицы CSV (сайт)', `${tbl} (${rows.length} строк)`);
+          return sendCsv(`${tbl}.csv`, toCsv(rows, cols));
+        }
+
         if (path === '/export/participants.csv') {
           const rows = await db.all('SELECT discord_id, discord_tag, name, static, lvl, role_id, joined_at, vacation_until, afk_since FROM participants ORDER BY name');
           for (const r of rows) r.rank = roleName(client, r.role_id);
@@ -5157,7 +5718,7 @@ function start(client, hooks = {}) {
         }
         if (path === '/export/dashboard.html') {
           const dstr = new Date().toISOString().slice(0, 10);
-          const inner = await dashboardBody(client);
+          const inner = await dashboardBody(client, u.searchParams.get('days'));
           const page = `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Дашборд — ${esc(siteBrand())} — ${dstr}</title>
@@ -5168,7 +5729,7 @@ ${inner}
 </div>
 <script>(function(){document.querySelectorAll('button,form,.gcd').forEach(function(e){if(e.classList.contains('gcd'))return;e.style.display='none'});document.querySelectorAll('.gcd').forEach(function(e){e.textContent='—'})})();</script>
 </body></html>`;
-          await webAudit(client, user, 'Скачивание дашборда HTML (сайт)', dstr);
+          await webAuditMeta(client, user, 'Скачивание дашборда HTML (сайт)', dstr);
           return done(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Disposition': `attachment; filename="dashboard-${dstr}.html"` }, page);
         }
         if (path === '/export/db.sqlite') {
@@ -5176,7 +5737,7 @@ ${inner}
           try {
             const fs = require('fs');
             const buf = fs.readFileSync(db.dbPath);
-            await webAudit(client, user, 'Скачивание БД (сайт)', `${buf.length} байт`);
+            await webAuditMeta(client, user, 'Скачивание БД (сайт)', `${buf.length} байт`);
             return done(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="data.db"' }, buf);
           } catch (e) {
             return done(500, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Ошибка: ' + e.message);
@@ -5203,7 +5764,7 @@ ${inner}
               files.push({ name: fn, data: (row && row.content) || '' });
             }
             const zip = zipStore(files);
-            await webAudit(client, user, 'Экспорт архива .zip (сайт)', `${files.length} файлов, ${(zip.length / 1048576).toFixed(2)} МБ`);
+            await webAuditMeta(client, user, 'Экспорт архива .zip (сайт)', `${files.length} файлов, ${(zip.length / 1048576).toFixed(2)} МБ`);
             return done(200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="freelance-archive-${new Date().toISOString().slice(0, 10)}.zip"` }, zip);
           } catch (e) {
             return done(500, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Ошибка: ' + e.message);

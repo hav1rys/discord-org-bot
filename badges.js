@@ -13,6 +13,7 @@ const LABELS = {
   invites15: '👑 15 приглашений',
   month: '🎖️ месяц в организации',
   veteran90: '🛡️ ветеран 90 дней',
+  year1: '🎂 год в организации',
   winner: '🎉 победитель розыгрыша',
   winner3: '🍀 ×3 победитель розыгрыша',
   streak2: '🔥 стрик 2+ недели',
@@ -27,6 +28,7 @@ const ROLE_META = {
   invites15: { name: '👑 15 приглашений', color: 0xe67e22 },
   month: { name: '🎖️ Месяц в организации', color: 0x95a5a6 },
   veteran90: { name: '🛡️ Ветеран 90 дней', color: 0x2c3e50 },
+  year1: { name: '🎂 Год в организации', color: 0xe91e63 },
   winner: { name: '🎉 Победитель розыгрыша', color: 0x9b59b6 },
   winner3: { name: '🍀 ×3 победитель розыгрыша', color: 0x1abc9c },
   streak2: { name: '🔥 Стрик 2+ недели', color: 0xe74c3c },
@@ -84,13 +86,30 @@ async function compute(discordId) {
     invites15: invConfirmed >= 15,
     month: days >= 30,
     veteran90: days >= 90,
+    year1: days >= 365,
     winner: wins >= 1,
     winner3: wins >= 3,
     streak2: streak >= 2,
     streak4: streak >= 4,
   };
   const badges = Object.keys(has).filter((k) => has[k]).map((k) => LABELS[k]);
-  const data = { has, badges, LABELS, streak, fulfilled, wins, invConfirmed, days };
+
+  // Фиксируем момент первого получения каждого бейджа (дата приблизительная —
+  // когда compute впервые увидел бейдж заработанным), отдаём карту awardedAt.
+  const awardedAt = {};
+  try {
+    const rows = await db.all('SELECT badge_key, awarded_at FROM badge_awards WHERE discord_id = ?', [discordId]);
+    for (const r of rows) awardedAt[r.badge_key] = r.awarded_at;
+    const nowIso = new Date().toISOString();
+    for (const k of Object.keys(has)) {
+      if (has[k] && !awardedAt[k]) {
+        awardedAt[k] = nowIso;
+        await db.run('INSERT INTO badge_awards (discord_id, badge_key, awarded_at) VALUES (?, ?, ?)', [discordId, k, nowIso]).catch(() => {});
+      }
+    }
+  } catch (_) { /* таблицы может не быть при первом запуске — не критично */ }
+
+  const data = { has, badges, LABELS, awardedAt, streak, fulfilled, wins, invConfirmed, days };
   _cache.set(discordId, { at: now, data });
   return data;
 }

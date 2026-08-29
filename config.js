@@ -49,6 +49,12 @@ module.exports = {
   SITE_BRAND: 'Freelance Company',
   SITE_DISCORD_INVITE: 'https://discord.gg/aMXaC86Qcq',
 
+  // Онлайн-статус участников на сайте берётся из Discord presence.
+  // Требует привилегированный интент: включить true ЗДЕСЬ и «Presence Intent»
+  // в Developer Portal. Если портал-интент не включён, бот НЕ запустится —
+  // поэтому по умолчанию выключено.
+  ENABLE_PRESENCE: false,
+
   // Бот сам создаёт Discord-роли под бейджи достижений и выдаёт/снимает их
   // (роли создаются лениво — когда первый участник заработал бейдж, id
   // сохраняется в таблицу badge_roles). false — полностью отключить.

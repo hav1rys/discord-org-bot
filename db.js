@@ -75,6 +75,9 @@ const SCHEMA = {
       afk_since: 'TEXT',
       profile_thread_id: 'TEXT',
       about: 'TEXT', // «Обо мне» — короткий текст участника для публичного профиля
+      about_private: 'INTEGER DEFAULT 0', // 1 — «Обо мне» видно только себе и HR+
+      contracts_private: 'INTEGER DEFAULT 0', // 1 — контракты/история видны только себе и HR+
+      last_anniv_year: 'INTEGER', // год, за который уже поздравили с годовщиной вступления
     },
     indexes: [['discord_id'], ['static']],
   },
@@ -600,6 +603,7 @@ const SCHEMA = {
       created_at: 'TEXT',
       last_seen: 'TEXT',
       revoked_at: 'TEXT',
+      label: 'TEXT', // имя устройства, заданное пользователем («рабочий ПК»)
     },
     indexes: [['discord_id']],
   },
@@ -621,6 +625,7 @@ const SCHEMA = {
       title: 'TEXT',
       content: 'TEXT',
       nav: 'INTEGER DEFAULT 0', // 1 — показывать ссылку в шапке
+      published: 'INTEGER DEFAULT 1', // 0 — черновик, виден только havirys
       updated_at: 'TEXT',
     },
   },
@@ -748,6 +753,8 @@ const SCHEMA = {
       status: "TEXT DEFAULT 'open'", // open | archived
       rating: 'INTEGER', // 1 = 👍, 0 = 👎, null — не оценивали
       rated_at: 'TEXT',
+      priority: 'TEXT', // low | normal | high (null = normal)
+      close_reason: 'TEXT', // причина закрытия (свободный текст / шаблон)
       assigned_to: 'TEXT', // кто из руководства взял тикет на себя
       assigned_at: 'TEXT',
       created_at: 'TEXT',
@@ -781,6 +788,80 @@ const SCHEMA = {
       at: 'TEXT',
     },
     indexes: [['entry_id']],
+  },
+
+  // Момент, когда участник впервые «заработал» бейдж (фиксируется badges.compute
+  // при первом обнаружении — дата приблизительная, но стабильная).
+  badge_awards: {
+    columns: {
+      discord_id: 'TEXT',
+      badge_key: 'TEXT',
+      awarded_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  // Готовые наборы для розыгрышей (кнопка «создать из шаблона»).
+  giveaway_templates: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      name: 'TEXT',
+      prize: 'TEXT',
+      winners_count: 'INTEGER',
+      duration: 'TEXT',
+      required_role_id: 'TEXT',
+      min_role_id: 'TEXT',
+      prize_tiers: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+
+  // Шаблоны причин закрытия тикета (HR+ выбирает при закрытии на сайте).
+  ticket_close_reasons: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      text: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+
+  // История версий редактируемых страниц (/rules, /about, /p/*) — для отката.
+  site_page_versions: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      slug: 'TEXT',
+      title: 'TEXT',
+      content: 'TEXT',
+      nav: 'INTEGER DEFAULT 0',
+      saved_at: 'TEXT',
+      saved_by: 'TEXT',
+    },
+    indexes: [['slug']],
+  },
+
+  // Благодарности между участниками (кнопка «поблагодарить» на профиле).
+  thanks: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      from_id: 'TEXT',
+      to_id: 'TEXT',
+      note: 'TEXT',
+      created_at: 'TEXT',
+    },
+    indexes: [['to_id'], ['from_id']],
+  },
+
+  // Загруженные картинки для доп. страниц. Отдаются по /asset/<id>.
+  page_assets: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      filename: 'TEXT',
+      mime: 'TEXT',
+      data: 'BLOB',
+      size: 'INTEGER',
+      uploaded_by: 'TEXT',
+      uploaded_at: 'TEXT',
+    },
   },
 };
 

@@ -61,6 +61,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
+    ...(config.ENABLE_PRESENCE ? [GatewayIntentBits.GuildPresences] : []),
   ],
   partials: [Partials.Channel, Partials.GuildMember],
 });
@@ -1065,6 +1066,26 @@ async function checkVacationReminders(guild) {
       'INSERT INTO vacation_reminders_sent (discord_id, static, until, sent_at) VALUES (?, ?, ?, ?)',
       [c.discord_id, c.static, c.vacation_until, new Date().toISOString()],
     );
+  }
+}
+
+// Раз в час: поздравляет участников с годовщиной вступления (ровно N полных
+// лет сегодня), одно поздравление за год — флаг participants.last_anniv_year.
+async function checkAnniversaries(guild) {
+  const now = new Date();
+  const rows = await db.all('SELECT discord_id, name, joined_at, last_anniv_year FROM participants WHERE joined_at IS NOT NULL').catch(() => []);
+  for (const p of rows) {
+    const j = new Date(p.joined_at);
+    if (Number.isNaN(j.getTime())) continue;
+    let years = now.getFullYear() - j.getFullYear();
+    const passed = (now.getMonth() > j.getMonth()) || (now.getMonth() === j.getMonth() && now.getDate() >= j.getDate());
+    if (!passed) years -= 1;
+    if (years < 1) continue;
+    if (now.getMonth() !== j.getMonth() || now.getDate() !== j.getDate()) continue; // годовщина именно сегодня
+    if ((p.last_anniv_year || 0) >= years) continue;
+    await db.run('UPDATE participants SET last_anniv_year = ? WHERE discord_id = ?', [years, p.discord_id]).catch(() => {});
+    await dmUser(guild, p.discord_id, `🎂 Поздравляем! Сегодня ${years === 1 ? 'год' : years + ' года/лет'} с момента вступления в организацию «${config.SITE_BRAND}». Спасибо, что с нами!`).catch(() => {});
+    await notify(p.discord_id, 'info', `🎂 ${years} ${years === 1 ? 'год' : 'года/лет'} в организации — поздравляем!`, '/me').catch(() => {});
   }
 }
 
@@ -9441,6 +9462,7 @@ client.once('clientReady', async () => {
         await checkStuckContracts(guild);
         await checkExpiredVacations(guild);
         await checkExpiredBlacklist(guild);
+        await checkAnniversaries(guild);
         await runWeeklyRankAdjustment(guild);
         await checkRecurringGiveaways(guild);
         await badges.syncAllRoles(guild);
