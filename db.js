@@ -78,6 +78,10 @@ const SCHEMA = {
       about_private: 'INTEGER DEFAULT 0', // 1 — «Обо мне» видно только себе и HR+
       contracts_private: 'INTEGER DEFAULT 0', // 1 — контракты/история видны только себе и HR+
       last_anniv_year: 'INTEGER', // год, за который уже поздравили с годовщиной вступления
+      last_weekly_digest: 'TEXT', // метка недели (YYYY-Www), за которую уже отправлен личный отчёт
+      pinned_badges: 'TEXT', // закреплённые бейджи участника (ключи через запятую)
+      frozen: 'INTEGER DEFAULT 0', // 1 — доступ к сайту заморожен
+      frozen_reason: 'TEXT',
     },
     indexes: [['discord_id'], ['static']],
   },
@@ -640,8 +644,27 @@ const SCHEMA = {
       link: 'TEXT',
       created_at: 'TEXT',
       read_at: 'TEXT',
+      snooze_until: 'TEXT', // отложено до этого времени — скрыто из колокольчика
     },
     indexes: [['discord_id']],
+  },
+
+  // Настройки колокольчика: какие типы уведомлений участник отключил.
+  notif_prefs: {
+    columns: {
+      discord_id: 'TEXT PRIMARY KEY',
+      muted: 'TEXT', // список kind через запятую
+    },
+  },
+
+  // Готовые шаблоны для доп. страниц сайта.
+  page_templates: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      name: 'TEXT',
+      content: 'TEXT',
+      created_at: 'TEXT',
+    },
   },
 
   // Приватные заметки руководства об участнике (видны HR+ на профиле).
@@ -755,6 +778,7 @@ const SCHEMA = {
       rated_at: 'TEXT',
       priority: 'TEXT', // low | normal | high (null = normal)
       close_reason: 'TEXT', // причина закрытия (свободный текст / шаблон)
+      tags: 'TEXT', // метки через запятую
       assigned_to: 'TEXT', // кто из руководства взял тикет на себя
       assigned_at: 'TEXT',
       created_at: 'TEXT',
@@ -851,6 +875,18 @@ const SCHEMA = {
     indexes: [['to_id'], ['from_id']],
   },
 
+  // Гостевая книга профиля — записи участников на «стене» другого участника.
+  guestbook: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      profile_id: 'TEXT', // чей профиль
+      author_id: 'TEXT',
+      text: 'TEXT',
+      created_at: 'TEXT',
+    },
+    indexes: [['profile_id']],
+  },
+
   // Загруженные картинки для доп. страниц. Отдаются по /asset/<id>.
   page_assets: {
     columns: {
@@ -862,6 +898,22 @@ const SCHEMA = {
       uploaded_by: 'TEXT',
       uploaded_at: 'TEXT',
     },
+  },
+
+  // Скриншоты контрактов, загруженные участником через сайт. Отдаются
+  // по /cimg/<id> (только автору контракта и HR+).
+  contract_uploads: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      contract_id: 'INTEGER',
+      owner_id: 'TEXT',
+      slot: 'TEXT', // taken | result
+      mime: 'TEXT',
+      data: 'BLOB',
+      size: 'INTEGER',
+      created_at: 'TEXT',
+    },
+    indexes: [['contract_id']],
   },
 };
 

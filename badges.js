@@ -75,8 +75,28 @@ async function compute(discordId) {
       if (t >= ranges[w][0] && t <= ranges[w][1]) { perWeek[w]++; break; }
     }
   }
+  // Недели, которые участник в основном (>=4 дней) провёл в одобренном отпуске —
+  // не рвут стрик и не считаются: серия «перепрыгивает» их.
+  const vacWins = await db.all(
+    "SELECT created_at, until FROM vacations WHERE discord_id = ? AND status = 'accepted' AND until IS NOT NULL",
+    [discordId],
+  ).catch(() => []);
+  const onVacationWeek = (ws, we) => {
+    for (const v of vacWins) {
+      const vs = new Date(v.created_at).getTime();
+      const ve = new Date(v.until).getTime();
+      if (Number.isNaN(vs) || Number.isNaN(ve)) continue;
+      const overlap = Math.min(we, ve) - Math.max(ws, vs);
+      if (overlap >= 4 * 864e5) return true;
+    }
+    return false;
+  };
   let streak = 0;
-  for (let w = 0; w < 26; w++) { if (perWeek[w] >= norm) streak++; else break; }
+  for (let w = 0; w < 26; w++) {
+    if (perWeek[w] >= norm) { streak++; continue; }
+    if (onVacationWeek(ranges[w][0], ranges[w][1])) continue; // пропускаем отпускную неделю
+    break;
+  }
 
   const has = {
     contracts10: fulfilled >= 10,

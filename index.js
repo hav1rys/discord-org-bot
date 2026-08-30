@@ -52,7 +52,7 @@ const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
 const badges = require('./badges');
-const { notify } = require('./notify');
+const { notify, isMuted } = require('./notify');
 
 const client = new Client({
   intents: [
@@ -938,6 +938,43 @@ async function sendWeeklyDigest(guild) {
 
   await dmUser(guild, config.OWNER_USER_ID, { embeds: [embed] });
   await db.setSetting('weekly_digest_last_sent', new Date().toISOString());
+}
+
+// Личный еженедельный отчёт каждому участнику в ЛС: контракты, приглашения,
+// стрик за прошлую полную неделю. Один раз в неделю (метка last_weekly_digest).
+async function sendPersonalWeeklyDigests(guild) {
+  const lastSent = await db.getSetting('personal_digest_last_sent');
+  if (lastSent && Date.now() - new Date(lastSent).getTime() < 6.5 * 24 * 60 * 60 * 1000) return;
+  const range = contracts.getWeekRange(1); // прошлая полная неделя
+  const weekTag = range.start.toISOString().slice(0, 10);
+  const label = contracts.formatWeekLabel(range);
+  const parts = await db.all('SELECT discord_id, name, last_weekly_digest FROM participants').catch(() => []);
+  let sent = 0;
+  for (const p of parts) {
+    if (p.last_weekly_digest === weekTag) continue;
+    if (await isMuted(p.discord_id, 'weekly_digest')) continue; // участник отключил отчёт
+    try {
+      const w = await contracts.getUserWeekStats(p.discord_id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
+      const inv = await db.get(
+        "SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed' AND joined_at BETWEEN ? AND ?",
+        [p.discord_id, range.start.toISOString(), range.end.toISOString()],
+      ).catch(() => null);
+      let streak = 0;
+      try { streak = (await badges.compute(p.discord_id)).streak || 0; } catch (_) {}
+      const f = w.fulfilled.length; const uf = w.unfulfilled.length;
+      await dmUser(guild, p.discord_id,
+        `📊 Ваш отчёт за ${label}\n`
+        + `Контракты: ✅ ${f} / ❌ ${uf}\n`
+        + `Подтверждённых приглашений: ${inv ? inv.c : 0}\n`
+        + `Недельный стрик: ${streak} ${streak === 1 ? 'неделя' : 'нед.'}${streak >= 2 ? ' 🔥' : ''}\n`
+        + `${f === 0 && uf === 0 ? 'На прошлой неделе контрактов не было — самое время начать!' : 'Так держать!'}`);
+      await db.run('UPDATE participants SET last_weekly_digest = ? WHERE discord_id = ?', [weekTag, p.discord_id]).catch(() => {});
+      sent++;
+      await new Promise((r) => setTimeout(r, 600));
+    } catch (_) { /* участник закрыл ЛС и т.п. */ }
+  }
+  await db.setSetting('personal_digest_last_sent', new Date().toISOString());
+  if (sent) console.log(`Личный еженедельный отчёт отправлен ${sent} участникам.`);
 }
 
 async function checkStuckContracts(guild) {
@@ -9468,6 +9505,7 @@ client.once('clientReady', async () => {
         await badges.syncAllRoles(guild);
         await sendDailyDigest(guild);
         await sendWeeklyDigest(guild);
+        await sendPersonalWeeklyDigests(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);
