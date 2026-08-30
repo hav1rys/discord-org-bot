@@ -1438,6 +1438,16 @@ async function createProfileThread(guild, discordId, name, staticValue) {
       topic: `Профиль ${name} (№ ${staticValue}) — сюда присылаются скриншоты контрактов`,
     });
 
+    // Памятка-картинка новичку: PNG доски, помеченной onboarding=1 (см. сайт /boards).
+    const welcomeFiles = [];
+    try {
+      const ob = await db.get("SELECT image_file FROM boards WHERE onboarding = 1 AND image_file IS NOT NULL AND image_file != '' LIMIT 1");
+      if (ob && ob.image_file) {
+        const p = path.join(db.dataDir || path.join(process.cwd(), 'data'), 'uploads', path.basename(ob.image_file));
+        if (fs.existsSync(p)) welcomeFiles.push(new AttachmentBuilder(fs.readFileSync(p), { name: 'pamyatka.png' }));
+      }
+    } catch (_) {}
+
     await channel.send({
       content:
         `<@${discordId}> — 📸 Профиль **${name}** (№ ${staticValue}).\n\n` +
@@ -1446,6 +1456,7 @@ async function createProfileThread(guild, discordId, name, staticValue) {
         `2️⃣ когда контракт **выполнен или не выполнен**\n\n` +
         `Можно прислать оба скриншота одним сообщением, можно — двумя сообщениями подряд (по одному). ` +
         `После того как оба скриншота собраны, бот сам создаст карточку контракта на проверку руководству.`,
+      files: welcomeFiles,
       components: [row(new ButtonBuilder().setCustomId(`my_profile:${discordId}`).setLabel('👤 Мой профиль').setStyle(ButtonStyle.Secondary))],
     });
 

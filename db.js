@@ -1032,10 +1032,13 @@ const SCHEMA = {
   boards: {
     columns: {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      slug: 'TEXT', // задаётся у авто-создаваемых досок для идемпотентного сидинга
       title: 'TEXT',
       kind: "TEXT DEFAULT 'freeform'", // freeform | orgchart
       data: 'TEXT',
-      visibility: "TEXT DEFAULT 'owner'", // owner | deputy | members
+      visibility: "TEXT DEFAULT 'owner'", // legacy; доступ теперь через board_grants
+      onboarding: 'INTEGER DEFAULT 0', // 1 — PNG этой доски шлётся при создании профиля
+      image_file: 'TEXT', // имя PNG-снимка в data/uploads/ (обновляется при сохранении)
       archived: 'INTEGER DEFAULT 0',
       version: 'INTEGER DEFAULT 1',
       created_by: 'TEXT',
@@ -1043,6 +1046,7 @@ const SCHEMA = {
       updated_by: 'TEXT',
       updated_at: 'TEXT',
     },
+    indexes: [['slug']],
   },
   // История версий доски — снимок data при каждом сохранении (храним 50).
   board_versions: {
@@ -1053,6 +1057,20 @@ const SCHEMA = {
       data: 'TEXT',
       saved_by: 'TEXT',
       saved_at: 'TEXT',
+    },
+    indexes: [['board_id']],
+  },
+  // Доступ к доске сверх «всегда havirys»: subject_type level|user,
+  // subject_id — имя уровня (member/hr/deputy/owner) или discord_id; mode view|edit.
+  board_grants: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      board_id: 'INTEGER',
+      subject_type: "TEXT DEFAULT 'level'", // level | user
+      subject_id: 'TEXT',
+      mode: "TEXT DEFAULT 'view'", // view | edit
+      granted_by: 'TEXT',
+      granted_at: 'TEXT',
     },
     indexes: [['board_id']],
   },

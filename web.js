@@ -925,7 +925,7 @@ function navItems(level, panelGrant) {
     if (panelGrant && LEVELS[level] < LEVELS.hr && !items.some((h) => h.includes('href="/panel"'))) {
       items.push('<a href="/panel">Панель</a>');
     }
-    if (LEVELS[level] >= LEVELS.owner && !items.some((h) => h.includes('href="/boards"'))) {
+    if (LEVELS[level] >= LEVELS.member && !items.some((h) => h.includes('href="/boards"'))) {
       items.push('<a href="/boards">Доски</a>');
     }
     return items;
@@ -942,7 +942,7 @@ function navItems(level, panelGrant) {
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel?tab=apps">Заявки</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel?tab=contracts_check">Контракты</a>');
   if (LEVELS[level] >= LEVELS.hr || panelGrant) nav.push('<a href="/panel">Панель</a>');
-  if (LEVELS[level] >= LEVELS.owner) nav.push('<a href="/boards">Доски</a>');
+  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/boards">Доски</a>');
   for (const pg of (SITE._navPages || [])) {
     const slug = (pg.slug || '').trim();
     if (!slug) continue;
@@ -4701,26 +4701,28 @@ function boardSvg(model, opts) {
   </svg>`;
 }
 
-function boardsListBody(rows, user, showArch) {
+function boardsListBody(rows, user, showArch, bacc) {
+  const canCreate = user && (user.id === OWNER_ID || (bacc && bacc.rank >= LEVELS.deputy));
   const cards = rows.map((b) => {
     const kindL = b.kind === 'orgchart' ? '🌳 оргструктура' : '🖊️ свободная';
+    const ed = b._mode === 'edit';
     return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0">
       <div>
-        <div style="font-weight:700;font-size:15px">${esc(b.title || 'Без названия')}</div>
-        <div class="mini">${kindL} · v${b.version || 1} · изменено ${fmt(b.updated_at)}</div>
+        <div style="font-weight:700;font-size:15px">${esc(b.title || 'Без названия')}${b.onboarding ? ' <span class="badge">🖼 в профиль новичку</span>' : ''}</div>
+        <div class="mini">${kindL} · v${b.version || 1} · изменено ${fmt(b.updated_at)} · ${ed ? '✏️ можно редактировать' : '👁 только просмотр'}</div>
       </div>
       <div class="bar" style="margin:0">
-        ${showArch ? '' : `<a class="btn sm" href="/board/${b.id}/edit">Открыть</a>
+        ${showArch ? `<form method="POST" action="/board/${b.id}/unarchive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">Вернуть из архива</button></form>` : `
+        ${ed ? `<a class="btn sm" href="/board/${b.id}/edit">Открыть</a>` : ''}
         <a class="btn ghost sm" href="/board/${b.id}">Просмотр</a>
         <a class="btn ghost sm" href="/board/${b.id}/versions">Версии</a>
-        <a class="btn ghost sm" href="/board/${b.id}/settings">Настройки</a>`}
-        ${showArch ? `<form method="POST" action="/board/${b.id}/unarchive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">Вернуть из архива</button></form>` : ''}
+        ${ed ? `<a class="btn ghost sm" href="/board/${b.id}/settings">Настройки</a>` : ''}`}
       </div>
     </div>`;
   }).join('');
   return `<h1>Доски</h1>
-  <p class="muted">Визуальные схемы и оргструктуры. Доступ — только у вас (havirys).</p>
-  ${showArch ? '' : `<div class="card"><h2>Новая доска</h2>
+  <p class="muted">Визуальные схемы и оргструктуры. havirys видит все и всё может; остальным доска открывается по гранту (просмотр / редактирование).</p>
+  ${!showArch && canCreate ? `<div class="card"><h2>Новая доска</h2>
     <form method="POST" action="/board/create" class="form">${csrfField(user)}
       <label>Название<input name="title" maxlength="80" placeholder="Оргструктура организации" required></label>
       <label>Тип
@@ -4731,24 +4733,25 @@ function boardsListBody(rows, user, showArch) {
       </label>
       <button class="btn" type="submit">Создать</button>
     </form>
-  </div>`}
-  ${cards || `<div class="card muted">${showArch ? 'В архиве пусто.' : 'Пока нет ни одной доски.'}</div>`}
-  <p class="mini">${showArch ? '<a href="/boards">← активные доски</a>' : '<a href="/boards?arch=1">Архив</a>'}</p>`;
+  </div>` : ''}
+  ${cards || `<div class="card muted">${showArch ? 'В архиве пусто.' : 'Пока нет доступных досок.'}</div>`}
+  ${user && user.id === OWNER_ID ? `<p class="mini">${showArch ? '<a href="/boards">← активные доски</a>' : '<a href="/boards?arch=1">Архив</a>'}</p>` : ''}`;
 }
 
-function boardViewBody(board, user) {
+function boardViewBody(board, user, canEdit) {
   const model = boardParse(board.data);
   const svg = boardSvg(model, { layout: board.kind === 'orgchart' });
   return `<div class="bar" style="justify-content:space-between">
       <h1 style="margin:0">${esc(board.title || 'Доска')}</h1>
       <div class="bar" style="margin:0">
-        <a class="btn sm" href="/board/${board.id}/edit">Редактировать</a>
+        ${canEdit ? `<a class="btn sm" href="/board/${board.id}/edit">Редактировать</a>` : ''}
         <a class="btn ghost sm" href="/board/${board.id}/export.json">Экспорт JSON</a>
         <a class="btn ghost sm" href="/boards">← к списку</a>
       </div>
     </div>
+    ${board.onboarding ? '<div class="card" style="border-color:var(--accent2)"><b>🖼 Памятка новичку.</b> PNG этой доски прикладывается к сообщению при создании профиля. Обнови PNG кнопкой «Сохранить» в редакторе.</div>' : ''}
     <div class="card" style="padding:0;overflow:hidden"><div id="bview" class="bview">${svg}</div></div>
-    <p class="mini">Колесо — масштаб, перетаскивание — панорама.</p>
+    <p class="mini">Колесо — масштаб, перетаскивание — панорама.${board.image_file ? ` · <a href="/board/${board.id}/image.png" target="_blank" rel="noopener">PNG-снимок</a>` : ''}</p>
     <script>${BOARD_VIEW_JS}</script>`;
 }
 
@@ -4794,7 +4797,13 @@ function boardEditBody(board, user) {
     <script src="/board-editor.js"></script>`;
 }
 
-function boardSettingsBody(board, user) {
+const BOARD_LEVEL_LABELS = { member: 'Участники (member+)', hr: 'HR-менеджеры (hr+)', deputy: 'Заместители (deputy+)', owner: 'Владельцы (owner)' };
+function boardSettingsBody(board, user, grants, isOwner) {
+  const grRows = (grants || []).map((g) => {
+    const who = g.subject_type === 'user' ? ('участник ' + esc(g.subject_id)) : esc(BOARD_LEVEL_LABELS[g.subject_id] || g.subject_id);
+    return `<tr><td>${who}</td><td>${g.mode === 'edit' ? '✏️ редактирование' : '👁 просмотр'}</td>
+      <td><form method="POST" action="/board/${board.id}/grant_del" style="display:inline">${csrfField(user)}<input type="hidden" name="grant_id" value="${g.id}"><button class="btn ghost sm" type="submit">убрать</button></form></td></tr>`;
+  }).join('');
   return `<h1>Настройки доски</h1>
   <div class="card">
     <form method="POST" action="/board/${board.id}/settings" class="form">${csrfField(user)}
@@ -4806,28 +4815,246 @@ function boardSettingsBody(board, user) {
         </select>
       </label>
       <p class="mini">В режиме «оргструктура» позиции блоков считаются автоматически по полю «Подчинён»; вручную нарисованные стрелки не показываются.</p>
+      <label class="chk"><input type="checkbox" name="onboarding" value="1"${board.onboarding ? ' checked' : ''}> Отправлять PNG этой доски новичку при создании профиля</label>
+      <p class="mini">Такой может быть только одна доска. PNG берётся из последнего сохранения в редакторе — открой доску, поправь, нажми «Сохранить».</p>
       <button class="btn" type="submit">Сохранить</button>
     </form>
   </div>
+  ${isOwner ? `<div class="card">
+    <h2>Доступ к доске</h2>
+    <p class="mini">havirys всегда имеет полный доступ. Ниже — кому ещё открыта доска.</p>
+    <div class="tablewrap"><table><tr><th>Кому</th><th>Режим</th><th></th></tr>${grRows || '<tr><td colspan="3">Только havirys.</td></tr>'}</table></div>
+    <form method="POST" action="/board/${board.id}/grant_add" class="form" style="margin-top:12px">${csrfField(user)}
+      <div class="bar">
+        <select name="subject_type" onchange="var f=this.form;f.querySelector('[data-w=level]').style.display=this.value==='user'?'none':'';f.querySelector('[data-w=user]').style.display=this.value==='user'?'':'none';">
+          <option value="level">Уровень доступа</option>
+          <option value="user">Конкретный участник</option>
+        </select>
+        <span data-w="level"><select name="subject_level">
+          <option value="member">Участники (member+)</option>
+          <option value="hr">HR-менеджеры (hr+)</option>
+          <option value="deputy">Заместители (deputy+)</option>
+          <option value="owner">Владельцы (owner)</option>
+        </select></span>
+        <span data-w="user" style="display:none"><input name="subject_user" maxlength="25" inputmode="numeric" placeholder="Discord ID участника"></span>
+        <select name="mode"><option value="view">просмотр</option><option value="edit">редактирование</option></select>
+        <button class="btn sm" type="submit">Дать доступ</button>
+      </div>
+    </form>
+  </div>` : ''}
   <div class="card"><div class="bar" style="margin:0">
     <a class="btn ghost sm" href="/board/${board.id}/edit">← в редактор</a>
     <form method="POST" action="/board/${board.id}/archive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">В архив</button></form>
-    <form method="POST" action="/board/${board.id}/delete" style="display:inline" onsubmit="return confirm('Удалить доску без возможности восстановления?')">${csrfField(user)}<button class="btn ghost sm" type="submit" style="color:var(--bad)">Удалить</button></form>
+    ${isOwner ? `<form method="POST" action="/board/${board.id}/delete" style="display:inline" onsubmit="return confirm('Удалить доску без возможности восстановления?')">${csrfField(user)}<button class="btn ghost sm" type="submit" style="color:var(--bad)">Удалить</button></form>` : ''}
   </div></div>`;
 }
 
-function boardVersionsBody(board, vs, user) {
+function boardVersionsBody(board, vs, user, canEdit) {
   const rows = vs.map((v) => `<tr>
     <td>v${v.version}</td>
     <td class="muted">${fmt(v.saved_at)}</td>
-    <td><form method="POST" action="/board/${board.id}/restore" style="display:inline" onsubmit="return confirm('Восстановить v${v.version}? Текущее состояние станет новой версией.')">${csrfField(user)}<input type="hidden" name="version_id" value="${v.id}"><button class="btn ghost sm" type="submit">Восстановить</button></form></td>
+    <td>${canEdit ? `<form method="POST" action="/board/${board.id}/restore" style="display:inline" onsubmit="return confirm('Восстановить v${v.version}? Текущее состояние станет новой версией.')">${csrfField(user)}<input type="hidden" name="version_id" value="${v.id}"><button class="btn ghost sm" type="submit">Восстановить</button></form>` : '—'}</td>
   </tr>`).join('');
   return `<h1>Версии — ${esc(board.title || 'Доска')}</h1>
-  <p><a href="/board/${board.id}/edit">← в редактор</a></p>
+  <p><a href="/board/${board.id}${canEdit ? '/edit' : ''}">← ${canEdit ? 'в редактор' : 'к доске'}</a></p>
   <div class="card"><div class="tablewrap"><table>
     <tr><th>Версия</th><th>Сохранена</th><th></th></tr>
     ${rows || '<tr><td colspan="3">Пока одна версия.</td></tr>'}
   </table></div></div>`;
+}
+
+// Доступ пользователя к доске: 'edit' | 'view' | null. havirys — всегда 'edit'.
+async function boardAccess(client, user, board) {
+  if (!user || !board) return null;
+  if (user.id === OWNER_ID) return 'edit';
+  const grants = await db.all('SELECT subject_type, subject_id, mode FROM board_grants WHERE board_id = ?', [board.id]).catch(() => []);
+  if (!grants.length) return null;
+  const acc = await accessFor(client, user.id).catch(() => ({ level: 'guest' }));
+  let best = null;
+  for (const g of grants) {
+    let hit = false;
+    if (g.subject_type === 'user') {
+      hit = g.subject_id === user.id
+        || (user.localId && g.subject_id === user.localId)
+        || (user.oauthDiscordId && g.subject_id === user.oauthDiscordId);
+    } else {
+      hit = (LEVELS[acc.level] || 0) >= (LEVELS[g.subject_id] || 99);
+    }
+    if (hit) { if (g.mode === 'edit') return 'edit'; best = 'view'; }
+  }
+  return best;
+}
+
+// ---- Стандартные доски: создаются один раз при старте (идемпотентно по slug) ----
+// Каждый узел: [x, y, 'текст', w?, h?]. edges (необязательно): [[fromIdx, toIdx], ...].
+const BOARD_SEEDS = [
+  {
+    slug: 'site-overview', title: 'Как устроен сайт', kind: 'freeform',
+    grants: [['level', 'member', 'view']],
+    nodes: [
+      [30, 20, 'САЙТ ОРГАНИЗАЦИИ\nВход: через Discord или логин + пароль.\nПрава берутся от привязанного паспорта.', 340, 96],
+      [30, 150, 'Мой профиль — /me\nПаспорт, смена имени, взятые контракты,\nотпуск, тикеты, заявка в HR, экспорт данных,\nколокольчик уведомлений.  Доступ: участник', 340, 118],
+      [30, 300, 'Участники — /people\nСписок, поиск, карточки участников,\nблагодарности и «стена».  Доступ: участник', 340, 100],
+      [30, 430, 'Розыгрыши — /giveaways\nУчастие в розыгрышах, история побед.\nДоступ: участник', 340, 92],
+      [400, 150, 'FAQ / Гайды — /faq\nСправочник и поиск по гайдам.  Доступ: все', 340, 76],
+      [400, 250, 'Правила — /text/rules\nСвод правил, агитация.  Доступ: участник', 340, 76],
+      [400, 350, 'Команды — /commands\nСписок команд бота по тирам доступа.\nДоступ: участник', 340, 88],
+      [400, 460, 'Тикеты — /tickets\nОбращения в поддержку.  Доступ: HR+', 340, 76],
+      [770, 150, 'Дашборд — /dashboard\nСтатистика организации, здоровье системы,\nграфики.  Доступ: HR+', 340, 92],
+      [770, 270, 'Панель — /panel\nУправление: заявки, проверка контрактов,\nнастройки.  Доступ: HR+ или по гранту', 340, 92],
+      [770, 400, 'Уровни доступа (по возрастанию):\nгость → участник → HR → заместитель →\nвладелец → havirys', 340, 96],
+    ],
+  },
+  {
+    slug: 'panel-overview', title: 'Панель — вкладки и действия', kind: 'freeform',
+    grants: [['level', 'hr', 'view']],
+    nodes: [
+      [30, 20, 'ПАНЕЛЬ  /panel\nВкладки видны по уровню доступа\nили по точечному гранту (havirys выдаёт).', 340, 96],
+      [30, 150, 'Заявки  (?tab=apps)\nПринять / отклонить, шаблоны причин,\nкомментарии (видны и в Discord),\nмассовое отклонение, добавить вручную.  HR+', 340, 118],
+      [30, 300, 'Контракты — проверка  (?tab=contracts_check)\n✅ выполнен  ❌ невыполнен  🚫 не контракт.\nВидны оба скриншота.  HR+', 340, 104],
+      [30, 435, 'Розыгрыши\nСоздать разовый и повторяющийся,\nвыбор победителей, веса за контракты.  HR+', 340, 96],
+      [400, 150, 'Формы\nКонструктор форм, приём и разбор заявок\nпо ним.  HR+', 340, 88],
+      [400, 250, 'Доступы к панели  (grants)\nВыдать вкладки роли или человеку,\nсрок действия, пресеты.  Только havirys', 340, 96],
+      [400, 360, 'Права команд  (perms)\nТир каждой команды бота, синхронизация\nвидимости в Discord.  Только havirys', 340, 96],
+      [770, 150, 'Аккаунты  (accounts)\nЛокальные логины, привязка к паспорту,\nсброс пароля.  Только havirys', 340, 96],
+      [770, 265, 'Редактор БД  (data)\nПрямое редактирование любых таблиц,\nоткат правок из аудита.  Только havirys', 340, 96],
+      [770, 380, 'Настройки + Оформление\nПереключатели функций, автобэкап, ключи;\nбренд, тексты, цвета, пресеты темы.  Только havirys', 340, 100],
+    ],
+  },
+  {
+    slug: 'role-hr', title: 'HR-менеджер — что может', kind: 'freeform',
+    grants: [['level', 'hr', 'view']],
+    nodes: [
+      [30, 20, 'HR-МЕНЕДЖЕР  (уровень hr)', 360, 56],
+      [30, 110, 'Заявки на вступление: принимать, отклонять\nс шаблоном причины, комментировать,\nдобавлять участников вручную.', 360, 100],
+      [30, 235, 'Контракты: проверять скриншоты —\nзасчитать / не засчитать / «не контракт».', 360, 84],
+      [30, 345, 'Тикеты: вести и закрывать обращения,\nшаблоны ответов, транскрипт.', 360, 84],
+      [30, 450, 'Рассматривать: заявки в HR, изменение данных,\nдобавление паспорта, отпуска, апелляции,\nкодовые слова (возврат денег).', 360, 100],
+      [430, 110, 'Просмотр: дашборд, статистика,\nсписок участников и их профили.', 360, 84],
+      [430, 220, 'НЕ может: редактор БД, доступы к панели,\nправа команд, аккаунты, оформление,\nнастройки — это только havirys.', 360, 100],
+    ],
+  },
+  {
+    slug: 'role-deputy', title: 'Заместитель — что может', kind: 'freeform',
+    grants: [['level', 'deputy', 'view']],
+    nodes: [
+      [30, 20, 'ЗАМЕСТИТЕЛЬ  (уровень deputy)', 360, 56],
+      [30, 110, 'Всё, что может HR-менеджер, плюс пункты ниже.', 360, 60],
+      [30, 195, 'Массовые действия в /people:\nвыдать отпуск выбранным, ЛС выбранным,\nпересчёт рангов организации.', 360, 100],
+      [30, 320, 'Создавать доски; редактировать те,\nна которые выдан грант «редактирование».', 360, 84],
+      [30, 425, 'Расширенные вкладки панели\n(по умолчанию или по гранту).', 360, 84],
+      [430, 110, 'НЕ может: всё, что помечено\n«только havirys».', 360, 76],
+    ],
+  },
+  {
+    slug: 'role-owner', title: 'Владелец (роль) — что может', kind: 'freeform',
+    grants: [['level', 'owner', 'view']],
+    nodes: [
+      [30, 20, 'ВЛАДЕЛЕЦ — роль ROLE_OWNER  (уровень owner)', 380, 56],
+      [30, 110, 'Всё, что может заместитель, плюс:', 380, 56],
+      [30, 190, 'Полный доступ ко всем вкладкам панели\nдля повседневного управления.', 380, 80],
+      [30, 290, 'Видит черновики дополнительных страниц.', 380, 60],
+      [30, 370, 'Видит действия havirys в аудите.', 380, 60],
+      [30, 450, 'НЕ имеет лично: редактор БД, откат правок БД,\nвыдачу доступов, оформление —\nэто закреплено за аккаунтом havirys.', 380, 100],
+    ],
+  },
+  {
+    slug: 'role-havirys', title: 'havirys — полный доступ', kind: 'freeform',
+    grants: [],
+    nodes: [
+      [30, 20, 'HAVIRYS — единственный аккаунт с полным доступом.\nDiscord ID 652927337016328212', 380, 84],
+      [30, 130, 'Редактор БД: любые таблицы, добавление строк,\nоткат правок из аудита.', 380, 84],
+      [30, 235, 'Доступы к панели: выдать/снять вкладки\nроли или человеку, срок действия.', 380, 84],
+      [30, 340, 'Права команд: тир каждой команды бота.', 380, 60],
+      [30, 420, 'Локальные аккаунты: привязка к паспорту,\nсброс пароля по заявке.', 380, 84],
+      [430, 130, 'Оформление сайта: бренд, тексты, цвета,\n21 пресет темы, свой CSS.', 380, 84],
+      [430, 235, 'Настройки: переключатели функций,\nвремя автобэкапа, произвольные ключи.', 380, 84],
+      [430, 340, 'Доски: создание, полный доступ,\nвыдача грантов на просмотр/редактирование.', 380, 84],
+      [430, 445, 'Конфиг сайта (JSON): экспорт и импорт.', 380, 60],
+    ],
+  },
+  {
+    slug: 'flow-applications', title: 'Как принимать заявки', kind: 'freeform',
+    grants: [['level', 'hr', 'view'], ['level', 'deputy', 'edit']],
+    nodes: [
+      [60, 20, 'Заявка подана\n(сайт /apply или бот в Discord)', 300, 64],
+      [60, 130, 'Карточка в канале заявок.\nКнопки: Принять · Отклонить · Взять в работу', 300, 72],
+      [60, 245, 'HR проверяет: статик, возраст аккаунта Discord,\nчёрный список, адекватность анкеты', 300, 72],
+      [40, 370, 'ПРИНЯТЬ → ввести имя, статик, уровень →\nсоздаётся паспорт и профиль-канал →\nЛС «принято» + приглашение → роль участника', 320, 100],
+      [420, 370, 'ОТКЛОНИТЬ → выбрать причину или шаблон →\nЛС кандидату с причиной → запись в аудит', 320, 84],
+      [40, 500, 'Комментарии к заявке видны и на сайте,\nи в Discord. Массовое отклонение — чекбоксами\nи кнопкой «Применить к выбранным».', 320, 96],
+      [420, 245, 'Добавить участника вручную (без заявки):\nта же форма. Условия: он на сервере,\nстатик свободен, не в чёрном списке.', 320, 96],
+    ],
+    edges: [[0, 1], [1, 2], [2, 3], [2, 4], [3, 5]],
+  },
+  {
+    slug: 'flow-contracts', title: 'Проверка контрактов: засчитан / не засчитан', kind: 'freeform',
+    grants: [['level', 'member', 'view'], ['level', 'hr', 'edit']],
+    nodes: [
+      [30, 20, '1. Участник берёт контракт →\nшлёт скрин «ВЗЯЛ» на весь экран в свой профиль-канал.', 360, 84],
+      [30, 130, '2. Выполняет (или нет) →\nшлёт скрин «ИТОГ» туда же.\nОдним сообщением или двумя подряд.', 360, 96],
+      [30, 250, 'Лимит: 1 незакрытый взятый контракт на паспорт.', 360, 56],
+      [30, 330, '3. Бот собирает пару → карточка на проверку\nруководству: эмбеды 1️⃣ Взял и 2️⃣ Итог + кнопки.', 360, 88],
+      [420, 20, '✅ ВЫПОЛНЕН — засчитан:\nитоговый скрин подтверждает, что условия\nконтракта выполнены.', 360, 96],
+      [420, 135, '❌ НЕВЫПОЛНЕН — не засчитан:\nконтракт провален или на итоговом скрине\nусловия не выполнены.', 360, 96],
+      [420, 250, '🚫 НЕ КОНТРАКТ — не засчитан:\nскрин не относится к контракту, не читается\nили вызывает сомнения в подлинности.', 360, 96],
+      [420, 365, 'Засчитанные контракты идут в прогресс\nна повышение. Обязательной нормы нет.', 360, 76],
+      [30, 440, 'Взятый контракт без итога 7 дней →\nавтоматически отменяется.', 360, 72],
+      [420, 460, 'Итог виден участнику в /me и приходит\nв уведомлениях.', 360, 72],
+    ],
+    edges: [[0, 1], [1, 3], [3, 4], [3, 5], [3, 6]],
+  },
+  {
+    slug: 'onboarding', title: 'Памятка новичка', kind: 'freeform', onboarding: 1,
+    grants: [['level', 'member', 'view']],
+    nodes: [
+      [30, 20, 'ДОБРО ПОЖАЛОВАТЬ В ОРГАНИЗАЦИЮ!\nЭто ваш профиль-канал. Сюда — только скриншоты контрактов.', 420, 84],
+      [30, 130, 'По КАЖДОМУ контракту — 2 скрина на весь экран:\n1️⃣ когда ВЗЯЛИ контракт\n2️⃣ когда ВЫПОЛНИЛИ (или не выполнили)', 420, 100],
+      [30, 255, 'Можно одним сообщением, можно двумя подряд.\nБот сам соберёт пару и отправит карточку\nруководству на проверку.', 420, 96],
+      [30, 375, 'Итог проверки: ✅ засчитан · ❌ не засчитан ·\n🚫 не контракт. Придёт уведомление, видно\nв личном кабинете на сайте (/me).', 420, 96],
+      [30, 495, '1 незакрытый контракт на паспорт.\nНе бросайте взятый — через 7 дней он сгорит.', 420, 76],
+      [470, 130, 'Личный кабинет на сайте: /me —\nпаспорт, контракты, отпуск, тикеты,\nуведомления.', 380, 96],
+      [470, 250, 'Вопросы — команда /сайт в Discord\nили тикет на сайте.', 380, 72],
+    ],
+  },
+];
+
+function boardSeedModel(seed) {
+  const nodes = seed.nodes.map((a, i) => ({
+    id: 'n' + i, x: a[0], y: a[1], w: a[3] || 300, h: a[4] || 96,
+    text: a[2], parent: null, ref: null,
+  }));
+  if (seed.kind === 'orgchart' && seed.edges) {
+    // в оргрежиме родитель берётся из первого ребра, ведущего в узел
+    for (const [f, t] of seed.edges) if (nodes[t] && !nodes[t].parent) nodes[t].parent = nodes[f].id;
+  }
+  const edges = (seed.kind === 'orgchart' ? [] : (seed.edges || [])).map((e, i) => ({ id: 'e' + i, from: 'n' + e[0], to: 'n' + e[1] }));
+  return { nodes, edges, view: { zoom: 1, panX: 0, panY: 0 } };
+}
+
+// Создаёт стандартные доски, если их ещё нет (по slug). Зовётся при старте.
+async function seedBoards() {
+  for (const s of BOARD_SEEDS) {
+    try {
+      const ex = await db.get('SELECT id FROM boards WHERE slug = ?', [s.slug]);
+      if (ex) continue;
+      const now = new Date().toISOString();
+      const data = JSON.stringify(boardParse(JSON.stringify(boardSeedModel(s))));
+      const r = await db.run(
+        "INSERT INTO boards (slug, title, kind, data, visibility, onboarding, archived, version, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, 'owner', ?, 0, 1, ?, ?, ?, ?)",
+        [s.slug, s.title, s.kind, data, s.onboarding ? 1 : 0, OWNER_ID, now, OWNER_ID, now],
+      );
+      for (const gr of (s.grants || [])) {
+        await db.run(
+          'INSERT INTO board_grants (board_id, subject_type, subject_id, mode, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [r.lastID, gr[0], gr[1], gr[2], OWNER_ID, now],
+        ).catch(() => {});
+      }
+      console.log(`[доски] создана стандартная доска «${s.title}»`);
+    } catch (e) {
+      console.error('[доски] не удалось создать доску', s.slug, e.message);
+    }
+  }
 }
 
 // Пан/зум для страницы просмотра доски (только чтение).
@@ -5042,30 +5269,8 @@ function fit(){
 }
 
 var SAVE_ERR={ csrf:'сессия формы устарела — обновите страницу', forbidden:'нет доступа', notfound:'доска не найдена', too_big:'слишком большая доска', bad_json:'ошибка данных — не сохранено', bad_shape:'ошибка данных — не сохранено' };
-function save(){
-  var btn=document.getElementById('bsave'); if(btn) btn.disabled=true; setStatus('сохранение…');
-  var form=document.getElementById('bform');
-  var csrfEl=form?form.querySelector('input[name=_csrf]'):null;
-  var payload=JSON.stringify(model);
-  if(payload.length>2500000){ if(btn) btn.disabled=false; setStatus('доска слишком большая — не сохранено'); return; }
-  var body='_csrf='+encodeURIComponent(csrfEl?csrfEl.value:'')+'&data='+encodeURIComponent(payload);
-  fetch('/board/'+boardId+'/save',{ method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body, credentials:'same-origin' })
-    .then(function(r){ return r.json(); })
-    .then(function(j){
-      if(btn) btn.disabled=false;
-      if(j&&j.ok){ dirty=false; serverVersion=j.version; setStatus('сохранено (v'+j.version+') '+new Date().toLocaleTimeString()); try{ localStorage.removeItem('fc_board_'+boardId); }catch(e){} }
-      else setStatus('не сохранено: '+(SAVE_ERR[j&&j.err]||(j&&j.err)||'ошибка'));
-    })
-    .catch(function(){ if(btn) btn.disabled=false; setStatus('ошибка сети — не сохранено'); });
-}
-
-function computeBBox(){
-  var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
-  if(!model.nodes.length){ minX=0;minY=0;maxX=400;maxY=200; }
-  return { x:minX, y:minY, w:maxX-minX, h:maxY-minY };
-}
-function exportPng(){
+// Рендер доски в PNG-Blob (общий код для «Экспорт PNG» и снимка при сохранении).
+function renderBoardPng(cb){
   var bb=computeBBox(), pad=30, W=Math.max(1,bb.w+pad*2), H=Math.max(1,bb.h+pad*2);
   var cs=getComputedStyle(document.documentElement);
   function cv(name,fb){ var v=cs.getPropertyValue(name).trim(); return v||fb; }
@@ -5082,15 +5287,56 @@ function exportPng(){
     var scl=2, cnv=document.createElement('canvas'); cnv.width=W*scl; cnv.height=H*scl;
     var ctx=cnv.getContext('2d'); ctx.fillStyle=cv('--bg','#0f1013'); ctx.fillRect(0,0,cnv.width,cnv.height);
     ctx.drawImage(img,0,0,cnv.width,cnv.height);
-    cnv.toBlob(function(blob){
-      if(!blob) return;
-      var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='board-'+boardId+'.png';
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
-    });
+    cnv.toBlob(function(blob){ cb(blob||null); });
   };
-  img.onerror=function(){ setStatus('не удалось сделать PNG'); };
+  img.onerror=function(){ cb(null); };
   img.src=src;
+}
+function blobToDataUrl(blob,cb){
+  try{ var fr=new FileReader(); fr.onload=function(){ cb(String(fr.result||'')); }; fr.onerror=function(){ cb(''); }; fr.readAsDataURL(blob); }
+  catch(e){ cb(''); }
+}
+function postSave(pngDataUrl){
+  var btn=document.getElementById('bsave');
+  var form=document.getElementById('bform');
+  var csrfEl=form?form.querySelector('input[name=_csrf]'):null;
+  var body='_csrf='+encodeURIComponent(csrfEl?csrfEl.value:'')+'&data='+encodeURIComponent(JSON.stringify(model));
+  if(pngDataUrl && pngDataUrl.length<4000000) body+='&png='+encodeURIComponent(pngDataUrl);
+  fetch('/board/'+boardId+'/save',{ method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body, credentials:'same-origin' })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(btn) btn.disabled=false;
+      if(j&&j.ok){ dirty=false; serverVersion=j.version; setStatus('сохранено (v'+j.version+') '+new Date().toLocaleTimeString()); try{ localStorage.removeItem('fc_board_'+boardId); }catch(e){} }
+      else setStatus('не сохранено: '+(SAVE_ERR[j&&j.err]||(j&&j.err)||'ошибка'));
+    })
+    .catch(function(){ if(btn) btn.disabled=false; setStatus('ошибка сети — не сохранено'); });
+}
+function save(){
+  var btn=document.getElementById('bsave'); if(btn) btn.disabled=true; setStatus('сохранение…');
+  if(JSON.stringify(model).length>2500000){ if(btn) btn.disabled=false; setStatus('доска слишком большая — не сохранено'); return; }
+  try{
+    renderBoardPng(function(blob){
+      if(!blob){ postSave(null); return; }
+      blobToDataUrl(blob,function(u){ postSave(u||null); });
+    });
+  }catch(e){ postSave(null); }
+}
+
+function computeBBox(){
+  var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
+  if(!model.nodes.length){ minX=0;minY=0;maxX=400;maxY=200; }
+  return { x:minX, y:minY, w:maxX-minX, h:maxY-minY };
+}
+function exportPng(){
+  setStatus('готовлю PNG…');
+  renderBoardPng(function(blob){
+    if(!blob){ setStatus('не удалось сделать PNG'); return; }
+    var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='board-'+boardId+'.png';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
+    setStatus('PNG сохранён');
+  });
 }
 
 canvas.addEventListener('wheel',function(e){
@@ -6239,7 +6485,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== доски (только havirys) =====
   if (pathName === '/board/create') {
-    if (user.id !== OWNER_ID) return '/boards?' + qs({ err: 'Только havirys.' });
+    if (user.id !== OWNER_ID && (acc.rank || 0) < LEVELS.deputy) return '/boards?' + qs({ err: 'Создавать доски может заместитель+ или havirys.' });
     const title = (body.get('title') || '').trim().slice(0, 80) || 'Без названия';
     const kindB = body.get('kind') === 'orgchart' ? 'orgchart' : 'freeform';
     const now = new Date().toISOString();
@@ -6247,31 +6493,69 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       "INSERT INTO boards (title, kind, data, visibility, archived, version, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, 'owner', 0, 1, ?, ?, ?, ?)",
       [title, kindB, boardBlank(kindB), user.id, now, user.id, now],
     );
+    // автор создаваемой доски получает право редактирования (если не havirys)
+    if (user.id !== OWNER_ID) {
+      await db.run('INSERT INTO board_grants (board_id, subject_type, subject_id, mode, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [r.lastID, 'user', user.id, 'edit', user.id, now]).catch(() => {});
+    }
     return '/board/' + r.lastID + '/edit';
   }
   {
-    const bm = pathName.match(/^\/board\/(\d+)\/(settings|archive|unarchive|delete|restore)$/);
+    const bm = pathName.match(/^\/board\/(\d+)\/(settings|archive|unarchive|delete|restore|grant_add|grant_del)$/);
     if (bm) {
-      if (user.id !== OWNER_ID) return '/boards?' + qs({ err: 'Только havirys.' });
       const bid = parseInt(bm[1], 10) || 0;
       const op = bm[2];
+      const board = await db.get('SELECT * FROM boards WHERE id = ?', [bid]).catch(() => null);
+      if (!board) return '/boards?' + qs({ err: 'Доска не найдена.' });
+      const isOwner = user.id === OWNER_ID;
+      const bmode = await boardAccess(client, user, board);
+      // выдача/снятие грантов и удаление — только havirys
+      if ((op === 'grant_add' || op === 'grant_del' || op === 'delete') && !isOwner) {
+        return '/board/' + bid + '/settings?' + qs({ err: 'Это может только havirys.' });
+      }
+      // остальное — нужен режим редактирования
+      if (op !== 'grant_add' && op !== 'grant_del' && op !== 'delete' && bmode !== 'edit') {
+        return '/board/' + bid + '?' + qs({ err: 'Нет прав на изменение этой доски.' });
+      }
       if (op === 'settings') {
         const title = (body.get('title') || '').trim().slice(0, 80) || 'Без названия';
         const kindB = body.get('kind') === 'orgchart' ? 'orgchart' : 'freeform';
+        const onb = body.get('onboarding') === '1' ? 1 : 0;
         await db.run('UPDATE boards SET title = ?, kind = ? WHERE id = ?', [title, kindB, bid]);
+        if (isOwner) {
+          if (onb) await db.run('UPDATE boards SET onboarding = CASE WHEN id = ? THEN 1 ELSE 0 END', [bid]);
+          else await db.run('UPDATE boards SET onboarding = 0 WHERE id = ?', [bid]);
+        }
         return '/board/' + bid + '/settings?' + qs({ ok: 'Сохранено.' });
+      }
+      if (op === 'grant_add') {
+        const st = body.get('subject_type') === 'user' ? 'user' : 'level';
+        const mode = body.get('mode') === 'edit' ? 'edit' : 'view';
+        let sid = st === 'user'
+          ? (body.get('subject_user') || '').replace(/[^0-9]/g, '').slice(0, 25)
+          : (['member', 'hr', 'deputy', 'owner'].includes(body.get('subject_level')) ? body.get('subject_level') : '');
+        if (!sid) return '/board/' + bid + '/settings?' + qs({ err: 'Укажите, кому выдать доступ.' });
+        await db.run('DELETE FROM board_grants WHERE board_id = ? AND subject_type = ? AND subject_id = ?', [bid, st, sid]).catch(() => {});
+        await db.run('INSERT INTO board_grants (board_id, subject_type, subject_id, mode, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [bid, st, sid, mode, user.id, new Date().toISOString()]);
+        return '/board/' + bid + '/settings?' + qs({ ok: 'Доступ выдан.' });
+      }
+      if (op === 'grant_del') {
+        const gidn = parseInt(body.get('grant_id'), 10) || 0;
+        await db.run('DELETE FROM board_grants WHERE id = ? AND board_id = ?', [gidn, bid]).catch(() => {});
+        return '/board/' + bid + '/settings?' + qs({ ok: 'Доступ убран.' });
       }
       if (op === 'delete') {
         await db.run('DELETE FROM boards WHERE id = ?', [bid]);
         await db.run('DELETE FROM board_versions WHERE board_id = ?', [bid]).catch(() => {});
+        await db.run('DELETE FROM board_grants WHERE board_id = ?', [bid]).catch(() => {});
         return '/boards?' + qs({ ok: 'Доска удалена.' });
       }
       if (op === 'restore') {
         const vid = parseInt(body.get('version_id'), 10) || 0;
         const v = await db.get('SELECT data FROM board_versions WHERE id = ? AND board_id = ?', [vid, bid]).catch(() => null);
         if (!v) return '/board/' + bid + '/versions?' + qs({ err: 'Версия не найдена.' });
-        const cur = await db.get('SELECT version FROM boards WHERE id = ?', [bid]).catch(() => null);
-        const nv = ((cur && cur.version) || 1) + 1;
+        const nv = ((board.version) || 1) + 1;
         const now = new Date().toISOString();
         await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [v.data, nv, user.id, now, bid]);
         await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, v.data, user.id, now]).catch(() => {});
@@ -8577,6 +8861,7 @@ function start(client, hooks = {}) {
   HOOKS = hooks || {};
   _mdClient = client;
   const port = process.env.PORT || 3000;
+  seedBoards().catch((e) => console.error('[доски] seedBoards:', e.message));
 
   const server = http.createServer(async (req, res) => {
     const _reqStart = Date.now();
@@ -8659,12 +8944,13 @@ function start(client, hooks = {}) {
       // Сохранение доски из редактора (AJAX, отвечает JSON, не редиректом).
       if (/^\/board\/\d+\/save$/.test(path) && req.method === 'POST') {
         const jr = (obj) => done(200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
-        if (!user || user.id !== OWNER_ID) return done(403, { 'Content-Type': 'application/json; charset=utf-8' }, '{"ok":false,"err":"forbidden"}');
+        if (!user) return done(403, { 'Content-Type': 'application/json; charset=utf-8' }, '{"ok":false,"err":"forbidden"}');
         const bid = parseInt(path.split('/')[2], 10) || 0;
         const b = await readBody(req);
         if (!csrfOk(user, b.get('_csrf'))) return jr({ ok: false, err: 'csrf' });
         const board = await db.get('SELECT id, version FROM boards WHERE id = ?', [bid]).catch(() => null);
         if (!board) return jr({ ok: false, err: 'notfound' });
+        if ((await boardAccess(client, user, board)) !== 'edit') return jr({ ok: false, err: 'forbidden' });
         const raw = b.get('data') || '';
         if (!raw || raw.length > 3_000_000) return jr({ ok: false, err: 'too_big' });
         // Явно проверяем, что тело — валидный JSON (обрезанное при передаче
@@ -8675,7 +8961,20 @@ function start(client, hooks = {}) {
         const clean = JSON.stringify(boardParse(raw));
         const nv = (board.version || 1) + 1;
         const now = new Date().toISOString();
+        // PNG-снимок доски (из клиентского рендера) — кладём в data/uploads/board-<id>.png
+        let imgFile = null;
+        const png = b.get('png') || '';
+        if (png.startsWith('data:image/png;base64,')) {
+          try {
+            const buf = Buffer.from(png.slice('data:image/png;base64,'.length), 'base64');
+            if (buf.length > 50 && buf.length < 4_000_000) {
+              imgFile = 'board-' + bid + '.png';
+              await _fsMod.promises.writeFile(_pathMod.join(uploadsDir(), imgFile), buf);
+            }
+          } catch (_) { imgFile = null; }
+        }
         await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [clean, nv, user.id, now, bid]);
+        if (imgFile) await db.run('UPDATE boards SET image_file = ? WHERE id = ?', [imgFile, bid]).catch(() => {});
         await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, clean, user.id, now]).catch(() => {});
         await db.run('DELETE FROM board_versions WHERE board_id = ? AND id NOT IN (SELECT id FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 50)', [bid, bid]).catch(() => {});
         return jr({ ok: true, version: nv, at: now });
@@ -8803,33 +9102,55 @@ function start(client, hooks = {}) {
         return html(200, L({ title: TITLES[key], user, level: acc.level, wide: true, body: flash + `<h1>${esc(TITLES[key])}</h1>${strip}<div class="card">${mdToHtml(txt)}</div>` }));
       }
 
-      // ----- Доски (только havirys) -----
+      // ----- Доски (havirys + по гранту view/edit) -----
       if (path === '/board-editor.js' && req.method === 'GET') {
         return done(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }, BOARD_EDITOR_JS);
       }
       if (path === '/boards' && req.method === 'GET') {
-        if (!user || user.id !== OWNER_ID) return html(403, L({ title: 'Доски', user, level: 'guest', body: '<h1>Только для havirys</h1><a class="btn" href="/">На главную</a>' }));
+        if (!user) return redirect('/login');
+        const bacc = await accessFor(client, user.id).catch(() => ({ level: 'guest', rank: 0 }));
         const showArch = u.searchParams.get('arch') === '1';
-        const rows = await db.all('SELECT * FROM boards WHERE archived = ? ORDER BY updated_at DESC, id DESC', [showArch ? 1 : 0]).catch(() => []);
-        return html(200, L({ title: 'Доски', user, level: 'owner', wide: true, body: flash + boardsListBody(rows, user, showArch) }));
+        const all = await db.all('SELECT * FROM boards WHERE archived = ? ORDER BY updated_at DESC, id DESC', [showArch ? 1 : 0]).catch(() => []);
+        const rows = [];
+        for (const b of all) { const m = await boardAccess(client, user, b); if (m) { b._mode = m; rows.push(b); } }
+        if (!rows.length && user.id !== OWNER_ID && bacc.rank < LEVELS.deputy) {
+          return html(403, L({ title: 'Доски', user, level: bacc.level, body: '<h1>Доски</h1><div class="card">Вам не открыта ни одна доска.</div>' }));
+        }
+        return html(200, L({ title: 'Доски', user, level: bacc.level, wide: true, body: flash + boardsListBody(rows, user, showArch, bacc) }));
       }
       if (path.startsWith('/board/') && req.method === 'GET') {
-        if (!user || user.id !== OWNER_ID) return html(403, L({ title: 'Доска', user, level: 'guest', body: '<h1>Только для havirys</h1>' }));
+        if (!user) return redirect('/login');
+        const bacc = await accessFor(client, user.id).catch(() => ({ level: 'guest', rank: 0 }));
         const seg = path.slice(7).split('/');
         const bid = parseInt(seg[0], 10) || 0;
         const sub = seg[1] || '';
         const board = await db.get('SELECT * FROM boards WHERE id = ?', [bid]).catch(() => null);
-        if (!board) return html(404, L({ title: 'Доска', user, level: 'owner', body: '<h1>Доска не найдена</h1><a class="btn" href="/boards">← к списку</a>' }));
+        if (!board) return html(404, L({ title: 'Доска', user, level: bacc.level, body: '<h1>Доска не найдена</h1><a class="btn" href="/boards">← к списку</a>' }));
+        const mode = await boardAccess(client, user, board);
+        if (!mode) return html(403, L({ title: 'Доска', user, level: bacc.level, body: '<h1>Нет доступа к этой доске</h1><a class="btn" href="/boards">← к списку</a>' }));
+        const isOwner = user.id === OWNER_ID;
+        if (sub === 'image.png') {
+          if (!board.image_file) return done(404, { 'Content-Type': 'text/plain' }, 'no image');
+          const buf = await readUploadFile(board.image_file);
+          if (!buf) return done(404, { 'Content-Type': 'text/plain' }, 'no image');
+          return done(200, { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=60' }, buf);
+        }
         if (sub === 'export.json') {
           return done(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="board-${bid}.json"` }, JSON.stringify(boardParse(board.data)));
         }
-        if (sub === 'edit') return html(200, L({ title: '✎ ' + (board.title || 'Доска'), user, level: 'owner', wide: true, body: boardEditBody(board, user) }));
-        if (sub === 'settings') return html(200, L({ title: 'Доска — настройки', user, level: 'owner', wide: true, body: flash + boardSettingsBody(board, user) }));
+        if ((sub === 'edit' || sub === 'settings') && mode !== 'edit') {
+          return html(403, L({ title: 'Доска', user, level: bacc.level, body: '<h1>Доска открыта только для просмотра</h1><a class="btn" href="/board/' + bid + '">Открыть просмотр</a>' }));
+        }
+        if (sub === 'edit') return html(200, L({ title: '✎ ' + (board.title || 'Доска'), user, level: bacc.level, wide: true, body: boardEditBody(board, user) }));
+        if (sub === 'settings') {
+          const grants = isOwner ? await db.all('SELECT * FROM board_grants WHERE board_id = ? ORDER BY id', [bid]).catch(() => []) : [];
+          return html(200, L({ title: 'Доска — настройки', user, level: bacc.level, wide: true, body: flash + boardSettingsBody(board, user, grants, isOwner) }));
+        }
         if (sub === 'versions') {
           const vs = await db.all('SELECT id, version, saved_by, saved_at FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 100', [bid]).catch(() => []);
-          return html(200, L({ title: 'Доска — версии', user, level: 'owner', wide: true, body: flash + boardVersionsBody(board, vs, user) }));
+          return html(200, L({ title: 'Доска — версии', user, level: bacc.level, wide: true, body: flash + boardVersionsBody(board, vs, user, mode === 'edit') }));
         }
-        return html(200, L({ title: board.title || 'Доска', user, level: 'owner', wide: true, body: flash + boardViewBody(board, user) }));
+        return html(200, L({ title: board.title || 'Доска', user, level: bacc.level, wide: true, body: flash + boardViewBody(board, user, mode === 'edit') }));
       }
 
       if (path.startsWith('/form/') && req.method === 'GET') {
