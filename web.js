@@ -8861,7 +8861,6 @@ function start(client, hooks = {}) {
   HOOKS = hooks || {};
   _mdClient = client;
   const port = process.env.PORT || 3000;
-  seedBoards().catch((e) => console.error('[доски] seedBoards:', e.message));
 
   const server = http.createServer(async (req, res) => {
     const _reqStart = Date.now();
@@ -9830,4 +9829,4 @@ function invalidateAccess(discordId) {
   _grantsCache.delete(id);
   _frozenCache.delete(id);
 }
-module.exports = { start, createMagicLink, invalidateAccess };
+module.exports = { start, createMagicLink, invalidateAccess, seedBoards };

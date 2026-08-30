@@ -9762,6 +9762,9 @@ client.once('clientReady', async () => {
   }
 
   await db.init();
+  // Стандартные доски создаём после init (таблицы уже есть); web.start() выше
+  // вызывается раньше db.init(), поэтому сидим отсюда.
+  try { await web.seedBoards(); } catch (e) { console.error('[доски] seedBoards:', e.message); }
   const overridesCount = await configStore.loadOverrides();
   if (overridesCount > 0) console.log(`Применено переопределений конфига из БД: ${overridesCount}`);
   await seedRejectTemplates();
