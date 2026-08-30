@@ -4635,11 +4635,11 @@ function boardOrgLayout(model) {
     if (n.parent && kids.has(n.parent)) kids.get(n.parent).push(n.id);
     else roots.push(n.id);
   }
-  const NW = 180, NH = 56, GX = 36, GY = 120, TOP = 40;
+  const NW = 230, GX = 34, GY = 150, TOP = 40;
   let cursor = 40;
   const place = (id, depth) => {
     const n = byId.get(id);
-    n.w = NW; n.h = NH; n.y = TOP + depth * GY;
+    n.w = NW; n.h = Math.max(52, boardFitH(n.text, NW)); n.y = TOP + depth * GY;
     const ch = kids.get(id) || [];
     if (!ch.length) { n.x = cursor; cursor += NW + GX; return; }
     let first = null, last = null;
@@ -4651,19 +4651,34 @@ function boardOrgLayout(model) {
   return model;
 }
 
-function boardWrap(text, maxCh) {
+const BOARD_LINE_H = 17;
+// Эмодзи / стрелки / пиктограммы / CJK — рендерятся примерно вдвое шире буквы.
+function boardCharW(ch) {
+  const c = ch.codePointAt(0);
+  if (c >= 0x1F000 || (c >= 0x2190 && c <= 0x2BFF) || (c >= 0x2600 && c <= 0x27BF) || (c >= 0x3000 && c <= 0x9FFF) || c === 0x2022) return 2;
+  return 1;
+}
+function boardStrW(s) { let w = 0; for (const ch of String(s || '')) w += boardCharW(ch); return w; }
+function boardWrap(text, maxW) {
   const out = [];
   for (const raw of String(text || '').split('\n')) {
     const words = raw.split(/\s+/).filter(Boolean);
     if (!words.length) { out.push(''); continue; }
     let line = '';
     for (const w of words) {
-      if (line && (line.length + 1 + w.length) > maxCh) { out.push(line); line = w; }
-      else line = line ? line + ' ' + w : w;
+      const cand = line ? line + ' ' + w : w;
+      if (line && boardStrW(cand) > maxW) { out.push(line); line = w; }
+      else line = cand;
     }
     if (line) out.push(line);
   }
-  return out.length ? out.slice(0, 8) : [''];
+  return out.length ? out.slice(0, 16) : [''];
+}
+// Ширина строки в «весовых единицах» под блок шириной w px.
+function boardMaxW(w) { return Math.max(6, Math.floor((w - 20) / 7.2)); }
+// Нужная высота блока, чтобы весь текст поместился.
+function boardFitH(text, w) {
+  return Math.max(40, boardWrap(text, boardMaxW(w)).length * BOARD_LINE_H + 20);
 }
 
 // SSR-рендер доски в <svg> (страница просмотра и стартовый холст редактора).
@@ -4672,9 +4687,14 @@ function boardSvg(model, opts) {
   const m = (opts.layout && model.nodes.some((n) => n.parent))
     ? boardOrgLayout({ nodes: model.nodes.map((n) => ({ ...n })), edges: [] })
     : model;
-  const nodes = m.nodes, edges = m.edges;
+  // высоту считаем по тексту (блок всегда вмещает содержимое)
+  const nodes = m.nodes.map((n) => {
+    const lines = boardWrap(n.text, boardMaxW(n.w));
+    return { ...n, _lines: lines, _h: Math.max(n.h || 40, lines.length * BOARD_LINE_H + 20) };
+  });
+  const edges = m.edges;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); }
+  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n._h); }
   if (!nodes.length) { minX = 0; minY = 0; maxX = 480; maxY = 240; }
   const pad = 44;
   const vb = `${minX - pad} ${minY - pad} ${(maxX - minX) + pad * 2} ${(maxY - minY) + pad * 2}`;
@@ -4682,21 +4702,26 @@ function boardSvg(model, opts) {
   const eEls = edges.map((e) => {
     const a = byId.get(e.from), b = byId.get(e.to);
     if (!a || !b) return '';
-    const ax = a.x + a.w / 2, ay = a.y + a.h, bx = b.x + b.w / 2, by = b.y, my = (ay + by) / 2;
-    return `<path d="M${ax} ${ay} C ${ax} ${my}, ${bx} ${my}, ${bx} ${by - 7}" fill="none" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#bar)"/>`;
+    const ax = a.x + a.w / 2, ay = a.y + a._h, bx = b.x + b.w / 2, by = b.y, my = (ay + by) / 2;
+    return `<path d="M${ax} ${ay} C ${ax} ${my}, ${bx} ${my}, ${bx} ${by - 8}" fill="none" stroke="var(--muted)" stroke-width="1.75" marker-end="url(#bar)"/>`;
   }).join('');
   const nEls = nodes.map((n) => {
-    const lines = boardWrap(n.text, Math.max(6, Math.floor(n.w / 7.5)));
-    const ty = n.y + n.h / 2 - (lines.length - 1) * 8;
-    const tsp = lines.map((ln, i) => `<tspan x="${n.x + n.w / 2}" dy="${i ? 16 : 0}">${esc(ln)}</tspan>`).join('');
+    const ty = n.y + n._h / 2 - (n._lines.length - 1) * (BOARD_LINE_H / 2);
+    const cx = n.x + n.w / 2;
+    const tsp = n._lines.map((ln, i) => i === 0
+      ? `<tspan x="${cx}" dy="0" font-weight="700" fill="var(--accent2)">${esc(ln)}</tspan>`
+      : `<tspan x="${cx}" dy="${BOARD_LINE_H}">${esc(ln)}</tspan>`).join('');
     return `<g data-id="${esc(n.id)}">
-      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="10" fill="var(--panel2)" stroke="var(--line)" stroke-width="1"/>
-      <text x="${n.x + n.w / 2}" y="${ty}" text-anchor="middle" dominant-baseline="middle" font-size="13" font-family="inherit" fill="var(--text)">${tsp}</text>
-      ${n.ref ? `<circle cx="${n.x + n.w - 11}" cy="${n.y + 11}" r="3.5" fill="var(--accent2)"></circle>` : ''}
+      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n._h}" rx="12" fill="var(--panel2)" stroke="var(--line)" stroke-width="1.25" filter="url(#bsh)"/>
+      <text x="${cx}" y="${ty}" text-anchor="middle" dominant-baseline="middle" font-size="13" font-family="inherit" fill="var(--text)">${tsp}</text>
+      ${n.ref ? `<circle cx="${n.x + n.w - 12}" cy="${n.y + 12}" r="3.5" fill="var(--accent2)"></circle>` : ''}
     </g>`;
   }).join('');
   return `<svg class="bsvg" xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet">
-    <defs><marker id="bar" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--muted)"/></marker></defs>
+    <defs>
+      <marker id="bar" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker>
+      <filter id="bsh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/></filter>
+    </defs>
     ${eEls}${nEls}
   </svg>`;
 }
@@ -4791,7 +4816,7 @@ function boardEditBody(board, user) {
         </div>
       </div>
     </div>
-    <p class="mini">Двойной клик по холсту — новый блок. Тащить блок — двигать (в оргрежиме — тащить на другой блок, чтобы подчинить). Колесо — масштаб. Del — удалить. Ctrl+S — сохранить.</p>
+    <p class="mini">Двойной клик по холсту — новый блок. Тащить блок — двигать (в оргрежиме — тащить на другой блок, чтобы подчинить). «↳ связь» — соединить/разорвать два блока. Клик по стрелке — убрать связь. Колесо — масштаб. Del — удалить блок. Ctrl+S — сохранить.</p>
     <form method="POST" action="/board/${board.id}/save" id="bform" style="display:none">${csrfField(user)}</form>
     <script>window.__BOARD__=${payload};</script>
     <script src="/board-editor.js"></script>`;
@@ -4816,10 +4841,17 @@ function boardSettingsBody(board, user, grants, isOwner) {
       </label>
       <p class="mini">В режиме «оргструктура» позиции блоков считаются автоматически по полю «Подчинён»; вручную нарисованные стрелки не показываются.</p>
       <label class="chk"><input type="checkbox" name="onboarding" value="1"${board.onboarding ? ' checked' : ''}> Отправлять PNG этой доски новичку при создании профиля</label>
-      <p class="mini">Такой может быть только одна доска. PNG берётся из последнего сохранения в редакторе — открой доску, поправь, нажми «Сохранить».</p>
+      <p class="mini">Такой может быть только одна доска. PNG пересобирается ТОЛЬКО когда открываешь доску в редакторе и жмёшь «Сохранить». Пока свежего PNG нет — новичку уходит текст без картинки.</p>
       <button class="btn" type="submit">Сохранить</button>
     </form>
   </div>
+  ${isOwner && BOARD_SEEDS.some((s) => s.slug === board.slug) ? `<div class="card" style="border-color:var(--warn)">
+    <h2>Стандартное содержимое</h2>
+    <p class="mini">Это стандартная доска (<code>${esc(board.slug)}</code>). Кнопка вернёт её содержимое к актуальному шаблону из кода и сбросит PNG-снимок — потом открой в редакторе и нажми «Сохранить», чтобы пересобрать картинку.</p>
+    <form method="POST" action="/board/${board.id}/reseed" onsubmit="return confirm('Заменить всё содержимое доски стандартным шаблоном? Текущая версия сохранится в истории.')">${csrfField(user)}
+      <button class="btn sm" type="submit">🔄 Восстановить стандартное содержимое</button>
+    </form>
+  </div>` : ''}
   ${isOwner ? `<div class="card">
     <h2>Доступ к доске</h2>
     <p class="mini">havirys всегда имеет полный доступ. Ниже — кому ещё открыта доска.</p>
@@ -4885,161 +4917,179 @@ async function boardAccess(client, user, board) {
   return best;
 }
 
-// ---- Стандартные доски: создаются один раз при старте (идемпотентно по slug) ----
-// Каждый узел: [x, y, 'текст', w?, h?]. edges (необязательно): [[fromIdx, toIdx], ...].
+// ---- Стандартные доски: сидятся при старте (идемпотентно по slug) ----
+// Это КАРТА СТРУКТУРЫ САЙТА для настройки, а не гайды для участников.
+// Форматы узла:
+//   'строка'            — авто-стек в один столбец (x=40, w=560);
+//   [col, 'строка']     — авто-стек в столбец col (0..N), w=280;
+//   [x, y, 'строка', w] — явные координаты (для схем со стрелками).
+// Высота блока считается по тексту автоматически (boardFitH).
+const BOARD_SEED_VERSION = 5; // ↑ при правке содержимого — нетронутые доски (version<=1) обновятся
 const BOARD_SEEDS = [
   {
-    slug: 'site-overview', title: 'Как устроен сайт', kind: 'freeform',
-    grants: [['level', 'member', 'view']],
-    nodes: [
-      [30, 20, 'САЙТ ОРГАНИЗАЦИИ\nВход: через Discord или логин + пароль.\nПрава берутся от привязанного паспорта.', 340, 96],
-      [30, 150, 'Мой профиль — /me\nПаспорт, смена имени, взятые контракты,\nотпуск, тикеты, заявка в HR, экспорт данных,\nколокольчик уведомлений.  Доступ: участник', 340, 118],
-      [30, 300, 'Участники — /people\nСписок, поиск, карточки участников,\nблагодарности и «стена».  Доступ: участник', 340, 100],
-      [30, 430, 'Розыгрыши — /giveaways\nУчастие в розыгрышах, история побед.\nДоступ: участник', 340, 92],
-      [400, 150, 'FAQ / Гайды — /faq\nСправочник и поиск по гайдам.  Доступ: все', 340, 76],
-      [400, 250, 'Правила — /text/rules\nСвод правил, агитация.  Доступ: участник', 340, 76],
-      [400, 350, 'Команды — /commands\nСписок команд бота по тирам доступа.\nДоступ: участник', 340, 88],
-      [400, 460, 'Тикеты — /tickets\nОбращения в поддержку.  Доступ: HR+', 340, 76],
-      [770, 150, 'Дашборд — /dashboard\nСтатистика организации, здоровье системы,\nграфики.  Доступ: HR+', 340, 92],
-      [770, 270, 'Панель — /panel\nУправление: заявки, проверка контрактов,\nнастройки.  Доступ: HR+ или по гранту', 340, 92],
-      [770, 400, 'Уровни доступа (по возрастанию):\nгость → участник → HR → заместитель →\nвладелец → havirys', 340, 96],
-    ],
-  },
-  {
-    slug: 'panel-overview', title: 'Панель — вкладки и действия', kind: 'freeform',
-    grants: [['level', 'hr', 'view']],
-    nodes: [
-      [30, 20, 'ПАНЕЛЬ  /panel\nВкладки видны по уровню доступа\nили по точечному гранту (havirys выдаёт).', 340, 96],
-      [30, 150, 'Заявки  (?tab=apps)\nПринять / отклонить, шаблоны причин,\nкомментарии (видны и в Discord),\nмассовое отклонение, добавить вручную.  HR+', 340, 118],
-      [30, 300, 'Контракты — проверка  (?tab=contracts_check)\n✅ выполнен  ❌ невыполнен  🚫 не контракт.\nВидны оба скриншота.  HR+', 340, 104],
-      [30, 435, 'Розыгрыши\nСоздать разовый и повторяющийся,\nвыбор победителей, веса за контракты.  HR+', 340, 96],
-      [400, 150, 'Формы\nКонструктор форм, приём и разбор заявок\nпо ним.  HR+', 340, 88],
-      [400, 250, 'Доступы к панели  (grants)\nВыдать вкладки роли или человеку,\nсрок действия, пресеты.  Только havirys', 340, 96],
-      [400, 360, 'Права команд  (perms)\nТир каждой команды бота, синхронизация\nвидимости в Discord.  Только havirys', 340, 96],
-      [770, 150, 'Аккаунты  (accounts)\nЛокальные логины, привязка к паспорту,\nсброс пароля.  Только havirys', 340, 96],
-      [770, 265, 'Редактор БД  (data)\nПрямое редактирование любых таблиц,\nоткат правок из аудита.  Только havirys', 340, 96],
-      [770, 380, 'Настройки + Оформление\nПереключатели функций, автобэкап, ключи;\nбренд, тексты, цвета, пресеты темы.  Только havirys', 340, 100],
-    ],
-  },
-  {
-    slug: 'role-hr', title: 'HR-менеджер — что может', kind: 'freeform',
-    grants: [['level', 'hr', 'view']],
-    nodes: [
-      [30, 20, 'HR-МЕНЕДЖЕР  (уровень hr)', 360, 56],
-      [30, 110, 'Заявки на вступление: принимать, отклонять\nс шаблоном причины, комментировать,\nдобавлять участников вручную.', 360, 100],
-      [30, 235, 'Контракты: проверять скриншоты —\nзасчитать / не засчитать / «не контракт».', 360, 84],
-      [30, 345, 'Тикеты: вести и закрывать обращения,\nшаблоны ответов, транскрипт.', 360, 84],
-      [30, 450, 'Рассматривать: заявки в HR, изменение данных,\nдобавление паспорта, отпуска, апелляции,\nкодовые слова (возврат денег).', 360, 100],
-      [430, 110, 'Просмотр: дашборд, статистика,\nсписок участников и их профили.', 360, 84],
-      [430, 220, 'НЕ может: редактор БД, доступы к панели,\nправа команд, аккаунты, оформление,\nнастройки — это только havirys.', 360, 100],
-    ],
-  },
-  {
-    slug: 'role-deputy', title: 'Заместитель — что может', kind: 'freeform',
-    grants: [['level', 'deputy', 'view']],
-    nodes: [
-      [30, 20, 'ЗАМЕСТИТЕЛЬ  (уровень deputy)', 360, 56],
-      [30, 110, 'Всё, что может HR-менеджер, плюс пункты ниже.', 360, 60],
-      [30, 195, 'Массовые действия в /people:\nвыдать отпуск выбранным, ЛС выбранным,\nпересчёт рангов организации.', 360, 100],
-      [30, 320, 'Создавать доски; редактировать те,\nна которые выдан грант «редактирование».', 360, 84],
-      [30, 425, 'Расширенные вкладки панели\n(по умолчанию или по гранту).', 360, 84],
-      [430, 110, 'НЕ может: всё, что помечено\n«только havirys».', 360, 76],
-    ],
-  },
-  {
-    slug: 'role-owner', title: 'Владелец (роль) — что может', kind: 'freeform',
-    grants: [['level', 'owner', 'view']],
-    nodes: [
-      [30, 20, 'ВЛАДЕЛЕЦ — роль ROLE_OWNER  (уровень owner)', 380, 56],
-      [30, 110, 'Всё, что может заместитель, плюс:', 380, 56],
-      [30, 190, 'Полный доступ ко всем вкладкам панели\nдля повседневного управления.', 380, 80],
-      [30, 290, 'Видит черновики дополнительных страниц.', 380, 60],
-      [30, 370, 'Видит действия havirys в аудите.', 380, 60],
-      [30, 450, 'НЕ имеет лично: редактор БД, откат правок БД,\nвыдачу доступов, оформление —\nэто закреплено за аккаунтом havirys.', 380, 100],
-    ],
-  },
-  {
-    slug: 'role-havirys', title: 'havirys — полный доступ', kind: 'freeform',
-    grants: [],
-    nodes: [
-      [30, 20, 'HAVIRYS — единственный аккаунт с полным доступом.\nDiscord ID 652927337016328212', 380, 84],
-      [30, 130, 'Редактор БД: любые таблицы, добавление строк,\nоткат правок из аудита.', 380, 84],
-      [30, 235, 'Доступы к панели: выдать/снять вкладки\nроли или человеку, срок действия.', 380, 84],
-      [30, 340, 'Права команд: тир каждой команды бота.', 380, 60],
-      [30, 420, 'Локальные аккаунты: привязка к паспорту,\nсброс пароля по заявке.', 380, 84],
-      [430, 130, 'Оформление сайта: бренд, тексты, цвета,\n21 пресет темы, свой CSS.', 380, 84],
-      [430, 235, 'Настройки: переключатели функций,\nвремя автобэкапа, произвольные ключи.', 380, 84],
-      [430, 340, 'Доски: создание, полный доступ,\nвыдача грантов на просмотр/редактирование.', 380, 84],
-      [430, 445, 'Конфиг сайта (JSON): экспорт и импорт.', 380, 60],
-    ],
-  },
-  {
-    slug: 'flow-applications', title: 'Как принимать заявки', kind: 'freeform',
-    grants: [['level', 'hr', 'view'], ['level', 'deputy', 'edit']],
-    nodes: [
-      [60, 20, 'Заявка подана\n(сайт /apply или бот в Discord)', 300, 64],
-      [60, 130, 'Карточка в канале заявок.\nКнопки: Принять · Отклонить · Взять в работу', 300, 72],
-      [60, 245, 'HR проверяет: статик, возраст аккаунта Discord,\nчёрный список, адекватность анкеты', 300, 72],
-      [40, 370, 'ПРИНЯТЬ → ввести имя, статик, уровень →\nсоздаётся паспорт и профиль-канал →\nЛС «принято» + приглашение → роль участника', 320, 100],
-      [420, 370, 'ОТКЛОНИТЬ → выбрать причину или шаблон →\nЛС кандидату с причиной → запись в аудит', 320, 84],
-      [40, 500, 'Комментарии к заявке видны и на сайте,\nи в Discord. Массовое отклонение — чекбоксами\nи кнопкой «Применить к выбранным».', 320, 96],
-      [420, 245, 'Добавить участника вручную (без заявки):\nта же форма. Условия: он на сервере,\nстатик свободен, не в чёрном списке.', 320, 96],
-    ],
-    edges: [[0, 1], [1, 2], [2, 3], [2, 4], [3, 5]],
-  },
-  {
-    slug: 'flow-contracts', title: 'Проверка контрактов: засчитан / не засчитан', kind: 'freeform',
+    slug: 'site-map', title: 'Карта сайта — страницы по уровням', kind: 'freeform',
     grants: [['level', 'member', 'view'], ['level', 'hr', 'edit']],
     nodes: [
-      [30, 20, '1. Участник берёт контракт →\nшлёт скрин «ВЗЯЛ» на весь экран в свой профиль-канал.', 360, 84],
-      [30, 130, '2. Выполняет (или нет) →\nшлёт скрин «ИТОГ» туда же.\nОдним сообщением или двумя подряд.', 360, 96],
-      [30, 250, 'Лимит: 1 незакрытый взятый контракт на паспорт.', 360, 56],
-      [30, 330, '3. Бот собирает пару → карточка на проверку\nруководству: эмбеды 1️⃣ Взял и 2️⃣ Итог + кнопки.', 360, 88],
-      [420, 20, '✅ ВЫПОЛНЕН — засчитан:\nитоговый скрин подтверждает, что условия\nконтракта выполнены.', 360, 96],
-      [420, 135, '❌ НЕВЫПОЛНЕН — не засчитан:\nконтракт провален или на итоговом скрине\nусловия не выполнены.', 360, 96],
-      [420, 250, '🚫 НЕ КОНТРАКТ — не засчитан:\nскрин не относится к контракту, не читается\nили вызывает сомнения в подлинности.', 360, 96],
-      [420, 365, 'Засчитанные контракты идут в прогресс\nна повышение. Обязательной нормы нет.', 360, 76],
-      [30, 440, 'Взятый контракт без итога 7 дней →\nавтоматически отменяется.', 360, 72],
-      [420, 460, 'Итог виден участнику в /me и приходит\nв уведомлениях.', 360, 72],
+      [0, 'ГОСТЬ — без входа'],
+      [0, '/ — лендинг (заголовок, текст, кнопки)'],
+      [0, '/login · /register · /forgot · /account'],
+      [0, '/faq — гайды и поиск'],
+      [0, '/text/rules · /text/agitation'],
+      [0, '/p/<slug> — доп. страницы, если опубликованы'],
+      [1, 'УЧАСТНИК (member) — есть паспорт'],
+      [1, '/me — личный кабинет: паспорт, контракты, отпуск, тикеты, заявка в HR, экспорт'],
+      [1, '/people · /u/<id> — участники и профили'],
+      [1, '/giveaways · /g/<id> — розыгрыши'],
+      [1, '/commands — команды бота по тирам'],
+      [1, '/boards — доски (по гранту на доску)'],
+      [1, '/notifications · /search · /calendar · /leaderboards · /compare'],
+      [1, '/ticket/<id> — свой тикет'],
+      [2, 'HR И ВЫШЕ (hr)'],
+      [2, '/dashboard — статистика и здоровье системы'],
+      [2, '/tickets — все тикеты'],
+      [2, '/audit — журнал действий'],
+      [2, '/panel — панель управления (вкладки в столбце справа)'],
+      [2, 'Заместитель (deputy): + массовые действия в /people, создание досок'],
+      [2, 'Владелец роль (owner): + все вкладки панели, черновики страниц'],
+      [3, 'ПАНЕЛЬ /panel — вкладки (HR+ или точечный грант)'],
+      [3, 'apps · queues · contracts_check · role_check — очереди и проверка'],
+      [3, 'overview · sla · members · contracts · invites · hr_payouts — аналитика'],
+      [3, 'forms · giveaways · faq_manage · texts · reasons · broadcast — контент'],
+      [3, 'blacklist — чёрный список'],
+      [4, 'HAVIRYS — плюс только эти вкладки панели'],
+      [4, 'data — редактор БД (любые таблицы, откат правок)'],
+      [4, 'accounts — локальные аккаунты и привязка к паспорту'],
+      [4, 'grants — выдача вкладок панели ролям и людям'],
+      [4, 'perms — тиры команд бота'],
+      [4, 'admin — бренд, тексты, меню, цвета, тема'],
+      [4, 'landing — блоки главной страницы'],
+      [4, 'pages — доп. страницы /p/<slug>'],
+      [4, 'settings — флаги функций, автобэкап, ключи'],
+      [4, '/tools · откат правок БД из /audit'],
     ],
-    edges: [[0, 1], [1, 3], [3, 4], [3, 5], [3, 6]],
+  },
+  {
+    slug: 'access-model', title: 'Модель доступа', kind: 'freeform',
+    grants: [['level', 'member', 'view'], ['level', 'deputy', 'edit']],
+    nodes: [
+      'МОДЕЛЬ ДОСТУПА. Уровень вычисляет accessFor() из Discord-ролей. По возрастанию: guest, member, hr, deputy, owner, havirys.',
+      'guest — публичные страницы: лендинг, вход и регистрация, FAQ, правила, опубликованные доп. страницы.',
+      'member — выдаётся, если у человека есть паспорт (строка в participants). Открывает /me, /people, /giveaways, /commands, /boards, свои тикеты.',
+      'hr — роль ROLE_HR. Плюс /dashboard, /tickets, /audit и вкладки панели из набора GRANTABLE_TABS.',
+      'deputy — роль ROLE_DEPUTY. Плюс массовые действия в /people и создание досок.',
+      'owner — роль ROLE_OWNER (или бот-доступ). Плюс весь набор вкладок панели.',
+      'havirys — Discord ID 652927337016328212 = config.OWNER_USER_ID. Плюс инфраструктурные вкладки: data, accounts, grants, perms, admin, landing, pages.',
+      'Точечная выдача: havirys на /panel?tab=grants даёт роли или конкретному человеку отдельные вкладки панели, можно со сроком действия.',
+      'Доски: доступ отдельно, таблица board_grants — по уровню (member/hr/deputy/owner) или по человеку, режим просмотр или редактирование. Настройка на /board/<id>/settings.',
+    ],
+  },
+  {
+    slug: 'admin-controls', title: 'Где что настраивается', kind: 'freeform',
+    grants: [['level', 'deputy', 'view'], ['level', 'owner', 'edit']],
+    nodes: [
+      'ИСТОЧНИКИ НАСТРОЕК: 1) таблица settings — правится на сайте, применяется сразу или в течение часа; 2) config.js — правится в коде, нужен перезапуск; 3) board_grants и panel_grants — доступы.',
+      '/panel?tab=admin — название организации, ссылка-приглашение, заголовок и текст главной, подвал, меню сайта (SITE.nav), свой CSS.',
+      '/panel?tab=admin — цвета сайта: 11 переменных и 21 готовый пресет темы. Светлая тема остаётся стандартной.',
+      '/panel?tab=landing — плитки-блоки на главной странице (landing_blocks).',
+      '/panel?tab=pages — произвольные страницы /p/<slug>: черновик и публикация, отложенная публикация, версии и дифф.',
+      '/panel?tab=settings — переключатели функций: приём заявок (applications), приём контрактов по скринам (contracts), напоминания SLA/отпуска/HR (reminders).',
+      '/panel?tab=settings — время ежедневного автобэкапа (ключ backup.time) и любые произвольные ключи settings.',
+      '/panel?tab=perms — тир каждой команды бота и синхронизация видимости команд в Discord.',
+      '/panel?tab=grants — кому открыты вкладки панели: роль или человек, срок действия, пресеты наборов.',
+      '/panel?tab=accounts — локальные логины: привязка к паспорту, сброс пароля по заявке.',
+      'config.js (перезапуск): STUCK_CONTRACT_HOURS, CONTRACT_ABANDON_DAYS, REVIEW_SLA_HOURS, VACATION_REMINDER_HOURS, HR_REMINDER_INTERVAL_DAYS.',
+      'config.js: WEEKLY_PROMOTION_CONTRACT_THRESHOLD (контрактов на повышение), WEEKLY_RANK_ADJUSTMENT_DAY, CODEWORD_REFUND_AMOUNT, HR_PAYOUT_CONFIRMED, HR_PAYOUT_OTHER.',
+      'config.js: ENABLE_PRESENCE (онлайн-точки, нужен привилегированный интент), BADGE_AUTO_ROLES, ROLE_* и CHANNEL_* — id ролей и каналов.',
+      'Доски: /boards → «Настройки доски» — доступ (гранты) и флаг «отправлять PNG новичку в профиль».',
+    ],
+  },
+  {
+    slug: 'panel-tabs', title: 'Панель: все вкладки', kind: 'freeform',
+    grants: [['level', 'hr', 'view'], ['level', 'owner', 'edit']],
+    nodes: [
+      [0, 'РАБОТА С ОЧЕРЕДЯМИ — HR+ или грант вкладки'],
+      [0, 'apps — заявки на вступление: принять/отклонить, шаблоны причин, комментарии, массовое отклонение, добавить вручную'],
+      [0, 'queues — прочие очереди: паспорта, изменение данных, отпуска, апелляции, кодовые слова, заявки в HR'],
+      [0, 'contracts_check — вердикт по контрактам + список «в работе» с кнопкой снять'],
+      [0, 'role_check — сверка Discord-ролей с паспортами'],
+      [0, 'blacklist — чёрный список организации'],
+      [1, 'АНАЛИТИКА И КОНТЕНТ — HR+ или грант вкладки'],
+      [1, 'overview · sla — сводка и просроченные задачи'],
+      [1, 'members · contracts · invites — списки и статистика'],
+      [1, 'hr_payouts — выплаты HR за принятых участников'],
+      [1, 'giveaways — создать разовый и повторяющийся розыгрыш'],
+      [1, 'forms — конструктор форм и разбор поданных заявок'],
+      [1, 'faq_manage · texts · reasons — гайды, тексты, причины отказа'],
+      [1, 'broadcast — массовая рассылка в личные сообщения'],
+      [2, 'ИНФРАСТРУКТУРА — только havirys'],
+      [2, 'data — редактор БД: любые таблицы, откат правок'],
+      [2, 'accounts — локальные аккаунты и привязка'],
+      [2, 'grants — выдача вкладок панели'],
+      [2, 'perms — тиры команд бота'],
+      [2, 'admin — бренд, тексты, меню, цвета, тема'],
+      [2, 'landing — блоки главной страницы'],
+      [2, 'pages — доп. страницы /p/<slug>'],
+      [2, 'settings — флаги функций, автобэкап, произвольные ключи'],
+    ],
   },
   {
     slug: 'onboarding', title: 'Памятка новичка', kind: 'freeform', onboarding: 1,
     grants: [['level', 'member', 'view']],
     nodes: [
-      [30, 20, 'ДОБРО ПОЖАЛОВАТЬ В ОРГАНИЗАЦИЮ!\nЭто ваш профиль-канал. Сюда — только скриншоты контрактов.', 420, 84],
-      [30, 130, 'По КАЖДОМУ контракту — 2 скрина на весь экран:\n1️⃣ когда ВЗЯЛИ контракт\n2️⃣ когда ВЫПОЛНИЛИ (или не выполнили)', 420, 100],
-      [30, 255, 'Можно одним сообщением, можно двумя подряд.\nБот сам соберёт пару и отправит карточку\nруководству на проверку.', 420, 96],
-      [30, 375, 'Итог проверки: ✅ засчитан · ❌ не засчитан ·\n🚫 не контракт. Придёт уведомление, видно\nв личном кабинете на сайте (/me).', 420, 96],
-      [30, 495, '1 незакрытый контракт на паспорт.\nНе бросайте взятый — через 7 дней он сгорит.', 420, 76],
-      [470, 130, 'Личный кабинет на сайте: /me —\nпаспорт, контракты, отпуск, тикеты,\nуведомления.', 380, 96],
-      [470, 250, 'Вопросы — команда /сайт в Discord\nили тикет на сайте.', 380, 72],
+      'ДОБРО ПОЖАЛОВАТЬ! Это ваш профиль-канал — присылайте сюда только скриншоты контрактов.',
+      'По каждому контракту нужно 2 скриншота на весь экран: 1 — когда ВЗЯЛИ контракт, 2 — когда ВЫПОЛНИЛИ или не выполнили.',
+      'Можно одним сообщением, можно двумя подряд. Бот сам соберёт пару и отправит карточку руководству на проверку.',
+      'Итог проверки: засчитан, не засчитан или «не контракт». Придёт уведомление, всё видно в личном кабинете на сайте — /me.',
+      'Один незакрытый контракт на паспорт. Не бросайте взятый: через 2 дня он сгорит автоматически, либо его раньше снимет руководство.',
+      'Личный кабинет /me — паспорт, контракты, отпуск, тикеты, уведомления.',
+      'Вопросы — команда /сайт в Discord или тикет на сайте.',
     ],
   },
 ];
 
 function boardSeedModel(seed) {
-  const nodes = seed.nodes.map((a, i) => ({
-    id: 'n' + i, x: a[0], y: a[1], w: a[3] || 300, h: a[4] || 96,
-    text: a[2], parent: null, ref: null,
-  }));
+  const colY = {};
+  let stackY = 30;
+  const nodes = seed.nodes.map((a, i) => {
+    let x, y, w, text;
+    if (typeof a === 'string') {
+      x = 40; w = 560; text = a; y = stackY;
+      stackY += boardFitH(text, w) + 22;
+    } else if (a.length === 2 && typeof a[0] === 'number') {
+      const col = a[0]; text = a[1]; w = 280; x = 30 + col * 312;
+      y = (colY[col] == null ? 30 : colY[col]);
+      colY[col] = y + boardFitH(text, w) + 16;
+    } else {
+      x = a[0]; y = a[1]; text = a[2]; w = a[3] || 320;
+    }
+    return { id: 'n' + i, x, y, w, h: boardFitH(text, w), text, parent: null, ref: null };
+  });
   if (seed.kind === 'orgchart' && seed.edges) {
-    // в оргрежиме родитель берётся из первого ребра, ведущего в узел
     for (const [f, t] of seed.edges) if (nodes[t] && !nodes[t].parent) nodes[t].parent = nodes[f].id;
   }
   const edges = (seed.kind === 'orgchart' ? [] : (seed.edges || [])).map((e, i) => ({ id: 'e' + i, from: 'n' + e[0], to: 'n' + e[1] }));
   return { nodes, edges, view: { zoom: 1, panX: 0, panY: 0 } };
 }
 
-// Создаёт стандартные доски, если их ещё нет (по slug). Зовётся при старте.
+// Сидинг стандартных досок. Новые — создаёт; нетронутые (version <= 1) —
+// обновляет содержимым при росте BOARD_SEED_VERSION. Отредактированные не трогает.
 async function seedBoards() {
+  let cur = 0;
+  try { cur = parseInt((await db.getSetting('boards_seed_version')) || '0', 10) || 0; } catch (_) {}
+  const refresh = cur < BOARD_SEED_VERSION;
   for (const s of BOARD_SEEDS) {
     try {
-      const ex = await db.get('SELECT id FROM boards WHERE slug = ?', [s.slug]);
-      if (ex) continue;
-      const now = new Date().toISOString();
+      const ex = await db.get('SELECT id, version FROM boards WHERE slug = ?', [s.slug]);
       const data = JSON.stringify(boardParse(JSON.stringify(boardSeedModel(s))));
+      const now = new Date().toISOString();
+      if (ex) {
+        if (refresh && (ex.version || 1) <= 1) {
+          await db.run('UPDATE boards SET title = ?, kind = ?, data = ?, onboarding = ?, image_file = NULL, updated_at = ? WHERE id = ?',
+            [s.title, s.kind, data, s.onboarding ? 1 : 0, now, ex.id]);
+          console.log(`[доски] обновлена стандартная доска «${s.title}»`);
+        }
+        continue;
+      }
       const r = await db.run(
         "INSERT INTO boards (slug, title, kind, data, visibility, onboarding, archived, version, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, 'owner', ?, 0, 1, ?, ?, ?, ?)",
         [s.slug, s.title, s.kind, data, s.onboarding ? 1 : 0, OWNER_ID, now, OWNER_ID, now],
@@ -5052,8 +5102,27 @@ async function seedBoards() {
       }
       console.log(`[доски] создана стандартная доска «${s.title}»`);
     } catch (e) {
-      console.error('[доски] не удалось создать доску', s.slug, e.message);
+      console.error('[доски] не удалось создать/обновить доску', s.slug, e.message);
     }
+  }
+  if (refresh) {
+    // Убираем стандартные доски прошлых версий, которых больше нет в списке
+    // и которые не редактировали вручную (version <= 1).
+    try {
+      const keep = BOARD_SEEDS.map((s) => s.slug);
+      const ph = keep.map(() => '?').join(',');
+      const stale = await db.all(
+        `SELECT id, slug FROM boards WHERE slug IS NOT NULL AND slug != '' AND version <= 1 AND slug NOT IN (${ph})`,
+        keep,
+      ).catch(() => []);
+      for (const b of stale) {
+        await db.run('DELETE FROM boards WHERE id = ?', [b.id]).catch(() => {});
+        await db.run('DELETE FROM board_versions WHERE board_id = ?', [b.id]).catch(() => {});
+        await db.run('DELETE FROM board_grants WHERE board_id = ?', [b.id]).catch(() => {});
+        console.log(`[доски] удалена устаревшая стандартная доска «${b.slug}»`);
+      }
+    } catch (_) {}
+    try { await db.setSetting('boards_seed_version', String(BOARD_SEED_VERSION)); } catch (_) {}
   }
 }
 
@@ -5099,7 +5168,7 @@ var pan=null, ndrag=null, textTimer=null;
 var svg=document.createElementNS(NS,'svg');
 svg.setAttribute('class','beditsvg');
 var defs=document.createElementNS(NS,'defs');
-defs.innerHTML='<marker id="bea" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--muted)"/></marker>';
+defs.innerHTML='<marker id="bea" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker><filter id="besh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/></filter>';
 var gEdges=document.createElementNS(NS,'g');
 var gNodes=document.createElementNS(NS,'g');
 svg.appendChild(defs); svg.appendChild(gEdges); svg.appendChild(gNodes);
@@ -5141,9 +5210,9 @@ function orgLayout(){
   var kids={}; model.nodes.forEach(function(n){ kids[n.id]=[]; });
   var roots=[];
   model.nodes.forEach(function(n){ if(n.parent&&kids[n.parent]) kids[n.parent].push(n.id); else roots.push(n.id); });
-  var NW=180,NH=56,GX=36,GY=120,TOP=40, cursor=40;
+  var NW=230,GX=34,GY=150,TOP=40, cursor=40;
   function place(id,depth){
-    var n=byid[id]; n.w=NW; n.h=NH; n.y=TOP+depth*GY;
+    var n=byid[id]; n.w=NW; n.h=Math.max(52,fitH(n.text,NW)); n.y=TOP+depth*GY;
     var ch=kids[id]||[];
     if(!ch.length){ n.x=cursor; cursor+=NW+GX; return; }
     var first=null,last=null;
@@ -5154,20 +5223,26 @@ function orgLayout(){
   model.edges=model.nodes.filter(function(n){ return n.parent; }).map(function(n){ return { id:'e_'+n.parent+'_'+n.id, from:n.parent, to:n.id }; });
 }
 
-function wrap(text,maxCh){
+var LH=17;
+function chW(ch){ var c=ch.codePointAt(0); return (c>=0x1F000||(c>=0x2190&&c<=0x2BFF)||(c>=0x2600&&c<=0x27BF)||(c>=0x3000&&c<=0x9FFF)||c===0x2022)?2:1; }
+function strW(s){ var w=0,a=String(s||''); for(var i=0;i<a.length;i++) w+=chW(a[i]); return w; }
+function maxW(w){ return Math.max(6, Math.floor((w-20)/7.2)); }
+function wrap(text,mw){
   var out=[];
   String(text||'').split('\\n').forEach(function(raw){
     var words=raw.split(/\\s+/).filter(Boolean);
     if(!words.length){ out.push(''); return; }
     var line='';
     words.forEach(function(w){
-      if(line&&(line.length+1+w.length)>maxCh){ out.push(line); line=w; }
-      else line=line?line+' '+w:w;
+      var cand=line?line+' '+w:w;
+      if(line&&strW(cand)>mw){ out.push(line); line=w; }
+      else line=cand;
     });
     if(line) out.push(line);
   });
-  return out.length?out.slice(0,8):[''];
+  return out.length?out.slice(0,16):[''];
 }
+function fitH(text,w){ return Math.max(40, wrap(text, maxW(w)).length*LH+20); }
 
 function render(skipInspect){
   if(kind==='orgchart') orgLayout();
@@ -5179,26 +5254,37 @@ function render(skipInspect){
     p.setAttribute('d','M'+ax+' '+ay+' C '+ax+' '+my+', '+bx+' '+my+', '+bx+' '+(by-7));
     p.setAttribute('fill','none'); p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-width','1.5');
     p.setAttribute('marker-end','url(#bea)');
-    if(kind!=='orgchart'){ p.setAttribute('class','beedge'); p.style.cursor='pointer'; p.setAttribute('data-eid',e.id); p.setAttribute('stroke-width','6'); p.setAttribute('stroke','transparent'); p.removeAttribute('marker-end');
+    if(kind!=='orgchart'){
+      // невидимая широкая «дорожка» под линией — по ней ловим клик, чтобы удалить связь
+      p.setAttribute('class','beedge'); p.style.cursor='pointer'; p.setAttribute('data-eid',e.id);
+      p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-opacity','0'); p.setAttribute('stroke-width','18');
+      p.setAttribute('pointer-events','stroke'); p.removeAttribute('marker-end');
+      var vt=document.createElementNS(NS,'title'); vt.textContent='клик — удалить связь'; p.appendChild(vt);
       var vis=document.createElementNS(NS,'path'); vis.setAttribute('d',p.getAttribute('d')); vis.setAttribute('fill','none'); vis.setAttribute('stroke','var(--muted)'); vis.setAttribute('stroke-width','1.5'); vis.setAttribute('marker-end','url(#bea)'); vis.style.pointerEvents='none';
       gEdges.appendChild(vis);
     }
     gEdges.appendChild(p);
   });
   model.nodes.forEach(function(n){
+    var lines=wrap(n.text, maxW(n.w));
+    n.h=Math.max(40, lines.length*LH+20); // высота всегда по тексту
     var g=document.createElementNS(NS,'g'); g.setAttribute('class','benode'+(sel===n.id?' sel':'')); g.setAttribute('data-id',n.id);
     var rect=document.createElementNS(NS,'rect');
     rect.setAttribute('x',n.x); rect.setAttribute('y',n.y); rect.setAttribute('width',n.w); rect.setAttribute('height',n.h);
-    rect.setAttribute('rx','10'); rect.setAttribute('fill','var(--panel2)');
+    rect.setAttribute('rx','12'); rect.setAttribute('fill','var(--panel2)');
     rect.setAttribute('stroke', sel===n.id?'var(--accent)':'var(--line)');
+    rect.setAttribute('stroke-width', sel===n.id?'2':'1.25');
+    rect.setAttribute('filter','url(#besh)');
     g.appendChild(rect);
+    var cx=n.x+n.w/2;
     var t=document.createElementNS(NS,'text');
-    var lines=wrap(n.text, Math.max(6, Math.floor(n.w/7.5)));
-    var ty=n.y+n.h/2-(lines.length-1)*8;
-    t.setAttribute('x',n.x+n.w/2); t.setAttribute('y',ty); t.setAttribute('text-anchor','middle');
+    var ty=n.y+n.h/2-(lines.length-1)*(LH/2);
+    t.setAttribute('x',cx); t.setAttribute('y',ty); t.setAttribute('text-anchor','middle');
     t.setAttribute('dominant-baseline','middle'); t.setAttribute('font-size','13'); t.setAttribute('font-family','inherit'); t.setAttribute('fill','var(--text)');
     lines.forEach(function(ln,i){
-      var ts=document.createElementNS(NS,'tspan'); ts.setAttribute('x',n.x+n.w/2); ts.setAttribute('dy',i?16:0); ts.textContent=ln; t.appendChild(ts);
+      var ts=document.createElementNS(NS,'tspan'); ts.setAttribute('x',cx); ts.setAttribute('dy',i?LH:0); ts.textContent=ln;
+      if(i===0){ ts.setAttribute('font-weight','700'); ts.setAttribute('fill','var(--accent2)'); }
+      t.appendChild(ts);
     });
     g.appendChild(t);
     if(n.ref&&n.ref.id){
@@ -5249,9 +5335,16 @@ function delSelected(){
 }
 function addEdge(from,to){
   if(from===to) return;
-  if(model.edges.some(function(e){ return e.from===from && e.to===to; })) return;
+  // если связь между этими блоками уже есть (в любую сторону) — переключатель: убираем
+  var dup=model.edges.filter(function(e){ return (e.from===from&&e.to===to)||(e.from===to&&e.to===from); });
   pushUndo();
-  model.edges.push({ id:uid('e'), from:from, to:to });
+  if(dup.length){
+    model.edges=model.edges.filter(function(e){ return dup.indexOf(e)<0; });
+    setStatus('связь между блоками убрана');
+  } else {
+    model.edges.push({ id:uid('e'), from:from, to:to });
+    setStatus('связь добавлена');
+  }
   render();
 }
 function fit(){
@@ -5349,17 +5442,20 @@ canvas.addEventListener('wheel',function(e){
 },{passive:false});
 
 canvas.addEventListener('pointerdown',function(e){
-  var edge=e.target && e.target.getAttribute && e.target.getAttribute('data-eid');
+  var eEl=e.target && e.target.closest ? e.target.closest('.beedge') : null;
+  var edge=eEl ? eEl.getAttribute('data-eid') : (e.target && e.target.getAttribute && e.target.getAttribute('data-eid'));
   if(edge){
-    if(window.confirm('Удалить связь?')){ pushUndo(); model.edges=model.edges.filter(function(x){ return x.id!==edge; }); render(); }
+    pushUndo();
+    model.edges=model.edges.filter(function(x){ return x.id!==edge; });
+    render(); setStatus('связь удалена (Ctrl+Z — вернуть)');
     return;
   }
   var g=e.target.closest ? e.target.closest('.benode') : null;
   if(mode==='connect'){
     if(g){
       var id=g.getAttribute('data-id');
-      if(!connectFrom){ connectFrom=id; setStatus('связь: выберите второй блок'); }
-      else if(connectFrom!==id){ addEdge(connectFrom,id); connectFrom=null; mode='select'; setStatus('связь добавлена'); }
+      if(!connectFrom){ connectFrom=id; setStatus('связь: выберите второй блок (повторно между теми же — разорвать)'); }
+      else if(connectFrom!==id){ addEdge(connectFrom,id); connectFrom=null; mode='select'; }
     }
     return;
   }
@@ -5420,7 +5516,7 @@ if(bar) bar.addEventListener('click',function(e){
   else if(a==='connect'){
     if(kind==='orgchart'){ setStatus('в оргрежиме связи задаются полем «Подчинён»'); return; }
     mode=(mode==='connect')?'select':'connect'; connectFrom=null;
-    setStatus(mode==='connect'?'связь: выберите первый блок':'');
+    setStatus(mode==='connect'?'связь: выберите два блока — соединить или разорвать':'');
   }
   else if(a==='undo'){ undo(); }
   else if(a==='redo'){ redo(); }
@@ -5943,6 +6039,31 @@ async function panelContractCheck(client, user, pageNum = 0, sp) {
     </div>`);
   }
   const idsOnPage = rows.map((r) => r.id).join(',');
+
+  // В работе: «взял», но итог ещё не сдан. Руководство может снять такой контракт.
+  const abandonDays = (typeof config.CONTRACT_ABANDON_DAYS === 'number' && config.CONTRACT_ABANDON_DAYS > 0) ? config.CONTRACT_ABANDON_DAYS : 2;
+  const takenRows = await db.all(
+    "SELECT id, discord_id, taken_submitted_at, taken_message_url FROM contracts WHERE status = 'taken' ORDER BY taken_submitted_at ASC LIMIT 60",
+  ).catch(() => []);
+  const takenCards = [];
+  for (const tc of takenRows) {
+    const pr = await db.get('SELECT name, static FROM participants WHERE discord_id = ?', [tc.discord_id]).catch(() => null);
+    const ageH = tc.taken_submitted_at ? Math.floor((Date.now() - new Date(tc.taken_submitted_at)) / 36e5) : 0;
+    const burns = ageH >= abandonDays * 24;
+    takenCards.push(`<div class="card" style="padding:12px 16px">
+      <b>#${tc.id}</b> — <a href="/u/${esc(tc.discord_id)}">${esc(pr ? pr.name : tc.discord_id)}</a>${pr ? ` (№ ${esc(pr.static)})` : ''}
+      <span class="badge ${burns ? 'bad' : ''}">взят ${ageH} ч назад${burns ? ' — сгорает' : ''}</span>
+      <div class="mini">${fmt(tc.taken_submitted_at)} · ${contractProof(tc.taken_message_url, 'скрин «взял»') || 'пруфа нет'}</div>
+      <form method="POST" action="/panel/contract/abandon" style="margin-top:8px" onsubmit="return confirm('Снять взятый контракт #${tc.id}? Он не будет засчитан.')">${csrfField(user)}
+        <input type="hidden" name="id" value="${tc.id}">
+        <button class="btn sm" style="background:var(--bad)" type="submit">🚫 Снять контракт</button>
+      </form>
+    </div>`);
+  }
+  const takenBlock = `<div class="card"><h2>Контракты в работе — ${takenRows.length}${takenRows.length === 60 ? '+' : ''}</h2>
+    <p class="mini">Взяты, итог не сдан. Через ${abandonDays} дн. снимаются автоматически; здесь руководство может снять раньше.</p>
+    ${takenCards.join('') || '<div class="mini">Нет контрактов в работе.</div>'}</div>`;
+
   return `<div class="card"><h2>Контракты на проверке — всего ${total}</h2>
     <form method="GET" action="/panel" class="bar" style="margin:6px 0">
       <input type="hidden" name="tab" value="contracts_check">
@@ -5952,7 +6073,8 @@ async function panelContractCheck(client, user, pageNum = 0, sp) {
       ${flt ? '<a class="btn ghost sm" href="/panel?tab=contracts_check">сбросить</a>' : ''}
     </form>
     ${rows.length > 1 ? `<form method="POST" action="/panel/contract/review_bulk" onsubmit="return confirm('Отметить ВСЕ ${rows.length} контрактов на этой странице как выполненные?')">${csrfField(user)}<input type="hidden" name="ids" value="${idsOnPage}"><input type="hidden" name="verdict" value="fulfilled"><button class="btn ghost sm" type="submit">✅ Все на странице — выполнены</button></form>` : ''}
-    ${pager('/panel?tab=contracts_check', pageNum, total)}</div>${cards.join('') || '<div class="card">Очередь пуста.</div>'}${pager('/panel?tab=contracts_check', pageNum, total)}`;
+    ${pager('/panel?tab=contracts_check', pageNum, total)}</div>${cards.join('') || '<div class="card">Очередь пуста.</div>'}${pager('/panel?tab=contracts_check', pageNum, total)}
+    ${takenBlock}`;
 }
 
 // ---------- Управление гайдами FAQ (Владелец) ----------
@@ -6501,7 +6623,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/board/' + r.lastID + '/edit';
   }
   {
-    const bm = pathName.match(/^\/board\/(\d+)\/(settings|archive|unarchive|delete|restore|grant_add|grant_del)$/);
+    const bm = pathName.match(/^\/board\/(\d+)\/(settings|archive|unarchive|delete|restore|grant_add|grant_del|reseed)$/);
     if (bm) {
       const bid = parseInt(bm[1], 10) || 0;
       const op = bm[2];
@@ -6509,9 +6631,20 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       if (!board) return '/boards?' + qs({ err: 'Доска не найдена.' });
       const isOwner = user.id === OWNER_ID;
       const bmode = await boardAccess(client, user, board);
-      // выдача/снятие грантов и удаление — только havirys
-      if ((op === 'grant_add' || op === 'grant_del' || op === 'delete') && !isOwner) {
+      // выдача/снятие грантов, удаление, сброс к шаблону — только havirys
+      if ((op === 'grant_add' || op === 'grant_del' || op === 'delete' || op === 'reseed') && !isOwner) {
         return '/board/' + bid + '/settings?' + qs({ err: 'Это может только havirys.' });
+      }
+      if (op === 'reseed') {
+        const seed = BOARD_SEEDS.find((s) => s.slug === board.slug);
+        if (!seed) return '/board/' + bid + '/settings?' + qs({ err: 'Это не стандартная доска.' });
+        const data = JSON.stringify(boardParse(JSON.stringify(boardSeedModel(seed))));
+        const now = new Date().toISOString();
+        const nv = (board.version || 1) + 1;
+        await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, board.version || 1, board.data, user.id, now]).catch(() => {});
+        await db.run('UPDATE boards SET title = ?, kind = ?, data = ?, onboarding = ?, image_file = NULL, version = ?, updated_by = ?, updated_at = ? WHERE id = ?',
+          [seed.title, seed.kind, data, seed.onboarding ? 1 : 0, nv, user.id, now, bid]);
+        return '/board/' + bid + '/edit?' + qs({ ok: 'Содержимое сброшено к шаблону. Нажми «Сохранить», чтобы пересобрать PNG.' });
       }
       // остальное — нужен режим редактирования
       if (op !== 'grant_add' && op !== 'grant_del' && op !== 'delete' && bmode !== 'edit') {
@@ -8138,6 +8271,23 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=contracts_check&' + qs({ ok: `Проверено: ${done}.` });
   }
 
+  // ===== снять взятый контракт (руководство, до сдачи итога) =====
+  if (pathName === '/panel/contract/abandon') {
+    if (!(await panelActionAllowed(client, user, acc, 'contracts_check'))) return '/panel?tab=contracts_check&' + qs({ err: 'Недостаточно прав.' });
+    const id = parseInt(body.get('id'), 10) || 0;
+    const cn = await db.get("SELECT id, discord_id, thread_id FROM contracts WHERE id = ? AND status = 'taken'", [id]).catch(() => null);
+    if (!cn) return '/panel?tab=contracts_check&' + qs({ err: 'Контракт не найден или уже не «в работе».' });
+    for (const up of await db.all('SELECT file FROM contract_uploads WHERE contract_id = ?', [id]).catch(() => [])) {
+      if (up.file) await deleteUploadFile(up.file);
+    }
+    await db.run('DELETE FROM contract_uploads WHERE contract_id = ?', [id]).catch(() => {});
+    await db.run("UPDATE contracts SET status = 'abandoned' WHERE id = ?", [id]);
+    try { await contractsDisplay.safeUpdateContractsStats(g); } catch (_) {}
+    await pushNotify(cn.discord_id, 'contract', `Взятый контракт #${id} снят руководством — не засчитан`, '/me').catch(() => {});
+    await webAudit(client, user, 'Взятый контракт снят (сайт)', `#${id} у <@${cn.discord_id}>`);
+    return '/panel?tab=contracts_check&' + qs({ ok: `Контракт #${id} снят.` });
+  }
+
   // ===== гайды FAQ (Владелец) =====
   if (pathName.startsWith('/panel/faq/')) {
     if (acc.rank < LEVELS.owner) return '/panel?tab=faq_manage&' + qs({ err: 'Недостаточно прав.' });
@@ -8947,7 +9097,7 @@ function start(client, hooks = {}) {
         const bid = parseInt(path.split('/')[2], 10) || 0;
         const b = await readBody(req);
         if (!csrfOk(user, b.get('_csrf'))) return jr({ ok: false, err: 'csrf' });
-        const board = await db.get('SELECT id, version FROM boards WHERE id = ?', [bid]).catch(() => null);
+        const board = await db.get('SELECT id, version, data FROM boards WHERE id = ?', [bid]).catch(() => null);
         if (!board) return jr({ ok: false, err: 'notfound' });
         if ((await boardAccess(client, user, board)) !== 'edit') return jr({ ok: false, err: 'forbidden' });
         const raw = b.get('data') || '';
@@ -8958,7 +9108,6 @@ function start(client, hooks = {}) {
         try { parsed = JSON.parse(raw); } catch (_) { return jr({ ok: false, err: 'bad_json' }); }
         if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nodes)) return jr({ ok: false, err: 'bad_shape' });
         const clean = JSON.stringify(boardParse(raw));
-        const nv = (board.version || 1) + 1;
         const now = new Date().toISOString();
         // PNG-снимок доски (из клиентского рендера) — кладём в data/uploads/board-<id>.png
         let imgFile = null;
@@ -8972,6 +9121,13 @@ function start(client, hooks = {}) {
             }
           } catch (_) { imgFile = null; }
         }
+        // Содержимое не менялось (сохранение ради PNG) — версию не плодим,
+        // чтобы стандартная доска не «залипала» для авто-обновления по seed.
+        if (clean === board.data) {
+          if (imgFile) await db.run('UPDATE boards SET image_file = ?, updated_at = ? WHERE id = ?', [imgFile, now, bid]).catch(() => {});
+          return jr({ ok: true, version: board.version || 1, at: now, nochange: true });
+        }
+        const nv = (board.version || 1) + 1;
         await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [clean, nv, user.id, now, bid]);
         if (imgFile) await db.run('UPDATE boards SET image_file = ? WHERE id = ?', [imgFile, bid]).catch(() => {});
         await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, clean, user.id, now]).catch(() => {});

@@ -1011,12 +1011,13 @@ async function checkStuckContracts(guild) {
     await db.run('UPDATE contracts SET stuck_reminder_sent = 1 WHERE id = ?', [t.id]).catch(() => {});
   }
 
-  // «Взял», но так и не сдал итог 7+ дней — помечаем abandoned (не считается).
-  const abandonCutoff = new Date(Date.now() - 7 * 864e5).toISOString();
+  // «Взял», но так и не сдал итог дольше CONTRACT_ABANDON_DAYS — помечаем abandoned (не считается).
+  const abandonDays = (typeof config.CONTRACT_ABANDON_DAYS === 'number' && config.CONTRACT_ABANDON_DAYS > 0) ? config.CONTRACT_ABANDON_DAYS : 2;
+  const abandonCutoff = new Date(Date.now() - abandonDays * 864e5).toISOString();
   const abandoned = await db.all("SELECT id, discord_id FROM contracts WHERE status = 'taken' AND taken_submitted_at <= ?", [abandonCutoff]).catch(() => []);
   for (const a of abandoned) {
     await db.run("UPDATE contracts SET status = 'abandoned' WHERE id = ?", [a.id]).catch(() => {});
-    await notify(a.discord_id, 'contract', `Взятый контракт #${a.id} снят автоматически — итог не сдан 7 дней`, '/me').catch(() => {});
+    await notify(a.discord_id, 'contract', `Взятый контракт #${a.id} снят автоматически — итог не сдан ${abandonDays} дн.`, '/me').catch(() => {});
   }
 
   const stuck = await db.all(
