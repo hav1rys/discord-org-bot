@@ -9276,6 +9276,12 @@ async function postContractReviewCard(guild, discordId, takenUrl, takenAt, compl
     )],
   });
   await contracts.setReviewMessageId(contractId, reviewMsg.id);
+
+  // Скриншоты уже вложены в карточку проверки — Discord держит свою копию,
+  // локальные копии больше не нужны, удаляем сразу (не ждём 30 дней).
+  mediaCache.deleteCached(takenLocalPath);
+  mediaCache.deleteCached(completedLocalPath);
+  await contracts.setLocalPaths(contractId, null, null).catch(() => {});
 }
 
 // Discord сам не логирует, когда человек удаляет СВОЁ ЖЕ сообщение — это
@@ -9351,6 +9357,10 @@ client.on('messageDelete', async (message) => {
       extraEmbeds,
       auditFiles,
     );
+
+    // Картинки уже пересланы в аудит-лог как вложения — Discord хранит свою
+    // копию, локальные копии удаляем сразу.
+    for (const p of downloaded) mediaCache.deleteCached(p);
   } catch (err) {
     console.error('Ошибка логирования удаления сообщения:', err);
   }

@@ -1024,6 +1024,38 @@ const SCHEMA = {
     },
     indexes: [['form_id'], ['status']],
   },
+
+  // «Доски» — визуальные схемы и оргструктуры (упрощённый аналог Miro).
+  // data — JSON: {nodes:[{id,x,y,w,h,text,parent,ref}], edges:[{id,from,to}],
+  // view:{zoom,panX,panY}}. Этап 1: доступ только у havirys (и правка, и
+  // просмотр). visibility — задел под этап 2 (мультиплеер + выдача доступа).
+  boards: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      title: 'TEXT',
+      kind: "TEXT DEFAULT 'freeform'", // freeform | orgchart
+      data: 'TEXT',
+      visibility: "TEXT DEFAULT 'owner'", // owner | deputy | members
+      archived: 'INTEGER DEFAULT 0',
+      version: 'INTEGER DEFAULT 1',
+      created_by: 'TEXT',
+      created_at: 'TEXT',
+      updated_by: 'TEXT',
+      updated_at: 'TEXT',
+    },
+  },
+  // История версий доски — снимок data при каждом сохранении (храним 50).
+  board_versions: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      board_id: 'INTEGER',
+      version: 'INTEGER',
+      data: 'TEXT',
+      saved_by: 'TEXT',
+      saved_at: 'TEXT',
+    },
+    indexes: [['board_id']],
+  },
 };
 
 // Общие поля для всех очередей на рассмотрение: взятие заявки в работу

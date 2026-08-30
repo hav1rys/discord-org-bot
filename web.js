@@ -371,6 +371,21 @@ th.selcol,td.selcol{width:36px;text-align:center;padding-left:6px;padding-right:
 .themepop .tp:hover{border-color:var(--accent)}
 .themepop .tp.on{border-color:var(--accent2);box-shadow:inset 0 0 0 1px var(--accent2)}
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
+/* Доски (Miro-подобный редактор схем) */
+.beditbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 10px;margin:8px 0}
+.beditbar b{font-size:14px}
+.beditsp{flex:0 0 8px}
+.beditwrap{display:flex;gap:12px;align-items:flex-start}
+.bcanvas{flex:1;min-width:0;height:72vh;border:1px solid var(--line);border-radius:12px;background:var(--bg);overflow:hidden;touch-action:none;cursor:grab;background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
+.bcanvas:active{cursor:grabbing}
+.beditsvg{width:100%;height:100%;display:block}
+.benode{cursor:move}
+.benode.sel rect{stroke-width:2}
+.binspect{width:240px;flex:0 0 240px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.binspect textarea,.binspect input,.binspect select{width:100%}
+.bview{width:100%;height:70vh;touch-action:none;cursor:grab;background:var(--bg);background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
+.bview svg,.bview .bsvg{width:100%;height:100%;display:block}
+@media(max-width:800px){.beditwrap{flex-direction:column}.binspect{width:100%;flex:1 1 auto}}
 .chart{display:flex;align-items:flex-end;gap:14px;padding:8px 2px 0;overflow-x:auto}
 .chart .col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:46px;flex:0 0 auto}
 .chart .track{height:140px;width:36px;display:flex;align-items:flex-end;background:var(--panel2);border:1px solid var(--line);border-radius:7px;overflow:hidden}
@@ -910,6 +925,9 @@ function navItems(level, panelGrant) {
     if (panelGrant && LEVELS[level] < LEVELS.hr && !items.some((h) => h.includes('href="/panel"'))) {
       items.push('<a href="/panel">Панель</a>');
     }
+    if (LEVELS[level] >= LEVELS.owner && !items.some((h) => h.includes('href="/boards"'))) {
+      items.push('<a href="/boards">Доски</a>');
+    }
     return items;
   }
   const nav = ['<a href="/me">Мой профиль</a>'];
@@ -924,6 +942,7 @@ function navItems(level, panelGrant) {
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel?tab=apps">Заявки</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel?tab=contracts_check">Контракты</a>');
   if (LEVELS[level] >= LEVELS.hr || panelGrant) nav.push('<a href="/panel">Панель</a>');
+  if (LEVELS[level] >= LEVELS.owner) nav.push('<a href="/boards">Доски</a>');
   for (const pg of (SITE._navPages || [])) {
     const slug = (pg.slug || '').trim();
     if (!slug) continue;
@@ -4504,6 +4523,14 @@ async function healthBody(client) {
     const ud = db.dataDir ? require('path').join(db.dataDir, 'uploads') : 'data/uploads';
     for (const f of fs.readdirSync(ud)) { try { diskBytes += fs.statSync(require('path').join(ud, f)).size; } catch (_) {} }
   } catch (_) {}
+  // media_cache — временный кэш вложений из Discord (скрины контрактов,
+  // картинки удалённых сообщений). Файлы стираются сразу после того, как
+  // бот вложил их в своё сообщение; тут почти всегда близко к нулю.
+  let cacheBytes = 0; let cacheFiles = 0;
+  try {
+    const mc = require('path').join(db.dataDir || 'data', 'media_cache');
+    for (const f of fs.readdirSync(mc)) { try { cacheBytes += fs.statSync(require('path').join(mc, f)).size; cacheFiles++; } catch (_) {} }
+  } catch (_) {}
   const err24 = _errLog.filter((e) => e.at >= _since24());
   const slow24 = _slowLog.filter((e) => e.at >= _since24());
   const tile = (n, l) => `<div class="tile"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
@@ -4517,7 +4544,8 @@ async function healthBody(client) {
     ${tile(logins24, 'входов за 24ч')}
     ${tile(g ? g.memberCount : '—', 'участников сервера')}
     ${tile((uploadBytes / 1048576).toFixed(2) + ' МБ', 'скрины в БД (legacy)')}
-    ${tile((diskBytes / 1048576).toFixed(2) + ' МБ', 'скрины на диске')}
+    ${tile((diskBytes / 1048576).toFixed(2) + ' МБ', 'скрины с сайта на диске')}
+    ${tile((cacheBytes / 1048576).toFixed(2) + ' МБ', `кэш вложений Discord (${cacheFiles} файл.)`)}
     ${tile(stuckContracts, `контрактов висит >${stuckH}ч`)}
     ${tile(err24.length, 'ошибок 5xx за 24ч')}
     ${tile(slow24.length, 'медленных запросов (>1.5с) за 24ч')}
@@ -4542,6 +4570,676 @@ async function healthBody(client) {
     })()}
   </div></div>`;
 }
+
+// ---------- Доски (визуальные схемы / оргструктуры, упрощённый аналог Miro) ----------
+// Этап 1: доступ только у havirys. Данные — JSON в boards.data. Мультиплеер
+// (WebSocket, курсоры) — отдельный этап 2, когда доски откроют другим.
+
+function boardBlank(kind) {
+  const nodes = kind === 'orgchart'
+    ? [{ id: 'n1', x: 340, y: 40, w: 180, h: 56, text: 'Руководитель', parent: null, ref: null }]
+    : [];
+  return JSON.stringify({ nodes, edges: [], view: { zoom: 1, panX: 0, panY: 0 } });
+}
+
+// Безопасный разбор и нормализация модели (чужой ввод — из редактора).
+function boardParse(str) {
+  let o;
+  try { o = JSON.parse(str || '{}'); } catch (_) { o = {}; }
+  if (!o || typeof o !== 'object') o = {};
+  const nodes = (Array.isArray(o.nodes) ? o.nodes : []).slice(0, 500).map((n, i) => ({
+    id: String((n && n.id) || ('n' + i)).slice(0, 40),
+    x: Math.round(Number(n && n.x) || 0),
+    y: Math.round(Number(n && n.y) || 0),
+    w: Math.max(60, Math.min(600, Math.round(Number(n && n.w) || 180))),
+    h: Math.max(32, Math.min(400, Math.round(Number(n && n.h) || 56))),
+    text: String((n && n.text) || '').slice(0, 400),
+    parent: (n && n.parent) ? String(n.parent).slice(0, 40) : null,
+    ref: (n && n.ref && n.ref.id)
+      ? { type: n.ref.type === 'role' ? 'role' : 'user', id: String(n.ref.id).replace(/[^0-9]/g, '').slice(0, 25) }
+      : null,
+  }));
+  const ids = new Set(nodes.map((n) => n.id));
+  const edges = (Array.isArray(o.edges) ? o.edges : []).slice(0, 1000).map((e, i) => ({
+    id: String((e && e.id) || ('e' + i)).slice(0, 40),
+    from: String((e && e.from) || '').slice(0, 40),
+    to: String((e && e.to) || '').slice(0, 40),
+  })).filter((e) => ids.has(e.from) && ids.has(e.to) && e.from !== e.to);
+  for (const n of nodes) if (n.parent && !ids.has(n.parent)) n.parent = null;
+  const v = (o.view && typeof o.view === 'object') ? o.view : {};
+  const view = {
+    zoom: Math.max(0.2, Math.min(3, Number(v.zoom) || 1)),
+    panX: Math.round(Number(v.panX) || 0),
+    panY: Math.round(Number(v.panY) || 0),
+  };
+  return { nodes, edges, view };
+}
+
+// Раскладка оргструктуры сверху вниз по полю parent (простое tidy-дерево).
+// Мутирует переданную модель: перезаписывает x/y/w/h узлов и edges.
+function boardOrgLayout(model) {
+  const nodes = model.nodes;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  for (const n of nodes) { // разрываем циклы в цепочке родителей
+    const chain = new Set([n.id]);
+    let p = n.parent;
+    while (p) {
+      if (chain.has(p)) { n.parent = null; break; }
+      chain.add(p);
+      p = (byId.get(p) || {}).parent;
+    }
+  }
+  const kids = new Map(nodes.map((n) => [n.id, []]));
+  const roots = [];
+  for (const n of nodes) {
+    if (n.parent && kids.has(n.parent)) kids.get(n.parent).push(n.id);
+    else roots.push(n.id);
+  }
+  const NW = 180, NH = 56, GX = 36, GY = 120, TOP = 40;
+  let cursor = 40;
+  const place = (id, depth) => {
+    const n = byId.get(id);
+    n.w = NW; n.h = NH; n.y = TOP + depth * GY;
+    const ch = kids.get(id) || [];
+    if (!ch.length) { n.x = cursor; cursor += NW + GX; return; }
+    let first = null, last = null;
+    for (const c of ch) { place(c, depth + 1); if (first === null) first = byId.get(c).x; last = byId.get(c).x; }
+    n.x = Math.round((first + last) / 2);
+  };
+  for (const r of roots) { place(r, 0); cursor += GX; }
+  model.edges = nodes.filter((n) => n.parent).map((n) => ({ id: 'e_' + n.parent + '_' + n.id, from: n.parent, to: n.id }));
+  return model;
+}
+
+function boardWrap(text, maxCh) {
+  const out = [];
+  for (const raw of String(text || '').split('\n')) {
+    const words = raw.split(/\s+/).filter(Boolean);
+    if (!words.length) { out.push(''); continue; }
+    let line = '';
+    for (const w of words) {
+      if (line && (line.length + 1 + w.length) > maxCh) { out.push(line); line = w; }
+      else line = line ? line + ' ' + w : w;
+    }
+    if (line) out.push(line);
+  }
+  return out.length ? out.slice(0, 8) : [''];
+}
+
+// SSR-рендер доски в <svg> (страница просмотра и стартовый холст редактора).
+function boardSvg(model, opts) {
+  opts = opts || {};
+  const m = (opts.layout && model.nodes.some((n) => n.parent))
+    ? boardOrgLayout({ nodes: model.nodes.map((n) => ({ ...n })), edges: [] })
+    : model;
+  const nodes = m.nodes, edges = m.edges;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); }
+  if (!nodes.length) { minX = 0; minY = 0; maxX = 480; maxY = 240; }
+  const pad = 44;
+  const vb = `${minX - pad} ${minY - pad} ${(maxX - minX) + pad * 2} ${(maxY - minY) + pad * 2}`;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const eEls = edges.map((e) => {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    if (!a || !b) return '';
+    const ax = a.x + a.w / 2, ay = a.y + a.h, bx = b.x + b.w / 2, by = b.y, my = (ay + by) / 2;
+    return `<path d="M${ax} ${ay} C ${ax} ${my}, ${bx} ${my}, ${bx} ${by - 7}" fill="none" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#bar)"/>`;
+  }).join('');
+  const nEls = nodes.map((n) => {
+    const lines = boardWrap(n.text, Math.max(6, Math.floor(n.w / 7.5)));
+    const ty = n.y + n.h / 2 - (lines.length - 1) * 8;
+    const tsp = lines.map((ln, i) => `<tspan x="${n.x + n.w / 2}" dy="${i ? 16 : 0}">${esc(ln)}</tspan>`).join('');
+    return `<g data-id="${esc(n.id)}">
+      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="10" fill="var(--panel2)" stroke="var(--line)" stroke-width="1"/>
+      <text x="${n.x + n.w / 2}" y="${ty}" text-anchor="middle" dominant-baseline="middle" font-size="13" font-family="inherit" fill="var(--text)">${tsp}</text>
+      ${n.ref ? `<circle cx="${n.x + n.w - 11}" cy="${n.y + 11}" r="3.5" fill="var(--accent2)"></circle>` : ''}
+    </g>`;
+  }).join('');
+  return `<svg class="bsvg" xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet">
+    <defs><marker id="bar" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--muted)"/></marker></defs>
+    ${eEls}${nEls}
+  </svg>`;
+}
+
+function boardsListBody(rows, user, showArch) {
+  const cards = rows.map((b) => {
+    const kindL = b.kind === 'orgchart' ? '🌳 оргструктура' : '🖊️ свободная';
+    return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div>
+        <div style="font-weight:700;font-size:15px">${esc(b.title || 'Без названия')}</div>
+        <div class="mini">${kindL} · v${b.version || 1} · изменено ${fmt(b.updated_at)}</div>
+      </div>
+      <div class="bar" style="margin:0">
+        ${showArch ? '' : `<a class="btn sm" href="/board/${b.id}/edit">Открыть</a>
+        <a class="btn ghost sm" href="/board/${b.id}">Просмотр</a>
+        <a class="btn ghost sm" href="/board/${b.id}/versions">Версии</a>
+        <a class="btn ghost sm" href="/board/${b.id}/settings">Настройки</a>`}
+        ${showArch ? `<form method="POST" action="/board/${b.id}/unarchive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">Вернуть из архива</button></form>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  return `<h1>Доски</h1>
+  <p class="muted">Визуальные схемы и оргструктуры. Доступ — только у вас (havirys).</p>
+  ${showArch ? '' : `<div class="card"><h2>Новая доска</h2>
+    <form method="POST" action="/board/create" class="form">${csrfField(user)}
+      <label>Название<input name="title" maxlength="80" placeholder="Оргструктура организации" required></label>
+      <label>Тип
+        <select name="kind">
+          <option value="freeform">Свободная доска (блоки и стрелки вручную)</option>
+          <option value="orgchart">Оргструктура (дерево, автораскладка)</option>
+        </select>
+      </label>
+      <button class="btn" type="submit">Создать</button>
+    </form>
+  </div>`}
+  ${cards || `<div class="card muted">${showArch ? 'В архиве пусто.' : 'Пока нет ни одной доски.'}</div>`}
+  <p class="mini">${showArch ? '<a href="/boards">← активные доски</a>' : '<a href="/boards?arch=1">Архив</a>'}</p>`;
+}
+
+function boardViewBody(board, user) {
+  const model = boardParse(board.data);
+  const svg = boardSvg(model, { layout: board.kind === 'orgchart' });
+  return `<div class="bar" style="justify-content:space-between">
+      <h1 style="margin:0">${esc(board.title || 'Доска')}</h1>
+      <div class="bar" style="margin:0">
+        <a class="btn sm" href="/board/${board.id}/edit">Редактировать</a>
+        <a class="btn ghost sm" href="/board/${board.id}/export.json">Экспорт JSON</a>
+        <a class="btn ghost sm" href="/boards">← к списку</a>
+      </div>
+    </div>
+    <div class="card" style="padding:0;overflow:hidden"><div id="bview" class="bview">${svg}</div></div>
+    <p class="mini">Колесо — масштаб, перетаскивание — панорама.</p>
+    <script>${BOARD_VIEW_JS}</script>`;
+}
+
+function boardEditBody(board, user) {
+  const model = boardParse(board.data);
+  const payload = JSON.stringify({ id: board.id, kind: board.kind, version: board.version || 1, model })
+    .replace(/</g, '\\u003c');
+  return `<div class="beditbar">
+      <a class="btn ghost sm" href="/boards">←</a>
+      <b>${esc(board.title || 'Доска')}</b>
+      <span class="mini">${board.kind === 'orgchart' ? 'оргструктура' : 'свободная'}</span>
+      <span class="beditsp"></span>
+      <button class="btn sm" type="button" data-act="add">+ блок</button>
+      <button class="btn ghost sm" type="button" data-act="connect">↳ связь</button>
+      <button class="btn ghost sm" type="button" data-act="undo">↶</button>
+      <button class="btn ghost sm" type="button" data-act="redo">↷</button>
+      <button class="btn ghost sm" type="button" data-act="fit">⤢ вписать</button>
+      <span class="beditsp"></span>
+      <button class="btn sm" type="button" data-act="save" id="bsave">Сохранить</button>
+      <span class="mini" id="bstatus"></span>
+      <span class="beditsp"></span>
+      <button class="btn ghost sm" type="button" data-act="png">PNG</button>
+      <a class="btn ghost sm" href="/board/${board.id}/export.json">JSON</a>
+      <a class="btn ghost sm" href="/board/${board.id}/versions">версии</a>
+    </div>
+    <div class="beditwrap">
+      <div id="bcanvas" class="bcanvas"></div>
+      <div id="binspect" class="binspect" hidden>
+        <div class="mini">Выбранный блок</div>
+        <textarea id="bi_text" rows="3" placeholder="текст блока"></textarea>
+        <label class="mini" id="bi_parentrow" hidden>Подчинён<select id="bi_parent"></select></label>
+        <label class="mini">Ссылка на Discord — ID участника/роли<input id="bi_ref" maxlength="25" inputmode="numeric" placeholder="напр. 652927337016328212"></label>
+        <label class="mini">Тип ссылки<select id="bi_reftype"><option value="user">участник</option><option value="role">роль</option></select></label>
+        <div class="bar" style="margin:4px 0 0">
+          <button class="btn ghost sm" type="button" id="bi_dup">Дублировать</button>
+          <button class="btn ghost sm" type="button" id="bi_del" style="color:var(--bad)">Удалить</button>
+        </div>
+      </div>
+    </div>
+    <p class="mini">Двойной клик по холсту — новый блок. Тащить блок — двигать (в оргрежиме — тащить на другой блок, чтобы подчинить). Колесо — масштаб. Del — удалить. Ctrl+S — сохранить.</p>
+    <form method="POST" action="/board/${board.id}/save" id="bform" style="display:none">${csrfField(user)}</form>
+    <script>window.__BOARD__=${payload};</script>
+    <script src="/board-editor.js"></script>`;
+}
+
+function boardSettingsBody(board, user) {
+  return `<h1>Настройки доски</h1>
+  <div class="card">
+    <form method="POST" action="/board/${board.id}/settings" class="form">${csrfField(user)}
+      <label>Название<input name="title" maxlength="80" value="${esc(board.title || '')}"></label>
+      <label>Тип
+        <select name="kind">
+          <option value="freeform"${board.kind !== 'orgchart' ? ' selected' : ''}>Свободная доска</option>
+          <option value="orgchart"${board.kind === 'orgchart' ? ' selected' : ''}>Оргструктура (автораскладка)</option>
+        </select>
+      </label>
+      <p class="mini">В режиме «оргструктура» позиции блоков считаются автоматически по полю «Подчинён»; вручную нарисованные стрелки не показываются.</p>
+      <button class="btn" type="submit">Сохранить</button>
+    </form>
+  </div>
+  <div class="card"><div class="bar" style="margin:0">
+    <a class="btn ghost sm" href="/board/${board.id}/edit">← в редактор</a>
+    <form method="POST" action="/board/${board.id}/archive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">В архив</button></form>
+    <form method="POST" action="/board/${board.id}/delete" style="display:inline" onsubmit="return confirm('Удалить доску без возможности восстановления?')">${csrfField(user)}<button class="btn ghost sm" type="submit" style="color:var(--bad)">Удалить</button></form>
+  </div></div>`;
+}
+
+function boardVersionsBody(board, vs, user) {
+  const rows = vs.map((v) => `<tr>
+    <td>v${v.version}</td>
+    <td class="muted">${fmt(v.saved_at)}</td>
+    <td><form method="POST" action="/board/${board.id}/restore" style="display:inline" onsubmit="return confirm('Восстановить v${v.version}? Текущее состояние станет новой версией.')">${csrfField(user)}<input type="hidden" name="version_id" value="${v.id}"><button class="btn ghost sm" type="submit">Восстановить</button></form></td>
+  </tr>`).join('');
+  return `<h1>Версии — ${esc(board.title || 'Доска')}</h1>
+  <p><a href="/board/${board.id}/edit">← в редактор</a></p>
+  <div class="card"><div class="tablewrap"><table>
+    <tr><th>Версия</th><th>Сохранена</th><th></th></tr>
+    ${rows || '<tr><td colspan="3">Пока одна версия.</td></tr>'}
+  </table></div></div>`;
+}
+
+// Пан/зум для страницы просмотра доски (только чтение).
+const BOARD_VIEW_JS = `(function(){
+  var box=document.getElementById('bview'); if(!box) return;
+  var svg=box.querySelector('svg'); if(!svg) return;
+  var p=(svg.getAttribute('viewBox')||'0 0 800 500').split(' ').map(Number);
+  var x=p[0],y=p[1],w=p[2],h=p[3];
+  function set(){ svg.setAttribute('viewBox',x+' '+y+' '+w+' '+h); }
+  box.addEventListener('wheel',function(e){ e.preventDefault();
+    var r=box.getBoundingClientRect(), mx=x+(e.clientX-r.left)/r.width*w, my=y+(e.clientY-r.top)/r.height*h;
+    var k=e.deltaY>0?1.1:0.9; w*=k; h*=k;
+    x=mx-(e.clientX-r.left)/r.width*w; y=my-(e.clientY-r.top)/r.height*h; set();
+  },{passive:false});
+  var drag=null;
+  box.addEventListener('pointerdown',function(e){ drag={px:e.clientX,py:e.clientY,x:x,y:y}; try{box.setPointerCapture(e.pointerId);}catch(_){}});
+  box.addEventListener('pointermove',function(e){ if(!drag) return; var r=box.getBoundingClientRect();
+    x=drag.x-(e.clientX-drag.px)/r.width*w; y=drag.y-(e.clientY-drag.py)/r.height*h; set(); });
+  box.addEventListener('pointerup',function(){ drag=null; });
+  box.addEventListener('pointercancel',function(){ drag=null; });
+})();`;
+
+// Редактор досок целиком (без внешних зависимостей). Отдаётся как /board-editor.js.
+// ВНИМАНИЕ: это шаблонная строка web.js — внутри нельзя использовать обратные
+// кавычки и подстановки шаблонных строк; спецсимволы regex/строк удваиваем.
+const BOARD_EDITOR_JS = `'use strict';
+(function(){
+var D=window.__BOARD__; if(!D){ return; }
+var NS='http://www.w3.org/2000/svg';
+var boardId=D.id, kind=D.kind, model=D.model, serverVersion=D.version;
+var canvas=document.getElementById('bcanvas');
+var inspect=document.getElementById('binspect');
+var statusEl=document.getElementById('bstatus');
+var bar=document.querySelector('.beditbar');
+if(!canvas){ return; }
+
+var dirty=false, mode='select', connectFrom=null, sel=null;
+var undoStack=[], redoStack=[];
+var view={ x:20, y:20, k:1 };
+var pan=null, ndrag=null, textTimer=null;
+
+var svg=document.createElementNS(NS,'svg');
+svg.setAttribute('class','beditsvg');
+var defs=document.createElementNS(NS,'defs');
+defs.innerHTML='<marker id="bea" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="var(--muted)"/></marker>';
+var gEdges=document.createElementNS(NS,'g');
+var gNodes=document.createElementNS(NS,'g');
+svg.appendChild(defs); svg.appendChild(gEdges); svg.appendChild(gNodes);
+canvas.appendChild(svg);
+
+function uid(p){ return p+Math.random().toString(36).slice(2,8); }
+function byId(id){ for(var i=0;i<model.nodes.length;i++){ if(model.nodes[i].id===id) return model.nodes[i]; } return null; }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function oneline(s){ return String(s||'').replace(/\\s+/g,' ').trim().slice(0,40)||'(без текста)'; }
+function setStatus(t){ if(statusEl) statusEl.textContent=t||''; }
+function markDirty(){ dirty=true; setStatus('не сохранено'); }
+
+function screenToWorld(sx,sy){
+  var r=canvas.getBoundingClientRect();
+  return { x:(sx-r.left-view.x)/view.k, y:(sy-r.top-view.y)/view.k };
+}
+function applyView(){
+  var t='translate('+view.x+','+view.y+') scale('+view.k+')';
+  gEdges.setAttribute('transform',t); gNodes.setAttribute('transform',t);
+}
+
+function snapshot(){ return JSON.stringify(model); }
+function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length>60) undoStack.shift(); redoStack.length=0; markDirty(); }
+function undo(){ if(!undoStack.length) return; redoStack.push(snapshot()); model=JSON.parse(undoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
+function redo(){ if(!redoStack.length) return; undoStack.push(snapshot()); model=JSON.parse(redoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
+
+function isDescendant(id, ancestorId){
+  var n=byId(id), guard=0;
+  while(n && n.parent && guard++<300){ if(n.parent===ancestorId) return true; n=byId(n.parent); }
+  return false;
+}
+
+function orgLayout(){
+  var byid={}; model.nodes.forEach(function(n){ byid[n.id]=n; });
+  model.nodes.forEach(function(n){
+    var chain={}; chain[n.id]=1; var p=n.parent;
+    while(p){ if(chain[p]){ n.parent=null; break; } chain[p]=1; p=byid[p]?byid[p].parent:null; }
+  });
+  var kids={}; model.nodes.forEach(function(n){ kids[n.id]=[]; });
+  var roots=[];
+  model.nodes.forEach(function(n){ if(n.parent&&kids[n.parent]) kids[n.parent].push(n.id); else roots.push(n.id); });
+  var NW=180,NH=56,GX=36,GY=120,TOP=40, cursor=40;
+  function place(id,depth){
+    var n=byid[id]; n.w=NW; n.h=NH; n.y=TOP+depth*GY;
+    var ch=kids[id]||[];
+    if(!ch.length){ n.x=cursor; cursor+=NW+GX; return; }
+    var first=null,last=null;
+    ch.forEach(function(c){ place(c,depth+1); if(first===null)first=byid[c].x; last=byid[c].x; });
+    n.x=Math.round((first+last)/2);
+  }
+  roots.forEach(function(r){ place(r,0); cursor+=GX; });
+  model.edges=model.nodes.filter(function(n){ return n.parent; }).map(function(n){ return { id:'e_'+n.parent+'_'+n.id, from:n.parent, to:n.id }; });
+}
+
+function wrap(text,maxCh){
+  var out=[];
+  String(text||'').split('\\n').forEach(function(raw){
+    var words=raw.split(/\\s+/).filter(Boolean);
+    if(!words.length){ out.push(''); return; }
+    var line='';
+    words.forEach(function(w){
+      if(line&&(line.length+1+w.length)>maxCh){ out.push(line); line=w; }
+      else line=line?line+' '+w:w;
+    });
+    if(line) out.push(line);
+  });
+  return out.length?out.slice(0,8):[''];
+}
+
+function render(skipInspect){
+  if(kind==='orgchart') orgLayout();
+  gEdges.textContent=''; gNodes.textContent='';
+  model.edges.forEach(function(e){
+    var a=byId(e.from), b=byId(e.to); if(!a||!b) return;
+    var ax=a.x+a.w/2, ay=a.y+a.h, bx=b.x+b.w/2, by=b.y, my=(ay+by)/2;
+    var p=document.createElementNS(NS,'path');
+    p.setAttribute('d','M'+ax+' '+ay+' C '+ax+' '+my+', '+bx+' '+my+', '+bx+' '+(by-7));
+    p.setAttribute('fill','none'); p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-width','1.5');
+    p.setAttribute('marker-end','url(#bea)');
+    if(kind!=='orgchart'){ p.setAttribute('class','beedge'); p.style.cursor='pointer'; p.setAttribute('data-eid',e.id); p.setAttribute('stroke-width','6'); p.setAttribute('stroke','transparent'); p.removeAttribute('marker-end');
+      var vis=document.createElementNS(NS,'path'); vis.setAttribute('d',p.getAttribute('d')); vis.setAttribute('fill','none'); vis.setAttribute('stroke','var(--muted)'); vis.setAttribute('stroke-width','1.5'); vis.setAttribute('marker-end','url(#bea)'); vis.style.pointerEvents='none';
+      gEdges.appendChild(vis);
+    }
+    gEdges.appendChild(p);
+  });
+  model.nodes.forEach(function(n){
+    var g=document.createElementNS(NS,'g'); g.setAttribute('class','benode'+(sel===n.id?' sel':'')); g.setAttribute('data-id',n.id);
+    var rect=document.createElementNS(NS,'rect');
+    rect.setAttribute('x',n.x); rect.setAttribute('y',n.y); rect.setAttribute('width',n.w); rect.setAttribute('height',n.h);
+    rect.setAttribute('rx','10'); rect.setAttribute('fill','var(--panel2)');
+    rect.setAttribute('stroke', sel===n.id?'var(--accent)':'var(--line)');
+    g.appendChild(rect);
+    var t=document.createElementNS(NS,'text');
+    var lines=wrap(n.text, Math.max(6, Math.floor(n.w/7.5)));
+    var ty=n.y+n.h/2-(lines.length-1)*8;
+    t.setAttribute('x',n.x+n.w/2); t.setAttribute('y',ty); t.setAttribute('text-anchor','middle');
+    t.setAttribute('dominant-baseline','middle'); t.setAttribute('font-size','13'); t.setAttribute('font-family','inherit'); t.setAttribute('fill','var(--text)');
+    lines.forEach(function(ln,i){
+      var ts=document.createElementNS(NS,'tspan'); ts.setAttribute('x',n.x+n.w/2); ts.setAttribute('dy',i?16:0); ts.textContent=ln; t.appendChild(ts);
+    });
+    g.appendChild(t);
+    if(n.ref&&n.ref.id){
+      var c=document.createElementNS(NS,'circle');
+      c.setAttribute('cx',n.x+n.w-11); c.setAttribute('cy',n.y+11); c.setAttribute('r','3.5'); c.setAttribute('fill','var(--accent2)');
+      g.appendChild(c);
+    }
+    gNodes.appendChild(g);
+  });
+  applyView();
+  if(!skipInspect) syncInspect();
+}
+
+function syncInspect(){
+  var n=sel?byId(sel):null;
+  if(!n){ inspect.hidden=true; return; }
+  inspect.hidden=false;
+  var ti=document.getElementById('bi_text');
+  if(document.activeElement!==ti) ti.value=n.text||'';
+  var pr=document.getElementById('bi_parentrow');
+  if(kind==='orgchart'){
+    pr.hidden=false;
+    var sc=document.getElementById('bi_parent');
+    var opts='<option value="">— нет (корень) —</option>';
+    model.nodes.forEach(function(m){
+      if(m.id===n.id || isDescendant(m.id,n.id)) return;
+      opts+='<option value="'+esc(m.id)+'"'+(n.parent===m.id?' selected':'')+'>'+esc(oneline(m.text))+'</option>';
+    });
+    sc.innerHTML=opts;
+  } else { pr.hidden=true; }
+  document.getElementById('bi_ref').value=(n.ref&&n.ref.id)||'';
+  document.getElementById('bi_reftype').value=(n.ref&&n.ref.type)||'user';
+}
+
+function addNodeAt(wx,wy){
+  pushUndo();
+  var n={ id:uid('n'), x:Math.round(wx/8)*8, y:Math.round(wy/8)*8, w:180, h:56, text:'Текст', parent:null, ref:null };
+  model.nodes.push(n); sel=n.id; render();
+  setTimeout(function(){ var ti=document.getElementById('bi_text'); if(ti){ ti.focus(); ti.select(); } },0);
+}
+function delSelected(){
+  if(!sel) return;
+  pushUndo();
+  model.nodes=model.nodes.filter(function(n){ return n.id!==sel; });
+  model.nodes.forEach(function(n){ if(n.parent===sel) n.parent=null; });
+  model.edges=model.edges.filter(function(e){ return e.from!==sel && e.to!==sel; });
+  sel=null; render();
+}
+function addEdge(from,to){
+  if(from===to) return;
+  if(model.edges.some(function(e){ return e.from===from && e.to===to; })) return;
+  pushUndo();
+  model.edges.push({ id:uid('e'), from:from, to:to });
+  render();
+}
+function fit(){
+  var r=canvas.getBoundingClientRect(), pad=40;
+  if(!model.nodes.length){ view={x:pad,y:pad,k:1}; applyView(); return; }
+  var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
+  var bw=Math.max(1,maxX-minX), bh=Math.max(1,maxY-minY);
+  var k=Math.min((r.width-pad*2)/bw,(r.height-pad*2)/bh,2);
+  k=Math.max(0.2,Math.min(2,k||1));
+  view.k=k;
+  view.x=(r.width-bw*k)/2-minX*k;
+  view.y=(r.height-bh*k)/2-minY*k;
+  applyView();
+}
+
+var SAVE_ERR={ csrf:'сессия формы устарела — обновите страницу', forbidden:'нет доступа', notfound:'доска не найдена', too_big:'слишком большая доска', bad_json:'ошибка данных — не сохранено', bad_shape:'ошибка данных — не сохранено' };
+function save(){
+  var btn=document.getElementById('bsave'); if(btn) btn.disabled=true; setStatus('сохранение…');
+  var form=document.getElementById('bform');
+  var csrfEl=form?form.querySelector('input[name=_csrf]'):null;
+  var payload=JSON.stringify(model);
+  if(payload.length>2500000){ if(btn) btn.disabled=false; setStatus('доска слишком большая — не сохранено'); return; }
+  var body='_csrf='+encodeURIComponent(csrfEl?csrfEl.value:'')+'&data='+encodeURIComponent(payload);
+  fetch('/board/'+boardId+'/save',{ method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body, credentials:'same-origin' })
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(btn) btn.disabled=false;
+      if(j&&j.ok){ dirty=false; serverVersion=j.version; setStatus('сохранено (v'+j.version+') '+new Date().toLocaleTimeString()); try{ localStorage.removeItem('fc_board_'+boardId); }catch(e){} }
+      else setStatus('не сохранено: '+(SAVE_ERR[j&&j.err]||(j&&j.err)||'ошибка'));
+    })
+    .catch(function(){ if(btn) btn.disabled=false; setStatus('ошибка сети — не сохранено'); });
+}
+
+function computeBBox(){
+  var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
+  if(!model.nodes.length){ minX=0;minY=0;maxX=400;maxY=200; }
+  return { x:minX, y:minY, w:maxX-minX, h:maxY-minY };
+}
+function exportPng(){
+  var bb=computeBBox(), pad=30, W=Math.max(1,bb.w+pad*2), H=Math.max(1,bb.h+pad*2);
+  var cs=getComputedStyle(document.documentElement);
+  function cv(name,fb){ var v=cs.getPropertyValue(name).trim(); return v||fb; }
+  var clone=svg.cloneNode(true);
+  clone.setAttribute('xmlns',NS);
+  clone.setAttribute('width',W); clone.setAttribute('height',H);
+  clone.setAttribute('viewBox',(bb.x-pad)+' '+(bb.y-pad)+' '+W+' '+H);
+  for(var i=0;i<clone.childNodes.length;i++){ var ch=clone.childNodes[i]; if(ch.tagName==='g') ch.removeAttribute('transform'); }
+  var s=new XMLSerializer().serializeToString(clone);
+  s=s.replace(/var\\(--(bg|panel|panel2|line|text|muted|accent|accent2|ok|bad|warn)\\)/g,function(_m,k){ return cv('--'+k,'#888'); });
+  var src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent('<?xml version="1.0"?>'+s)));
+  var img=new Image();
+  img.onload=function(){
+    var scl=2, cnv=document.createElement('canvas'); cnv.width=W*scl; cnv.height=H*scl;
+    var ctx=cnv.getContext('2d'); ctx.fillStyle=cv('--bg','#0f1013'); ctx.fillRect(0,0,cnv.width,cnv.height);
+    ctx.drawImage(img,0,0,cnv.width,cnv.height);
+    cnv.toBlob(function(blob){
+      if(!blob) return;
+      var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='board-'+boardId+'.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
+    });
+  };
+  img.onerror=function(){ setStatus('не удалось сделать PNG'); };
+  img.src=src;
+}
+
+canvas.addEventListener('wheel',function(e){
+  e.preventDefault();
+  var r=canvas.getBoundingClientRect();
+  var wx=(e.clientX-r.left-view.x)/view.k, wy=(e.clientY-r.top-view.y)/view.k;
+  var k2=view.k*(e.deltaY>0?0.9:1.1); k2=Math.max(0.2,Math.min(3,k2));
+  view.x=(e.clientX-r.left)-wx*k2; view.y=(e.clientY-r.top)-wy*k2; view.k=k2;
+  applyView();
+},{passive:false});
+
+canvas.addEventListener('pointerdown',function(e){
+  var edge=e.target && e.target.getAttribute && e.target.getAttribute('data-eid');
+  if(edge){
+    if(window.confirm('Удалить связь?')){ pushUndo(); model.edges=model.edges.filter(function(x){ return x.id!==edge; }); render(); }
+    return;
+  }
+  var g=e.target.closest ? e.target.closest('.benode') : null;
+  if(mode==='connect'){
+    if(g){
+      var id=g.getAttribute('data-id');
+      if(!connectFrom){ connectFrom=id; setStatus('связь: выберите второй блок'); }
+      else if(connectFrom!==id){ addEdge(connectFrom,id); connectFrom=null; mode='select'; setStatus('связь добавлена'); }
+    }
+    return;
+  }
+  if(g){
+    var n=byId(g.getAttribute('data-id')); if(!n) return;
+    sel=n.id; render();
+    var w0=screenToWorld(e.clientX,e.clientY);
+    ndrag={ id:n.id, dx:w0.x-n.x, dy:w0.y-n.y, moved:false, org:null };
+    try{ canvas.setPointerCapture(e.pointerId); }catch(_){}
+  } else {
+    sel=null; render();
+    pan={ px:e.clientX, py:e.clientY, x:view.x, y:view.y };
+    try{ canvas.setPointerCapture(e.pointerId); }catch(_){}
+  }
+});
+canvas.addEventListener('pointermove',function(e){
+  if(pan){ view.x=pan.x+(e.clientX-pan.px); view.y=pan.y+(e.clientY-pan.py); applyView(); return; }
+  if(ndrag){
+    var n=byId(ndrag.id); if(!n) return;
+    if(!ndrag.moved){ pushUndo(); ndrag.moved=true; }
+    if(kind==='orgchart'){
+      var el=document.elementFromPoint(e.clientX,e.clientY);
+      var tg=el&&el.closest?el.closest('.benode'):null;
+      ndrag.org=(tg && tg.getAttribute('data-id')!==n.id) ? tg.getAttribute('data-id') : '__root__';
+      setStatus(ndrag.org==='__root__'?'отпустите — блок станет корневым':'отпустите — подчинить выбранному');
+    } else {
+      var w=screenToWorld(e.clientX,e.clientY);
+      n.x=Math.round((w.x-ndrag.dx)/8)*8; n.y=Math.round((w.y-ndrag.dy)/8)*8;
+      render(true);
+    }
+  }
+});
+function endDrag(e){
+  if(ndrag && kind==='orgchart' && ndrag.moved && ndrag.org){
+    var n=byId(ndrag.id);
+    if(n){
+      if(ndrag.org==='__root__') n.parent=null;
+      else if(!isDescendant(ndrag.org, n.id)) n.parent=ndrag.org;
+    }
+    render(); setStatus('не сохранено');
+  } else if(ndrag && !ndrag.moved){
+    render();
+  }
+  pan=null; ndrag=null;
+}
+canvas.addEventListener('pointerup',endDrag);
+canvas.addEventListener('pointercancel',endDrag);
+canvas.addEventListener('dblclick',function(e){
+  if(e.target.closest && e.target.closest('.benode')) return;
+  var w=screenToWorld(e.clientX,e.clientY);
+  addNodeAt(w.x,w.y);
+});
+
+if(bar) bar.addEventListener('click',function(e){
+  var b=e.target.closest?e.target.closest('[data-act]'):null; if(!b) return;
+  var a=b.getAttribute('data-act');
+  if(a==='add'){ var r=canvas.getBoundingClientRect(); var w=screenToWorld(r.left+r.width/2,r.top+r.height/2); addNodeAt(w.x,w.y); }
+  else if(a==='connect'){
+    if(kind==='orgchart'){ setStatus('в оргрежиме связи задаются полем «Подчинён»'); return; }
+    mode=(mode==='connect')?'select':'connect'; connectFrom=null;
+    setStatus(mode==='connect'?'связь: выберите первый блок':'');
+  }
+  else if(a==='undo'){ undo(); }
+  else if(a==='redo'){ redo(); }
+  else if(a==='fit'){ fit(); }
+  else if(a==='save'){ save(); }
+  else if(a==='png'){ exportPng(); }
+});
+
+document.getElementById('bi_text').addEventListener('input',function(){
+  var n=sel&&byId(sel); if(!n) return;
+  n.text=this.value.slice(0,400); markDirty();
+  clearTimeout(textTimer); textTimer=setTimeout(function(){ render(true); },220);
+});
+document.getElementById('bi_parent').addEventListener('change',function(){
+  var n=sel&&byId(sel); if(!n) return;
+  pushUndo(); n.parent=this.value||null; render();
+});
+function applyRef(){
+  var n=sel&&byId(sel); if(!n) return;
+  var id=document.getElementById('bi_ref').value.replace(/[^0-9]/g,'').slice(0,25);
+  n.ref=id?{ type:document.getElementById('bi_reftype').value==='role'?'role':'user', id:id }:null;
+  markDirty(); render(true);
+}
+document.getElementById('bi_ref').addEventListener('change',applyRef);
+document.getElementById('bi_reftype').addEventListener('change',applyRef);
+document.getElementById('bi_dup').addEventListener('click',function(){
+  var n=sel&&byId(sel); if(!n) return;
+  pushUndo();
+  var c=JSON.parse(JSON.stringify(n)); c.id=uid('n'); c.x=(n.x||0)+24; c.y=(n.y||0)+24;
+  if(kind!=='orgchart') c.parent=null;
+  model.nodes.push(c); sel=c.id; render();
+});
+document.getElementById('bi_del').addEventListener('click',delSelected);
+
+document.addEventListener('keydown',function(e){
+  var tag=(e.target&&e.target.tagName)||'';
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
+  var k=e.key.toLowerCase();
+  if((e.key==='Delete'||e.key==='Backspace')&&sel){ e.preventDefault(); delSelected(); }
+  else if((e.ctrlKey||e.metaKey)&&k==='z'){ e.preventDefault(); if(e.shiftKey) redo(); else undo(); }
+  else if((e.ctrlKey||e.metaKey)&&k==='y'){ e.preventDefault(); redo(); }
+  else if((e.ctrlKey||e.metaKey)&&k==='s'){ e.preventDefault(); save(); }
+});
+window.addEventListener('beforeunload',function(e){ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+setInterval(function(){
+  if(!dirty) return;
+  try{ localStorage.setItem('fc_board_'+boardId, JSON.stringify({ v:serverVersion, at:Date.now(), model:model })); }catch(e){}
+},5000);
+
+try{
+  var raw=localStorage.getItem('fc_board_'+boardId);
+  if(raw){
+    var d=JSON.parse(raw);
+    if(d && d.model && d.v===serverVersion && window.confirm('Есть несохранённый черновик этой доски в браузере. Восстановить его?')){
+      model=d.model; dirty=true;
+    } else {
+      localStorage.removeItem('fc_board_'+boardId);
+    }
+  }
+}catch(e){}
+
+render();
+fit();
+setStatus(dirty?'восстановлен черновик — не сохранён':'');
+})();`;
 
 // ---------- FAQ + реакции ----------
 async function faqBody(client, acc, user) {
@@ -5536,6 +6234,51 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (!rateOk('act:' + pathName + ':' + user.id, lim, win)) {
       const back = pathName === '/apply' ? '/apply?' : pathName.startsWith('/u/') ? '/people?' : '/me?';
       return back + qs({ err: 'Слишком часто — попробуйте позже.' });
+    }
+  }
+
+  // ===== доски (только havirys) =====
+  if (pathName === '/board/create') {
+    if (user.id !== OWNER_ID) return '/boards?' + qs({ err: 'Только havirys.' });
+    const title = (body.get('title') || '').trim().slice(0, 80) || 'Без названия';
+    const kindB = body.get('kind') === 'orgchart' ? 'orgchart' : 'freeform';
+    const now = new Date().toISOString();
+    const r = await db.run(
+      "INSERT INTO boards (title, kind, data, visibility, archived, version, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, 'owner', 0, 1, ?, ?, ?, ?)",
+      [title, kindB, boardBlank(kindB), user.id, now, user.id, now],
+    );
+    return '/board/' + r.lastID + '/edit';
+  }
+  {
+    const bm = pathName.match(/^\/board\/(\d+)\/(settings|archive|unarchive|delete|restore)$/);
+    if (bm) {
+      if (user.id !== OWNER_ID) return '/boards?' + qs({ err: 'Только havirys.' });
+      const bid = parseInt(bm[1], 10) || 0;
+      const op = bm[2];
+      if (op === 'settings') {
+        const title = (body.get('title') || '').trim().slice(0, 80) || 'Без названия';
+        const kindB = body.get('kind') === 'orgchart' ? 'orgchart' : 'freeform';
+        await db.run('UPDATE boards SET title = ?, kind = ? WHERE id = ?', [title, kindB, bid]);
+        return '/board/' + bid + '/settings?' + qs({ ok: 'Сохранено.' });
+      }
+      if (op === 'delete') {
+        await db.run('DELETE FROM boards WHERE id = ?', [bid]);
+        await db.run('DELETE FROM board_versions WHERE board_id = ?', [bid]).catch(() => {});
+        return '/boards?' + qs({ ok: 'Доска удалена.' });
+      }
+      if (op === 'restore') {
+        const vid = parseInt(body.get('version_id'), 10) || 0;
+        const v = await db.get('SELECT data FROM board_versions WHERE id = ? AND board_id = ?', [vid, bid]).catch(() => null);
+        if (!v) return '/board/' + bid + '/versions?' + qs({ err: 'Версия не найдена.' });
+        const cur = await db.get('SELECT version FROM boards WHERE id = ?', [bid]).catch(() => null);
+        const nv = ((cur && cur.version) || 1) + 1;
+        const now = new Date().toISOString();
+        await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [v.data, nv, user.id, now, bid]);
+        await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, v.data, user.id, now]).catch(() => {});
+        return '/board/' + bid + '/edit?' + qs({ ok: 'Версия восстановлена.' });
+      }
+      await db.run('UPDATE boards SET archived = ? WHERE id = ?', [op === 'archive' ? 1 : 0, bid]);
+      return '/boards?' + qs({ ok: op === 'archive' ? 'Доска в архиве.' : 'Доска восстановлена.' });
     }
   }
 
@@ -7913,6 +8656,31 @@ function start(client, hooks = {}) {
         return done(200, { 'Content-Type': 'text/html; charset=utf-8' }, mdToHtml((b.get('text') || '').slice(0, 20000)));
       }
 
+      // Сохранение доски из редактора (AJAX, отвечает JSON, не редиректом).
+      if (/^\/board\/\d+\/save$/.test(path) && req.method === 'POST') {
+        const jr = (obj) => done(200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
+        if (!user || user.id !== OWNER_ID) return done(403, { 'Content-Type': 'application/json; charset=utf-8' }, '{"ok":false,"err":"forbidden"}');
+        const bid = parseInt(path.split('/')[2], 10) || 0;
+        const b = await readBody(req);
+        if (!csrfOk(user, b.get('_csrf'))) return jr({ ok: false, err: 'csrf' });
+        const board = await db.get('SELECT id, version FROM boards WHERE id = ?', [bid]).catch(() => null);
+        if (!board) return jr({ ok: false, err: 'notfound' });
+        const raw = b.get('data') || '';
+        if (!raw || raw.length > 3_000_000) return jr({ ok: false, err: 'too_big' });
+        // Явно проверяем, что тело — валидный JSON (обрезанное при передаче
+        // тело не должно молча сохраниться как пустая доска).
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch (_) { return jr({ ok: false, err: 'bad_json' }); }
+        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nodes)) return jr({ ok: false, err: 'bad_shape' });
+        const clean = JSON.stringify(boardParse(raw));
+        const nv = (board.version || 1) + 1;
+        const now = new Date().toISOString();
+        await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [clean, nv, user.id, now, bid]);
+        await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, clean, user.id, now]).catch(() => {});
+        await db.run('DELETE FROM board_versions WHERE board_id = ? AND id NOT IN (SELECT id FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 50)', [bid, bid]).catch(() => {});
+        return jr({ ok: true, version: nv, at: now });
+      }
+
       // Выход через POST (CSRF-безопасно). GET /logout ниже оставлен для
       // аварийных ссылок (страница заморозки, экран ошибки).
       if (path === '/logout' && req.method === 'POST') {
@@ -8033,6 +8801,35 @@ function start(client, hooks = {}) {
         if (!txt || !txt.trim()) txt = ({ rules: content.DEFAULT_RULES, agitation: content.DEFAULT_AGITATION, hr_info: content.DEFAULT_HR_INFO }[key]) || '';
         const strip = `<div class="tabs"><a href="/text/rules"${key === 'rules' ? ' class="on"' : ''}>Правила</a><a href="/text/agitation"${key === 'agitation' ? ' class="on"' : ''}>Агитация</a><a href="/text/hr_info"${key === 'hr_info' ? ' class="on"' : ''}>Вакансия HR</a></div>`;
         return html(200, L({ title: TITLES[key], user, level: acc.level, wide: true, body: flash + `<h1>${esc(TITLES[key])}</h1>${strip}<div class="card">${mdToHtml(txt)}</div>` }));
+      }
+
+      // ----- Доски (только havirys) -----
+      if (path === '/board-editor.js' && req.method === 'GET') {
+        return done(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }, BOARD_EDITOR_JS);
+      }
+      if (path === '/boards' && req.method === 'GET') {
+        if (!user || user.id !== OWNER_ID) return html(403, L({ title: 'Доски', user, level: 'guest', body: '<h1>Только для havirys</h1><a class="btn" href="/">На главную</a>' }));
+        const showArch = u.searchParams.get('arch') === '1';
+        const rows = await db.all('SELECT * FROM boards WHERE archived = ? ORDER BY updated_at DESC, id DESC', [showArch ? 1 : 0]).catch(() => []);
+        return html(200, L({ title: 'Доски', user, level: 'owner', wide: true, body: flash + boardsListBody(rows, user, showArch) }));
+      }
+      if (path.startsWith('/board/') && req.method === 'GET') {
+        if (!user || user.id !== OWNER_ID) return html(403, L({ title: 'Доска', user, level: 'guest', body: '<h1>Только для havirys</h1>' }));
+        const seg = path.slice(7).split('/');
+        const bid = parseInt(seg[0], 10) || 0;
+        const sub = seg[1] || '';
+        const board = await db.get('SELECT * FROM boards WHERE id = ?', [bid]).catch(() => null);
+        if (!board) return html(404, L({ title: 'Доска', user, level: 'owner', body: '<h1>Доска не найдена</h1><a class="btn" href="/boards">← к списку</a>' }));
+        if (sub === 'export.json') {
+          return done(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="board-${bid}.json"` }, JSON.stringify(boardParse(board.data)));
+        }
+        if (sub === 'edit') return html(200, L({ title: '✎ ' + (board.title || 'Доска'), user, level: 'owner', wide: true, body: boardEditBody(board, user) }));
+        if (sub === 'settings') return html(200, L({ title: 'Доска — настройки', user, level: 'owner', wide: true, body: flash + boardSettingsBody(board, user) }));
+        if (sub === 'versions') {
+          const vs = await db.all('SELECT id, version, saved_by, saved_at FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 100', [bid]).catch(() => []);
+          return html(200, L({ title: 'Доска — версии', user, level: 'owner', wide: true, body: flash + boardVersionsBody(board, vs, user) }));
+        }
+        return html(200, L({ title: board.title || 'Доска', user, level: 'owner', wide: true, body: flash + boardViewBody(board, user) }));
       }
 
       if (path.startsWith('/form/') && req.method === 'GET') {
