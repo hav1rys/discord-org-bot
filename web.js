@@ -328,6 +328,24 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .form input[type=checkbox]{width:auto;display:inline-block;margin:0;flex:0 0 auto}
 .form label.chk{display:flex;gap:8px;align-items:center;margin:6px 0}
 .form button{margin-top:14px}
+/* Одиночные поля вне .form (панель, .bar, поиск) — тот же вид, что и в формах */
+:where(input[type=text],input[type=search],input[type=number],input[type=date],input[type=time],input[type=datetime-local],input[type=email],input[type=password],input[type=url],input[type=tel],input:not([type]),select,textarea){background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;color:var(--text);font:inherit;max-width:100%}
+:where(input,select,textarea):focus-visible{outline:1px solid var(--accent);border-color:var(--accent)}
+input[type=checkbox],input[type=radio]{accent-color:var(--accent);width:16px;height:16px;cursor:pointer}
+input[type=search]{-webkit-appearance:none;appearance:none}
+/* Панель массовых действий (напр. отпуск выбранным) */
+.bulkbar{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:14px}
+.bulkbar>.cap{display:block;font-size:12px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.4px;margin-bottom:9px}
+.bulkbar .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.bulkbar select,.bulkbar input{min-width:0}
+.bulkbar input[name=deadline]{width:140px}
+.bulkbar input[name=text]{flex:1;min-width:180px}
+.bulkbar .hint{margin:8px 0 0;font-size:11.5px;color:var(--muted)}
+.bulkbar .cnt{font-weight:700;color:var(--text)}
+/* Колонка выбора в таблицах */
+th.selcol,td.selcol{width:36px;text-align:center;padding-left:6px;padding-right:6px}
+/* Поиск по гайдам */
+#faqf{display:block;width:100%;max-width:460px}
 .avatar{border-radius:50%;object-fit:cover;border:1px solid var(--line);background:var(--panel2);flex:0 0 auto}
 .phead{display:flex;gap:16px;align-items:center;margin-bottom:6px}
 .phead h1{margin:0}
@@ -336,7 +354,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .actions h3{font-size:14px;margin-bottom:2px}
 .tglbtn{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:14px}
 .themebox{position:relative;display:inline-block}
-.themepop{position:absolute;right:0;top:calc(100% + 8px);z-index:100;width:250px;max-height:72vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:0 12px 34px rgba(0,0,0,.4)}
+.themepop{position:absolute;right:0;top:calc(100% + 8px);z-index:100;width:264px;max-height:78vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:0 12px 34px rgba(0,0,0,.4)}
 .themepop[hidden]{display:none}
 .themepop .seg{display:flex;gap:4px;margin-bottom:10px}
 .themepop .seg button{flex:1;padding:6px 4px;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);cursor:pointer}
@@ -346,6 +364,12 @@ pre{white-space:pre-wrap;word-break:break-word;background:var(--panel2);border:1
 .themepop .acts{display:flex;gap:6px;margin-top:12px}
 .themepop .acts button{flex:1;padding:7px;font-size:12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--text);cursor:pointer}
 .themepop .acts button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.themepop .tphead{font-size:12px;color:var(--muted);margin:12px 0 5px}
+.themepop .tpresets{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.themepop .tp{display:flex;align-items:center;gap:6px;padding:5px 7px;font-size:11.5px;line-height:1.3;border:1px solid var(--line);border-radius:7px;background:var(--tpb,var(--panel2));color:var(--tpt,var(--text));cursor:pointer;text-align:left;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.themepop .tp::before{content:"";width:9px;height:9px;border-radius:2px;background:var(--tpa,#888);flex:0 0 auto;box-shadow:0 0 0 1px rgba(128,128,128,.45)}
+.themepop .tp:hover{border-color:var(--accent)}
+.themepop .tp.on{border-color:var(--accent2);box-shadow:inset 0 0 0 1px var(--accent2)}
 .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}
 .chart{display:flex;align-items:flex-end;gap:14px;padding:8px 2px 0;overflow-x:auto}
 .chart .col{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:46px;flex:0 0 auto}
@@ -419,6 +443,11 @@ function themeToggle() {
   const rows = Object.keys(THEME_DEFAULTS)
     .map((k) => `<div class="crow"><span>${esc(THEME_LABELS[k])}</span><input type="color" data-k="${k}" value="${THEME_DEFAULTS[k]}"></div>`)
     .join('');
+  const presets = Object.keys(THEME_PRESETS).map((pn) => {
+    const pr = { ...THEME_DEFAULTS, ...THEME_PRESETS[pn] };
+    const c = JSON.stringify(pr).replace(/"/g, '&quot;');
+    return `<button type="button" class="tp" data-p="${pn}" data-c="${c}" style="--tpb:${pr.panel};--tpt:${pr.text};--tpa:${pr.accent}" onclick="fcPreset(this)">${esc(PRESET_LABELS[pn] || pn)}</button>`;
+  }).join('');
   return `<div class="themebox">
     <button class="tglbtn" type="button" onclick="fcThemeMenu(event)" title="Оформление сайта">🎨</button>
     <div class="themepop" id="themepop" hidden>
@@ -427,7 +456,9 @@ function themeToggle() {
         <button type="button" data-m="light" onclick="fcSetMode('light')">Светлая</button>
         <button type="button" data-m="dark" onclick="fcSetMode('dark')">Тёмная</button>
       </div>
-      <div class="mini" style="margin-bottom:4px">Свои цвета — только в этом браузере</div>
+      <div class="tphead">Готовые темы — в один клик</div>
+      <div class="tpresets">${presets}</div>
+      <div class="mini" style="margin:12px 0 4px">Или свои цвета — только в этом браузере</div>
       ${rows}
       <div class="acts">
         <button type="button" class="primary" onclick="fcColorsApply()">Применить</button>
@@ -453,17 +484,36 @@ const CLIENT_SCRIPT = `
       var v=pc[k]||(cs.getPropertyValue('--'+k)||'').trim()||ins[i].value;
       var mm=v.match(/^#([0-9a-fA-F]{3})$/); if(mm)v='#'+mm[1][0]+mm[1][0]+mm[1][1]+mm[1][1]+mm[1][2]+mm[1][2];
       if(/^#[0-9a-fA-F]{6}$/.test(v)) ins[i].value=v; } }
+  function syncPresets(){ var pc=readColors(), btns=document.querySelectorAll('#themepop .tp');
+    for(var i=0;i<btns.length;i++){ var c={}; try{c=JSON.parse(btns[i].getAttribute('data-c'));}catch(e){}
+      var match=Object.keys(c).length>0;
+      for(var k in c){ if((String(pc[k]||'')).toLowerCase()!==(String(c[k]||'')).toLowerCase()){ match=false; break; } }
+      if(btns[i].getAttribute('data-p')==='default') match=Object.keys(pc).length===0;
+      btns[i].className=match?'tp on':'tp'; } }
   window.fcThemeMenu=function(ev){ if(ev)ev.stopPropagation(); var p=pop(); if(!p)return;
-    if(p.hasAttribute('hidden')){ p.removeAttribute('hidden'); syncSeg(); fillInputs();
+    if(p.hasAttribute('hidden')){ p.removeAttribute('hidden'); syncSeg(); fillInputs(); syncPresets();
       p.style.right=''; p.style.left='';
       var r=p.getBoundingClientRect();
       if(r.left<6){ p.style.right='auto'; p.style.left='0'; }
     } else { p.setAttribute('hidden',''); } };
   window.fcSetMode=function(m){ mode=m; apply(m); try{localStorage.setItem('fc_theme',m);}catch(e){} syncSeg(); };
+  window.fcPreset=function(btn){ var c; try{c=JSON.parse(btn.getAttribute('data-c'));}catch(e){ return; }
+    var o={}; for(var k in c){ if(/^#([0-9a-fA-F]{6})$/.test(c[k])){ o[k]=c[k]; d.style.setProperty('--'+k,c[k]); } }
+    try{localStorage.setItem('fc_colors',JSON.stringify(o));}catch(e){}
+    fillInputs(); syncPresets(); };
   window.fcColorsApply=function(){ var o={}, ins=document.querySelectorAll('#themepop input[data-k]');
     for(var i=0;i<ins.length;i++) o[ins[i].getAttribute('data-k')]=ins[i].value;
-    try{localStorage.setItem('fc_colors',JSON.stringify(o));}catch(e){} applyColors(o); };
+    try{localStorage.setItem('fc_colors',JSON.stringify(o));}catch(e){} applyColors(o); syncPresets(); };
   window.fcColorsReset=function(){ try{localStorage.removeItem('fc_colors');}catch(e){} location.reload(); };
+  // Фильтр FAQ: прячет карточки и пустые заголовки категорий, показывает «ничего не найдено».
+  window.fcFaqFilter=function(q){ q=(q||'').toLowerCase().trim();
+    var items=document.querySelectorAll('.faq-item'), shown=0;
+    for(var i=0;i<items.length;i++){ var m=!q||items[i].dataset.faq.indexOf(q)>=0; items[i].style.display=m?'':'none'; if(m)shown++; }
+    var cats=document.querySelectorAll('.faq-cat');
+    for(var j=0;j<cats.length;j++){ var el=cats[j].nextElementSibling, any=false;
+      while(el&&!el.classList.contains('faq-cat')){ if(el.classList.contains('faq-item')&&el.style.display!=='none')any=true; el=el.nextElementSibling; }
+      cats[j].style.display=(q&&!any)?'none':''; }
+    var none=document.getElementById('faqnone'); if(none)none.style.display=(q&&shown===0)?'':'none'; };
   // Загрузка картинки одной формой: читает файл из input[name=fileName],
   // сжимает до maxPx, кладёт data-URI в input[name=hidName] и отправляет форму.
   window.fcImgUpload=function(form, fileName, hidName, maxPx, mime){
@@ -2706,28 +2756,41 @@ async function peopleBody(client, acc, query, pageNum, user) {
     [...params, PAGE_SIZE, pageNum * PAGE_SIZE],
   );
   const bulk = acc.rank >= LEVELS.deputy && user;
+  const cols = bulk ? 5 : 4;
   const list = rows.map((p) => `<tr>
-    ${bulk ? `<td><input type="checkbox" name="ids" value="${esc(p.discord_id)}"></td>` : ''}
+    ${bulk ? `<td class="selcol"><input type="checkbox" class="pchk" name="ids" value="${esc(p.discord_id)}"></td>` : ''}
     <td>${onlineDot(client, p.discord_id)}<a href="/u/${esc(p.discord_id)}">${esc(p.name)}</a></td>
     <td>№ ${esc(p.static)}</td>
     <td>${esc(roleName(client, p.role_id))}</td>
     <td class="muted">${fmt(p.joined_at)}</td>
   </tr>`).join('');
-  const head = `${bulk ? '<th></th>' : ''}<th>Имя Фамилия</th><th>Паспорт</th><th>Ранг</th><th>Вступил</th>`;
-  const tableBlock = `<div class="tablewrap"><table><tr>${head}</tr>${list || `<tr><td colspan="${bulk ? 5 : 4}">—</td></tr>`}</table></div>`;
+  const head = `${bulk ? '<th class="selcol"><input type="checkbox" id="pchkAll" title="Выбрать всех на странице"></th>' : ''}<th>Имя Фамилия</th><th>Паспорт</th><th>Ранг</th><th>Вступил</th>`;
+  const tableBlock = `<div class="tablewrap"><table><tr>${head}</tr>${list || `<tr><td colspan="${cols}">—</td></tr>`}</table></div>`;
   const inner = bulk
-    ? `<form method="POST" action="/people/bulk">${csrfField(user)}
+    ? `<form method="POST" action="/people/bulk" id="peopleBulk">${csrfField(user)}
         ${tableBlock}
-        <div class="bar" style="margin-top:12px">
-          <select name="act">
-            <option value="vacation">Выдать отпуск выбранным</option>
-            <option value="dm">Отправить ЛС выбранным</option>
-            <option value="rank_recalc">Пересчитать ранги (всем)</option>
-          </select>
-          <input name="deadline" placeholder="отпуск до (7d)" style="max-width:150px">
-          <input name="text" placeholder="текст ЛС" style="max-width:220px">
-          <button class="btn sm" type="submit">Применить к выбранным</button>
+        <div class="bulkbar">
+          <span class="cap">Действие с отмеченными (<span class="cnt" id="pchkCnt">0</span>)</span>
+          <div class="row">
+            <select name="act">
+              <option value="vacation">🏖️ Выдать отпуск</option>
+              <option value="dm">✉️ Отправить ЛС</option>
+              <option value="rank_recalc">🔁 Пересчитать ранги (всем)</option>
+            </select>
+            <input name="deadline" placeholder="срок: 7d или дата">
+            <input name="text" placeholder="текст сообщения / причина">
+            <button class="btn sm" type="submit">Применить</button>
+          </div>
+          <p class="hint">«Срок» — длительность вида <b>7d</b> либо дата; нужен для отпуска. «Текст» — тело ЛС при рассылке и причина в журнале. «Пересчитать ранги» действует на всех и отметок не требует.</p>
         </div>
+        <script>(function(){var f=document.getElementById('peopleBulk');if(!f)return;
+          var all=document.getElementById('pchkAll'),c=document.getElementById('pchkCnt');
+          var boxes=function(){return f.querySelectorAll('input.pchk');};
+          var upd=function(){var b=boxes(),n=0;for(var i=0;i<b.length;i++)if(b[i].checked)n++;
+            if(c)c.textContent=n;if(all){all.checked=n>0&&n===b.length;all.indeterminate=n>0&&n<b.length;}};
+          if(all)all.addEventListener('change',function(){var b=boxes();for(var i=0;i<b.length;i++)b[i].checked=all.checked;upd();});
+          f.addEventListener('change',function(e){if(e.target&&e.target.classList&&e.target.classList.contains('pchk'))upd();});
+          upd();})();</script>
       </form>`
     : tableBlock;
   return `
@@ -4507,7 +4570,10 @@ async function faqBody(client, acc, user) {
     blocks.push(`<h2 style="margin-top:16px" class="faq-cat">${esc(catTitle[cat])}</h2>${items.join('') || '<div class="card">Пусто.</div>'}`);
   }
   return `<h1>FAQ / Гайды</h1>
-    <div class="card"><input id="faqf" placeholder="🔍 поиск по гайдам…" style="width:100%" oninput="(function(q){q=q.value.toLowerCase().trim();document.querySelectorAll('.faq-item').forEach(function(el){el.style.display=(!q||el.dataset.faq.indexOf(q)>=0)?'':'none'});})(this)"></div>
+    <div class="card" style="padding:14px 16px">
+      <input id="faqf" type="search" autocomplete="off" spellcheck="false" placeholder="🔍 поиск по гайдам…" oninput="fcFaqFilter(this.value)">
+      <div id="faqnone" class="mini" style="margin-top:8px;display:none">Ничего не найдено — попробуйте другой запрос.</div>
+    </div>
     ${blocks.join('')}`;
 }
 
