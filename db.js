@@ -887,6 +887,21 @@ const SCHEMA = {
     indexes: [['profile_id']],
   },
 
+  // Точечный доступ к разделам панели: havirys выдаёт доступ к вкладкам либо
+  // конкретному участнику (subject_type='user'), либо всем с ролью ('role').
+  // discord_id хранит id участника ИЛИ id роли. Одна строка = один раздел.
+  panel_grants: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      discord_id: 'TEXT',
+      subject_type: "TEXT DEFAULT 'user'", // user | role
+      tab: 'TEXT',
+      granted_by: 'TEXT',
+      granted_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
   // Загруженные картинки для доп. страниц. Отдаются по /asset/<id>.
   page_assets: {
     columns: {

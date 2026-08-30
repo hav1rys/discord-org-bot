@@ -9462,7 +9462,7 @@ client.once('clientReady', async () => {
     },
   );
 
-  // 23:59 МСК — список подтверждённых кодовых слов Владельцу в ЛС
+  // 23:59 МСК — список подтверждённых кодовых слов + ежедневная сводка Владельцу в ЛС
   (function scheduleDailyCodewordList() {
     const msUntil = dates.nextMskTime(23, 59).getTime() - Date.now();
     setTimeout(async function run() {
@@ -9470,13 +9470,14 @@ client.once('clientReady', async () => {
         if (process.env.GUILD_ID) {
           const g = await client.guilds.fetch(process.env.GUILD_ID);
           await sendCodewordRefundList(g);
+          await sendDailyDigest(g);
         }
       } catch (err) {
-        console.error('Ошибка ежедневного списка возврата за кодовые слова:', err.message);
+        console.error('Ошибка ежедневной рассылки 23:59:', err.message);
       }
       setTimeout(run, dates.nextMskTime(23, 59).getTime() - Date.now());
     }, msUntil);
-    console.log(`Список возврата за кодовые слова запланирован на 23:59 МСК (через ${Math.round(msUntil / 60000)} мин.).`);
+    console.log(`Ежедневная сводка и список кодовых слов запланированы на 23:59 МСК (через ${Math.round(msUntil / 60000)} мин.).`);
   })();
 
   // Раз в час проверяем, не пробыл ли кто-то из "ожидающих" приглашённых
@@ -9503,7 +9504,7 @@ client.once('clientReady', async () => {
         await runWeeklyRankAdjustment(guild);
         await checkRecurringGiveaways(guild);
         await badges.syncAllRoles(guild);
-        await sendDailyDigest(guild);
+        // ежедневная сводка теперь по расписанию в 23:59 МСК (см. ниже)
         await sendWeeklyDigest(guild);
         await sendPersonalWeeklyDigests(guild);
       }
