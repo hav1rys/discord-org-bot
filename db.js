@@ -77,6 +77,7 @@ const SCHEMA = {
       about: 'TEXT', // «Обо мне» — короткий текст участника для публичного профиля
       about_private: 'INTEGER DEFAULT 0', // 1 — «Обо мне» видно только себе и HR+
       contracts_private: 'INTEGER DEFAULT 0', // 1 — контракты/история видны только себе и HR+
+      badges_private: 'INTEGER DEFAULT 0', // 1 — бейджи/достижения видны только себе и HR+
       last_anniv_year: 'INTEGER', // год, за который уже поздравили с годовщиной вступления
       last_weekly_digest: 'TEXT', // метка недели (YYYY-Www), за которую уже отправлен личный отчёт
       pinned_badges: 'TEXT', // закреплённые бейджи участника (ключи через запятую)
@@ -515,6 +516,34 @@ const SCHEMA = {
       last_login: 'TEXT',
       login_count: 'INTEGER DEFAULT 0',
       sess_ver: 'INTEGER DEFAULT 0', // версия сессии; +1 = «выйти со всех устройств»
+      ical_token: 'TEXT', // секрет для ссылки-подписки на календарь отпусков (.ics)
+      // Локальные аккаунты (вход по логину/паролю, без Discord). discord_id таких
+      // записей вида 'local:<rand>'. is_local=1. linked_discord_id — участник,
+      // к которому havirys привязал аккаунт (тогда сайт работает от его имени).
+      is_local: 'INTEGER DEFAULT 0',
+      login: 'TEXT',
+      email: 'TEXT',
+      pass_hash: 'TEXT',
+      pass_salt: 'TEXT',
+      linked_discord_id: 'TEXT',
+      // Discord, который локальный пользователь привязал сам (OAuth) — нужен,
+      // чтобы подать заявку на вступление: аккаунт должен быть на сервере.
+      oauth_discord_id: 'TEXT',
+    },
+  },
+
+  // Заявки на сброс пароля локального аккаунта. Разбирает вручную havirys
+  // (дублируется ему в ЛС Discord + видно на вкладке «Аккаунты» в панели).
+  password_reset_requests: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      login: 'TEXT',
+      email: 'TEXT',
+      note: 'TEXT',
+      status: "TEXT DEFAULT 'pending'", // pending | done
+      created_at: 'TEXT',
+      resolved_by: 'TEXT',
+      resolved_at: 'TEXT',
     },
   },
 
@@ -779,6 +808,8 @@ const SCHEMA = {
       priority: 'TEXT', // low | normal | high (null = normal)
       close_reason: 'TEXT', // причина закрытия (свободный текст / шаблон)
       tags: 'TEXT', // метки через запятую
+      last_activity: 'TEXT', // время последнего сообщения (для авто-закрытия по тишине)
+      autoclose_warned: 'INTEGER DEFAULT 0', // 1 — предупреждение о скором авто-закрытии отправлено
       assigned_to: 'TEXT', // кто из руководства взял тикет на себя
       assigned_at: 'TEXT',
       created_at: 'TEXT',
@@ -908,7 +939,8 @@ const SCHEMA = {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
       filename: 'TEXT',
       mime: 'TEXT',
-      data: 'BLOB',
+      data: 'BLOB', // legacy: старые записи; новые лежат в data/uploads/ (см. file)
+      file: 'TEXT', // имя файла в data/uploads/
       size: 'INTEGER',
       uploaded_by: 'TEXT',
       uploaded_at: 'TEXT',
@@ -922,13 +954,71 @@ const SCHEMA = {
       id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
       contract_id: 'INTEGER',
       owner_id: 'TEXT',
-      slot: 'TEXT', // taken | result
+      slot: 'TEXT', // taken | result | codeword
       mime: 'TEXT',
-      data: 'BLOB',
+      data: 'BLOB', // legacy: старые записи; новые — в data/uploads/ (см. file)
+      file: 'TEXT', // имя файла в data/uploads/
       size: 'INTEGER',
       created_at: 'TEXT',
     },
     indexes: [['contract_id']],
+  },
+
+  // Транскрипты тикетов — HTML-выгрузка переписки, создаётся по кнопке.
+  // Отдаётся по /ticket/<id>/transcript (автор тикета или HR+).
+  ticket_transcripts: {
+    columns: {
+      ticket_id: 'INTEGER PRIMARY KEY',
+      html: 'BLOB',
+      msg_count: 'INTEGER',
+      generated_by: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+
+  // Одноразовые ссылки для входа на сайт: Discord-команда /сайт и кнопка
+  // в канале входа. Ссылка живёт 10 минут и сгорает после первого перехода.
+  magic_links: {
+    columns: {
+      token: 'TEXT PRIMARY KEY',
+      discord_id: 'TEXT',
+      created_at: 'TEXT',
+      expires_at: 'TEXT',
+      used_at: 'TEXT',
+    },
+    indexes: [['discord_id']],
+  },
+
+  // Конструктор форм: определения произвольных форм-заявок.
+  forms: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      slug: 'TEXT UNIQUE',
+      name: 'TEXT',
+      description: 'TEXT',
+      fields: 'TEXT', // JSON-массив: [{key,label,type,required,options}]
+      channel_id: 'TEXT', // куда постить поданные заявки
+      active: 'INTEGER DEFAULT 1',
+      created_by: 'TEXT',
+      created_at: 'TEXT',
+    },
+  },
+  // Поданные через сайт заявки по формам конструктора.
+  form_submissions: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      form_id: 'INTEGER',
+      discord_id: 'TEXT',
+      discord_tag: 'TEXT',
+      data: 'TEXT', // JSON {key: value}
+      status: "TEXT DEFAULT 'pending'", // pending | approved | rejected
+      reviewed_by: 'TEXT',
+      review_note: 'TEXT',
+      message_id: 'TEXT',
+      created_at: 'TEXT',
+      reviewed_at: 'TEXT',
+    },
+    indexes: [['form_id'], ['status']],
   },
 };
 

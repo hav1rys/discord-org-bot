@@ -184,6 +184,20 @@ function renderMentions(client, s) {
     .replace(/(?:<|&lt;)@&(?:amp;)?(\d+)(?:>|&gt;)/g, (m, rid) => roleTag(client, rid))
     .replace(/(?:<|&lt;)@!?(\d+)(?:>|&gt;)/g, (m, uid) => personLink(client, uid));
 }
+// Дата регистрации Discord-аккаунта из snowflake-ID (эпоха Discord — 2015-01-01).
+function discordAccountCreated(id) {
+  try {
+    const ms = Number((BigInt(String(id)) >> 22n) + 1420070400000n);
+    return Number.isFinite(ms) && ms > 1420070400000 ? new Date(ms) : null;
+  } catch (_) { return null; }
+}
+function accountAgeBadge(id) {
+  const d = discordAccountCreated(id);
+  if (!d) return '';
+  const days = Math.floor((Date.now() - d.getTime()) / 864e5);
+  const warn = days < 7;
+  return `<span class="badge ${warn ? 'bad' : ''}" title="Аккаунт Discord создан ${fmt(d.toISOString())}">аккаунту ${days} дн.${warn ? ' ⚠' : ''}</span>`;
+}
 // Онлайн-статус из Discord presence (требует config.ENABLE_PRESENCE + портал-интент).
 const PRESENCE_TITLE = { online: 'в сети', idle: 'неактивен', dnd: 'не беспокоить', offline: 'не в сети' };
 function onlineStatus(client, id) {
@@ -370,6 +384,23 @@ th.sortable .ar{opacity:.5;font-size:10px}
   .card{break-inside:avoid;border-color:#ccc}
   body{background:#fff;color:#000}
 }
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);z-index:200;max-width:92vw;
+  padding:12px 18px;border-radius:12px;font-weight:600;font-size:14px;box-shadow:0 10px 34px rgba(0,0,0,.4);
+  background:var(--panel);border:1px solid var(--line);opacity:0;transition:opacity .25s,transform .25s;pointer-events:none}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.ok{border-color:#1f7d55;color:var(--ok)}
+.toast.bad{border-color:#a33;color:var(--bad)}
+#totop{position:fixed;right:16px;bottom:16px;z-index:150;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);
+  background:var(--panel);color:var(--text);font-size:18px;cursor:pointer;display:none;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+#totop.show{display:block}
+#navtoggle{display:none;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 10px;font-size:16px;cursor:pointer}
+@media(max-width:760px){
+  #navtoggle{display:inline-block}
+  #navtoggle + .left.nav{display:none;position:absolute;left:0;right:0;top:100%;flex-direction:column;align-items:stretch;
+    gap:2px;background:var(--panel);border-bottom:1px solid var(--line);padding:8px 12px;z-index:80}
+  #navtoggle + .left.nav.open{display:flex}
+  .top{position:relative;flex-wrap:wrap}
+}
 @media(max-width:640px){
   .wrap{padding:18px 12px 48px}
   .top{padding:10px 12px}
@@ -459,6 +490,40 @@ const CLIENT_SCRIPT = `
     }
   }catch(e){}
   document.addEventListener('DOMContentLoaded',function(){
+    // Тост из ?ok/?err + чистим URL
+    try{
+      var t=document.querySelector('[data-toast]');
+      if(t){ requestAnimationFrame(function(){t.classList.add('show');});
+        setTimeout(function(){t.classList.remove('show');setTimeout(function(){t.remove();},300);},4200);
+        if(history.replaceState){ var u=new URL(location.href); u.searchParams.delete('ok'); u.searchParams.delete('err'); history.replaceState(null,'',u.pathname+u.search+u.hash); }
+      }
+    }catch(e){}
+    // Кнопка «наверх»
+    try{
+      var tt=document.getElementById('totop');
+      if(tt){ tt.onclick=function(){window.scrollTo({top:0,behavior:'smooth'});};
+        var onScroll=function(){ tt.classList.toggle('show', window.scrollY>500); };
+        window.addEventListener('scroll',onScroll,{passive:true}); onScroll();
+      }
+    }catch(e){}
+    // Число непрочитанных в заголовок вкладки
+    try{
+      var bl=document.querySelector('.top .right .tglbtn b');
+      var n=bl?parseInt(bl.textContent,10):0;
+      if(n>0) document.title='('+n+') '+document.title;
+    }catch(e){}
+    // Защита от двойной отправки: форма без onsubmit блокируется на 6 сек
+    try{
+      document.querySelectorAll('form').forEach(function(f){
+        if(f.getAttribute('onsubmit')||f.method.toLowerCase()!=='post')return;
+        f.addEventListener('submit',function(){
+          if(f.dataset.sent){ return; }
+          f.dataset.sent='1';
+          var b=f.querySelector('button[type=submit],button:not([type])');
+          if(b){ b.disabled=true; var o=b.textContent; b.textContent='…'; setTimeout(function(){b.disabled=false;b.textContent=o;f.dataset.sent='';},6000); }
+        });
+      });
+    }catch(e){}
     var tas=document.querySelectorAll('textarea[data-md]');
     for(var i=0;i<tas.length;i++)(function(ta){
       var pv=document.createElement('div'); pv.className='mdprev';
@@ -656,7 +721,8 @@ function navItems(level, panelGrant) {
   const nav = ['<a href="/me">Мой профиль</a>'];
   if (LEVELS[level] < LEVELS.member) nav.push('<a href="/apply">Подать заявку</a>');
   if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/people">Участники</a>');
-  nav.push('<a href="/giveaways">Розыгрыши</a>');
+  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/giveaways">Розыгрыши</a>');
+  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/text/rules">Правила</a>');
   nav.push('<a href="/faq">FAQ</a>');
   if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/commands">Команды</a>');
   if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/dashboard">Дашборд</a>');
@@ -676,12 +742,15 @@ function topbar(user, level, notif, panelGrant) {
   const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
   if (!user) {
     const gnav = (SITE._navPages || []).map((pg) => `<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`).join('');
-    return `<div class="top"><div class="left nav">${themeToggle()}${gnav}<a class="btn sm" href="/login">Войти через Discord</a></div><div class="right">${brand}</div></div>`;
+    const gtoggle = gnav ? `<button id="navtoggle" type="button" aria-label="Меню" onclick="var n=this.nextElementSibling;if(n)n.classList.toggle('open')">☰</button>` : '';
+    return `<div class="top">${gtoggle}<div class="left nav">${themeToggle()}${gnav}</div><div class="right"><a class="btn sm" href="/login">Войти</a>${brand}</div></div>`;
   }
   const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${notif ? `<b style="color:var(--bad)"> ${notif}</b>` : ''}</a>`;
+  const bug = `<a href="/bug" class="tglbtn" style="text-decoration:none" title="Сообщить о баге">🐞</a>`;
   return `<div class="top">
+    <button id="navtoggle" type="button" aria-label="Меню" onclick="var n=document.querySelector('.top .left.nav');if(n)n.classList.toggle('open')">☰</button>
     <div class="left nav">${navItems(level, panelGrant).join('')}</div>
-    <div class="right">${bell}${themeToggle()}${brand}</div>
+    <div class="right">${bug}${bell}${themeToggle()}${brand}</div>
   </div>`;
 }
 function bannerHtml() {
@@ -699,7 +768,11 @@ function layout(opts) {
   const override = themeOverrideCss();
   const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())} · сайт работает на том же сервере, что и Discord-бот`;
   const favicon = SITE.logo && /^(https?:|data:image\/)/.test(SITE.logo) ? esc(SITE.logo) : '';
-  const customCss = SITE.css ? `<style>${String(SITE.css).replace(/<\//g, '<\\/').slice(0, 20000)}</style>` : '';
+  const customCss = SITE.css ? `<style>${String(SITE.css)
+    .replace(/@import\b[^;]*;?/gi, '')
+    .replace(/url\(\s*(['"]?)\s*javascript:/gi, 'url($1')
+    .replace(/expression\s*\(/gi, 'x(')
+    .replace(/<\//g, '<\\/').slice(0, 20000)}</style>` : '';
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(opts.title)}</title>
@@ -711,7 +784,9 @@ ${topbar(opts.user, opts.level || 'guest', opts.notif || 0, opts.panelGrant)}
 ${bannerHtml()}
 <div class="wrap${opts.wide ? ' wide' : ''}">${opts.body}
 <div class="foot">${foot}</div>
-</div></body></html>`;
+</div>
+<button id="totop" type="button" title="Наверх" aria-label="Наверх">↑</button>
+</body></html>`;
 }
 
 // ---------- Данные ----------
@@ -907,11 +982,13 @@ async function panelGrants(client, user) {
   const g = guildOf(client);
   const roleOpts = g
     ? g.roles.cache.filter((r) => r.name !== '@everyone').sort((a, b) => b.position - a.position)
-      .map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join('')
+      .map((r) => `<option value="${esc(r.id)}">${esc(r.name)} — ${r.members.size} чел.</option>`).join('')
     : '';
-  const subjName = (st, id) => st === 'role'
-    ? `<span class="mention role">@${esc((g && g.roles.cache.get(id) && g.roles.cache.get(id).name) || ('роль ' + id))}</span>`
-    : `${personLink(client, id)} <span class="mini">${esc(id)}</span>`;
+  const subjName = (st, id) => {
+    if (st !== 'role') return `${personLink(client, id)} <span class="mini">${esc(id)}</span>`;
+    const rl = g && g.roles.cache.get(id);
+    return `<span class="mention role">@${esc(rl ? rl.name : ('роль ' + id))}</span>${rl ? ` <span class="mini">${rl.members.size} чел.</span>` : ''}`;
+  };
   const cur = [...bySubject.values()].map((info) => `<tr>
     <td>${subjName(info.st, info.id)}</td>
     <td>${info.tabs.map((t) => `<span class="pill">${esc(label(t))}</span>`).join(' ')}</td>
@@ -929,8 +1006,9 @@ async function panelGrants(client, user) {
         <option value="user">Конкретному участнику</option>
         <option value="role">Всем с ролью</option>
       </select></label>
-      <label id="grantUserRow">Discord ID участника<input name="subject_user" id="grantUser" pattern="[0-9]{5,25}" maxlength="25"></label>
-      <label id="grantRoleRow" style="display:none">Роль<select name="subject_role" id="grantRole">${roleOpts || '<option value="">(бот офлайн — ролей нет)</option>'}</select></label>
+      <label id="grantUserRow">Discord ID участника<input name="subject_user" id="grantUser" pattern="[0-9]{5,25}" maxlength="25" oninput="fcGrantAuto()"></label>
+      <label id="grantRoleRow" style="display:none">Роль<select name="subject_role" id="grantRole" onchange="fcGrantAuto()">${roleOpts || '<option value="">(бот офлайн — ролей нет)</option>'}</select></label>
+      <div class="mini" id="grantHint" style="margin:2px 0 6px"></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px;margin:8px 0">
         ${tabsList.map(([id, lbl]) => `<label class="chk"><input type="checkbox" name="tab" value="${id}"><span>${esc(lbl)}</span></label>`).join('')}
       </div>
@@ -941,13 +1019,24 @@ async function panelGrants(client, user) {
       </div>
     </form>
     <script>
+    var GRANT_MAP=${JSON.stringify(Object.fromEntries([...bySubject.values()].map((i) => [i.st + '|' + i.id, i.tabs])))};
     function fcGrantType(){var t=document.getElementById('grantType').value;
       document.getElementById('grantUserRow').style.display=t==='user'?'':'none';
-      document.getElementById('grantRoleRow').style.display=t==='role'?'':'none';}
+      document.getElementById('grantRoleRow').style.display=t==='role'?'':'none';
+      fcGrantAuto();}
+    function fcGrantAuto(){
+      var f=document.getElementById('grantForm'), st=document.getElementById('grantType').value;
+      var id=st==='role'?f.subject_role.value:(f.subject_user.value||'').trim();
+      var have=GRANT_MAP[st+'|'+id];
+      var s=new Set(have||[]);
+      f.querySelectorAll('input[name=tab]').forEach(function(c){c.checked=s.has(c.value)});
+      document.getElementById('grantHint').textContent=have?('Сейчас выдано: '+have.length+' разд. — отмечено ниже, меняйте и сохраняйте.'):(id?'Этому субъекту доступы ещё не выдавались.':'');
+    }
     function fcGrantEdit(st,id,tabs){var f=document.getElementById('grantForm');
       document.getElementById('grantType').value=st; fcGrantType();
       if(st==='role')f.subject_role.value=id; else f.subject_user.value=id;
       var s=new Set(tabs); f.querySelectorAll('input[name=tab]').forEach(function(c){c.checked=s.has(c.value)});
+      document.getElementById('grantHint').textContent='Редактирование: '+tabs.length+' разд.';
       f.scrollIntoView({behavior:'smooth'});}
     fcGrantType();
     </script>
@@ -1088,7 +1177,18 @@ async function meBody(client, user) {
     </table></div>
   </div>`;
 
-  const logoutBtn = '<a class="btn sm" href="/logout" style="background:var(--bad)">Выйти из аккаунта</a>';
+  const icalTok = await getIcalToken(did).catch(() => null);
+  const icalUrl = icalTok ? `${baseUrl()}/calendar.ics?key=${icalTok}` : '';
+  const icalCard = icalUrl ? `<div class="card"><h2>Календарь отпусков (подписка)</h2>
+    <p class="mini">Личная ссылка-подписка: добавьте её в Google Календарь / Apple Календарь («Подписаться на календарь» / «Добавить по URL»). Отпуска будут появляться автоматически. Ссылку не публикуйте — она привязана к вам.</p>
+    <input readonly onclick="this.select()" value="${esc(icalUrl)}" style="width:100%;font-family:monospace;font-size:12px">
+    <div class="bar" style="margin-top:6px">
+      <a class="btn ghost sm" href="${esc(icalUrl)}">Скачать .ics</a>
+      <form method="POST" action="/me/ical_reset" style="display:inline" onsubmit="return confirm('Сбросить ссылку? Старая подписка перестанет работать.')">${csrfField(user)}<button class="btn ghost sm" type="submit">Сбросить ссылку</button></form>
+    </div>
+  </div>` : '';
+
+  const logoutBtn = `${user.local ? '<a class="btn sm ghost" href="/account" style="margin-right:6px">Мой аккаунт</a>' : ''}<form method="POST" action="/logout" style="display:inline">${csrfField(user)}<button class="btn sm" type="submit" style="background:var(--bad)">Выйти из аккаунта</button></form>`;
 
   if (!p) {
     return `
@@ -1156,12 +1256,15 @@ async function meBody(client, user) {
         <textarea name="about" rows="4" maxlength="1000" placeholder="Пару слов о себе, часовой пояс, чем занимаюсь…">${esc(p.about || '')}</textarea>
         <label class="chk"><input type="checkbox" name="about_private" value="1" ${p.about_private ? 'checked' : ''}><span>Скрыть «Обо мне» от всех, кроме меня и HR+</span></label>
         <label class="chk"><input type="checkbox" name="contracts_private" value="1" ${p.contracts_private ? 'checked' : ''}><span>Скрыть контракты и их историю от всех, кроме меня и HR+</span></label>
+        <label class="chk"><input type="checkbox" name="badges_private" value="1" ${p.badges_private ? 'checked' : ''}><span>Скрыть бейджи и достижения от всех, кроме меня и HR+</span></label>
         <button class="btn sm" type="submit">Сохранить</button>
       </form>
     </div>
     ${ticketCard}
     ${inviteCard}
     ${await myGiveawaysCard(did)}
+    ${await memberActionsExtra(client, user, p, passports, acc)}
+    ${icalCard}
     ${loginsCard}
     ${memberForms(user, passports, canAppeal)}`;
 }
@@ -1181,6 +1284,7 @@ const PANEL_TABS = [
   ['giveaways', 'Розыгрыши'],
   ['blacklist', 'Чёрный список'],
   ['texts', 'Тексты'],
+  ['forms', 'Формы'],
   ['faq_manage', 'Гайды FAQ'],
   ['reasons', 'Причины отказа'],
   ['broadcast', 'Рассылка'],
@@ -1191,6 +1295,7 @@ const PANEL_TABS = [
   ['pages', 'Страницы'],
   ['data', 'База данных'],
   ['grants', 'Доступы'],
+  ['accounts', 'Аккаунты'],
 ];
 // Разделы, которые havirys может выдавать точечно (без инфраструктурных).
 const GRANTABLE_TABS = new Set([
@@ -1239,8 +1344,9 @@ function panelCanTab(acc, grants, id) {
     faq_manage: acc.rank >= LEVELS.owner, reasons: acc.rank >= LEVELS.owner,
     broadcast: acc.rank >= LEVELS.owner, settings: acc.rank >= LEVELS.owner,
     perms: isHavirys, admin: isHavirys, data: acc.rank >= LEVELS.owner,
+    forms: acc.rank >= LEVELS.hr,
     role_check: acc.rank >= LEVELS.deputy, hr_payouts: acc.rank >= LEVELS.owner,
-    landing: isHavirys, pages: isHavirys, grants: isHavirys,
+    landing: isHavirys, pages: isHavirys, grants: isHavirys, accounts: isHavirys,
   };
   if (grants && grants.has(id) && GRANTABLE_TABS.has(id)) return true;
   if (acc.rank < LEVELS.hr) return false; // без ранга HR — только выданные разделы
@@ -1275,6 +1381,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'giveaways') body = await panelGiveaways(client, acc, user);
   else if (tab === 'blacklist') body = await panelBlacklist(client, user);
   else if (tab === 'texts') body = await panelTexts(user);
+  else if (tab === 'forms') body = await panelForms(client, user, acc);
   else if (tab === 'faq_manage') body = (await panelFaqManage(user)) + (await faqFeedbackReport());
   else if (tab === 'reasons') body = await panelReasons(user);
   else if (tab === 'broadcast') body = await panelBroadcast(user);
@@ -1284,6 +1391,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'landing') body = await panelLanding(user);
   else if (tab === 'pages') body = await panelPages(client, user);
   else if (tab === 'grants') body = await panelGrants(client, user);
+  else if (tab === 'accounts') body = await panelAccounts(client, user);
   else if (tab === 'data') body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
@@ -1570,7 +1678,7 @@ const DATA_TABLES = {
   web_users: ['Пользователи сайта', [['discord_id', 'Discord ID'], ['username', 'Ник'], ['first_login', 'Первый вход'], ['last_login', 'Последний вход'], ['login_count', 'Входов']]],
   audit_log: ['Аудит', [['id', '#'], ['actor_tag', 'Инициатор'], ['action', 'Действие'], ['details', 'Детали'], ['at', 'Когда']]],
 };
-const TICKET_CAT_RU = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое', appeal: 'Апелляция ЧС' };
+const TICKET_CAT_RU = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое', appeal: 'Апелляция ЧС', bug: 'Баг на сайте', bug_discord: 'Баг Discord' };
 
 function cell(client, col, val) {
   if (val == null || val === '') return '—';
@@ -1666,6 +1774,22 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFl
 function guildOf(client) {
   return client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
 }
+// Есть ли этот Discord-аккаунт сейчас на сервере организации.
+async function memberOfGuild(client, discordId) {
+  const id = String(discordId || '');
+  if (!id || id.startsWith('local:') || id.startsWith('nodiscord-')) return false;
+  const g = guildOf(client);
+  if (!g) return false;
+  if (g.members.cache.get(id)) return true;
+  try { await g.members.fetch(id); return true; } catch (_) { return false; }
+}
+// Effective Discord id для проверки «на сервере»: у локального непривязанного
+// к участнику аккаунта это его самостоятельно привязанный Discord (oauth).
+function effectiveDiscordId(user) {
+  if (!user) return null;
+  if (user.local && String(user.id).startsWith('local:')) return user.oauthDiscordId || null;
+  return user.id;
+}
 
 // Тело POST-запроса -> URLSearchParams (лимит 1 МБ)
 function readBody(req) {
@@ -1699,6 +1823,41 @@ function csrfOk(user, token) {
 function csrfField(user) {
   return `<input type="hidden" name="_csrf" value="${esc(csrfToken(user))}">`;
 }
+
+// Анонимный CSRF-токен (для форм входа/регистрации, где ещё нет пользователя):
+// привязан к IP и подписан общим секретом, живёт 2 часа.
+function anonCsrf(ip) {
+  const base = `anon.${ip || '0'}.${Math.floor(Date.now() / 1000)}`;
+  return `${base}.${sign(base)}`;
+}
+function anonCsrfOk(ip, token) {
+  const p = String(token || '').split('.');
+  if (p.length !== 4 || p[0] !== 'anon') return false;
+  const base = p.slice(0, 3).join('.');
+  try {
+    const exp = sign(base);
+    if (p[3].length !== exp.length || !crypto.timingSafeEqual(Buffer.from(p[3]), Buffer.from(exp))) return false;
+  } catch (_) { return false; }
+  if (p[1] !== String(ip || '0')) return false;
+  return (Date.now() / 1000 - Number(p[2])) < 7200;
+}
+function anonCsrfField(ip) {
+  return `<input type="hidden" name="_csrf" value="${esc(anonCsrf(ip))}">`;
+}
+
+// ---------- Пароли локальных аккаунтов (scrypt, без сторонних зависимостей) ----------
+function pwHash(pw, salt) { return crypto.scryptSync(String(pw), salt, 64).toString('hex'); }
+function pwMake(pw) { const salt = crypto.randomBytes(16).toString('hex'); return { salt, hash: pwHash(pw, salt) }; }
+function pwVerify(pw, salt, hash) {
+  if (!salt || !hash) return false;
+  try {
+    const a = Buffer.from(pwHash(pw, salt), 'hex');
+    const b = Buffer.from(hash, 'hex');
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch (_) { return false; }
+}
+const LOGIN_RE = /^[a-zA-Z0-9_.-]{3,32}$/;
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/;
 
 const REVIEW_MENTION = () => config.ROLES_REVIEW_ALLOWED.map((r) => `<@&${r}>`).join(' ');
 const REVIEW_MENTION_OPTS = { allowedMentions: { roles: config.ROLES_REVIEW_ALLOWED } };
@@ -1796,6 +1955,121 @@ async function sessionFresh(user) {
   return true;
 }
 
+// Создаёт полноценную веб-сессию для discordId (без OAuth) и возвращает
+// строку Set-Cookie. Используется входом по одноразовой ссылке (/m/<token>).
+async function issueWebSession(req, client, discordId) {
+  const g = guildOf(client);
+  const wu = await db.get('SELECT username, avatar FROM web_users WHERE discord_id = ?', [discordId]).catch(() => null);
+  let uname = wu && wu.username;
+  let avatar = (wu && wu.avatar) || '';
+  if (!uname) {
+    const m = g ? g.members.cache.get(String(discordId)) : null;
+    uname = m ? m.user.username : String(discordId);
+    if (m && m.user.avatar) avatar = m.user.avatar;
+  }
+  const now = new Date().toISOString();
+  await db.run(
+    `INSERT INTO web_users (discord_id, username, avatar, first_login, last_login, login_count)
+     VALUES (?, ?, ?, ?, ?, 1)
+     ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username, avatar = excluded.avatar,
+       last_login = excluded.last_login, login_count = login_count + 1`,
+    [discordId, uname, avatar, now, now],
+  );
+  accessCache.delete(String(discordId));
+  const svRow = await db.get('SELECT sess_ver FROM web_users WHERE discord_id = ?', [discordId]).catch(() => null);
+  const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
+  const ua = (req.headers['user-agent'] || '').slice(0, 300);
+  await db.run('INSERT INTO web_logins (discord_id, ip, ua, at) VALUES (?, ?, ?, ?)', [discordId, ip, ua, now]).catch(() => {});
+  const sid = crypto.randomBytes(9).toString('base64url');
+  await db.run('INSERT INTO web_sessions (sid, discord_id, ip, ua, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)', [sid, discordId, ip, ua, now, now]).catch(() => {});
+  const payload = makeSession({ id: String(discordId), username: uname, avatar, sv: svRow ? (svRow.sess_ver || 0) : 0, sid });
+  return `fc_sess=${payload}; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`;
+}
+
+// Одноразовая ссылка входа: вызывается ботом (команда /сайт, кнопка в канале).
+// Возвращает абсолютный URL вида https://…/m/<token>, живёт 10 минут.
+async function createMagicLink(discordId) {
+  const now = Date.now();
+  // не плодим ссылки: максимум 3 неиспользованные и «свежие» за 15 минут
+  try {
+    const recent = await db.get(
+      'SELECT COUNT(*) c FROM magic_links WHERE discord_id = ? AND used_at IS NULL AND created_at >= ?',
+      [String(discordId), new Date(now - 15 * 60000).toISOString()],
+    );
+    if (recent && recent.c >= 3) {
+      const last = await db.get(
+        'SELECT token FROM magic_links WHERE discord_id = ? AND used_at IS NULL AND expires_at >= ? ORDER BY created_at DESC LIMIT 1',
+        [String(discordId), new Date(now).toISOString()],
+      );
+      if (last) return baseUrl() + '/m/' + last.token;
+    }
+  } catch (_) {}
+  const token = crypto.randomBytes(24).toString('base64url');
+  await db.run(
+    'INSERT INTO magic_links (token, discord_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+    [token, String(discordId), new Date(now).toISOString(), new Date(now + 10 * 60000).toISOString()],
+  );
+  db.run('DELETE FROM magic_links WHERE expires_at < ?', [new Date(now - 24 * 3600000).toISOString()]).catch(() => {});
+  return baseUrl() + '/m/' + token;
+}
+
+// ---------- iCal: подписка на календарь отпусков ----------
+// Секретный токен для ссылки-подписки. Создаётся лениво при первом обращении.
+async function getIcalToken(discordId) {
+  const row = await db.get('SELECT ical_token FROM web_users WHERE discord_id = ?', [String(discordId)]).catch(() => null);
+  if (row && row.ical_token) return row.ical_token;
+  const token = crypto.randomBytes(18).toString('base64url');
+  await db.run('UPDATE web_users SET ical_token = ? WHERE discord_id = ?', [token, String(discordId)]).catch(() => {});
+  return token;
+}
+function icsEsc(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+}
+function icsDate(d) {
+  const t = new Date(d);
+  if (Number.isNaN(t.getTime())) return null;
+  return `${t.getUTCFullYear()}${String(t.getUTCMonth() + 1).padStart(2, '0')}${String(t.getUTCDate()).padStart(2, '0')}`;
+}
+async function buildVacationIcs(calName, onlyDiscordId) {
+  const params = [];
+  let sql = "SELECT v.id, v.discord_id, v.until, v.reason, v.created_at, p.name FROM vacations v "
+    + "LEFT JOIN participants p ON p.discord_id = v.discord_id "
+    + "WHERE v.status = 'accepted' AND v.until IS NOT NULL";
+  if (onlyDiscordId) { sql += ' AND v.discord_id = ?'; params.push(String(onlyDiscordId)); }
+  sql += ' ORDER BY v.created_at DESC LIMIT 800';
+  const rows = await db.all(sql, params).catch(() => []);
+  const host = (baseUrl().split('//')[1] || 'site').replace(/[^\w.-]/g, '');
+  const stamp = `${icsDate(Date.now())}T000000Z`;
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Freelance Company//Vacations//RU',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', `X-WR-CALNAME:${icsEsc(calName)}`,
+  ];
+  for (const r of rows) {
+    const ds = icsDate(r.created_at);
+    let de = icsDate(r.until);
+    if (!ds || !de) continue;
+    // DTEND для события-«на весь день» эксклюзивен — прибавляем сутки к дате окончания.
+    const deEx = icsDate(new Date(new Date(r.until).getTime() + 864e5));
+    lines.push('BEGIN:VEVENT', `UID:vac-${r.id}@${host}`, `DTSTAMP:${stamp}`,
+      `DTSTART;VALUE=DATE:${ds}`, `DTEND;VALUE=DATE:${deEx || de}`,
+      `SUMMARY:${icsEsc('🏖️ Отпуск — ' + (r.name || r.discord_id))}`);
+    if (r.reason) lines.push(`DESCRIPTION:${icsEsc(r.reason)}`);
+    lines.push('END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n') + '\r\n';
+}
+
+// Наблюдаемость: ошибки веб-сервера (5xx) и медленные запросы — в памяти,
+// последние сутки; сбрасывается при рестарте (для /health этого достаточно).
+const _errLog = [];
+const _slowLog = [];
+function recordWebErr(p, msg) {
+  _errLog.push({ at: Date.now(), path: String(p).split('?')[0], msg: String(msg || '').slice(0, 300) });
+  if (_errLog.length > 300) _errLog.splice(0, _errLog.length - 300);
+}
+const _since24 = () => Date.now() - 864e5;
+
 // Простой rate-limit в памяти: не более N POST за окно на ключ.
 const _rl = new Map();
 function rateOk(key, limit = 40, windowMs = 60000) {
@@ -1817,8 +2091,8 @@ async function logDenial(client, user, what) {
 function flashBanner(u) {
   const ok = u.searchParams.get('ok');
   const err = u.searchParams.get('err');
-  if (ok) return `<div class="card" style="border-color:#1f5c43;color:var(--ok)">✅ ${esc(ok)}</div>`;
-  if (err) return `<div class="card" style="border-color:#5c2626;color:var(--bad)">⛔ ${esc(err)}</div>`;
+  if (ok) return `<div class="toast ok" data-toast>✅ ${esc(ok)}</div>`;
+  if (err) return `<div class="toast bad" data-toast>⛔ ${esc(err)}</div>`;
   return '';
 }
 function qs(obj) {
@@ -1890,52 +2164,128 @@ function applyBody(user, ref) {
   </div>`;
 }
 
+function imgOrUrlFields(dataName, urlName, fileLabel) {
+  return `<label>${fileLabel} — файл<input type="file" accept="image/*" data-img="${dataName}"></label>
+    <label>…или ссылка<input name="${urlName}" maxlength="400" placeholder="https://..."></label>
+    <input type="hidden" name="${dataName}">`;
+}
+// Один обработчик на все формы «скрин или ссылка»: сжимает выбранные файлы и шлёт.
+const IMGFORM_SCRIPT = `
+function fcImgFormSubmit(f){
+  var hid=f.querySelectorAll('input[type=file][data-img]'), pending=0;
+  function done(){
+    var okAll=true;
+    hid.forEach(function(inp){
+      var dn=inp.getAttribute('data-img'), un=dn.replace(/_data$/,'_url');
+      var u=f[un]; var has=(f[dn]&&f[dn].value)||(u&&/^https?:\\/\\//i.test(u.value||''));
+      if(!has)okAll=false;
+    });
+    if(!okAll){ alert('Приложите скриншот: файл с устройства или ссылку (http).'); return; }
+    f.submit();
+  }
+  hid.forEach(function(inp){ var file=inp.files[0]; if(!file)return; pending++;
+    var img=new Image(), url=URL.createObjectURL(file);
+    img.onload=function(){ var s=Math.min(1,1280/Math.max(img.width,img.height));
+      var c=document.createElement('canvas'); c.width=Math.round(img.width*s)||1; c.height=Math.round(img.height*s)||1;
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      try{ f[inp.getAttribute('data-img')].value=c.toDataURL('image/jpeg',0.72); }catch(e){}
+      URL.revokeObjectURL(url); if(--pending===0)done(); };
+    img.onerror=function(){ URL.revokeObjectURL(url); if(--pending===0)done(); };
+    img.src=url; });
+  if(pending===0)done();
+  return false;
+}`;
+
+// Доп. действия участника: контракты в работе, кодовое слово, заявка на HR, возврат из AFK.
+async function memberActionsExtra(client, user, p, passports, acc) {
+  const did = user.id;
+  const passOpts = passports.map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('');
+  const stuckH = (typeof config.STUCK_CONTRACT_HOURS === 'number' ? config.STUCK_CONTRACT_HOURS : 24);
+
+  // Контракты в работе (взял, но не сдал итог)
+  const taken = await db.all(
+    "SELECT c.id, c.thread_id, c.taken_submitted_at, (SELECT u.id FROM contract_uploads u WHERE u.contract_id = c.id AND u.slot = 'taken' ORDER BY u.id DESC LIMIT 1) AS taken_img FROM contracts c WHERE c.discord_id = ? AND c.status = 'taken' ORDER BY c.taken_submitted_at ASC",
+    [did],
+  ).catch(() => []);
+  const threadToPass = {};
+  for (const pp of passports) if (pp.profile_thread_id) threadToPass[pp.profile_thread_id] = pp.static;
+  const takenCard = `<div class="card"><h2>Контракты в работе (${taken.length})</h2>
+    ${taken.length ? taken.map((c) => {
+      const ageH = c.taken_submitted_at ? Math.floor((Date.now() - new Date(c.taken_submitted_at)) / 36e5) : 0;
+      const stuck = ageH >= stuckH;
+      const num = threadToPass[c.thread_id];
+      const thumb = c.taken_img
+        ? `<a href="/cimg/${c.taken_img}" target="_blank" rel="noopener" title="Скрин «взял»"><img src="/cimg/${c.taken_img}" alt="взял" style="max-width:120px;max-height:90px;border-radius:8px;border:1px solid var(--line);display:block;margin:6px 0"></a>`
+        : '';
+      return `<div class="bar" style="border-top:1px solid var(--line);padding-top:8px">
+        <span class="mini">#${c.id}${num ? ' · № ' + esc(num) : ''} · взят ${fmt(c.taken_submitted_at)} · <span style="${stuck ? 'color:var(--bad);font-weight:700' : ''}">${ageH} ч назад${stuck ? ' — висит!' : ''}</span></span>
+        ${thumb}
+        <form method="POST" action="/me/contract_finish" class="form" style="margin:0" onsubmit="return fcImgFormSubmit(this)">${csrfField(user)}<input type="hidden" name="id" value="${c.id}">
+          ${imgOrUrlFields('result_data', 'result_url', 'Скрин «Итог»')}
+          <button class="btn sm" type="submit">Сдать итог на проверку</button>
+        </form>
+        <form method="POST" action="/me/contract_cancel" style="margin:4px 0 0" onsubmit="return confirm('Отменить взятый контракт #${c.id}? Скрин «взял» будет удалён.')">${csrfField(user)}<input type="hidden" name="id" value="${c.id}">
+          <button class="btn sm ghost" type="submit">Отменить</button>
+        </form>
+      </div>`;
+    }).join('') : '<span class="mini">нет — возьмите контракт выше</span>'}
+  </div>`;
+
+  // Кодовое слово
+  const cwPend = await db.get("SELECT COUNT(*) c FROM codeword_submissions WHERE discord_id = ? AND status = 'pending'", [did]).catch(() => null);
+  const codewordCard = `<div class="card"><h2>Кодовое слово «контракт» (Weazel News)</h2>
+    <p class="mini">Пришлите скрин отправки кодового слова. После подтверждения руководством попадёт в дневной список на возврат денег.${cwPend && cwPend.c ? ` Сейчас на проверке: ${cwPend.c}.` : ''}</p>
+    ${passports.length ? `<form method="POST" action="/me/codeword" class="form" onsubmit="return fcImgFormSubmit(this)">${csrfField(user)}
+      <label>Паспорт<select name="static" required>${passOpts}</select></label>
+      ${imgOrUrlFields('cw_data', 'cw_url', 'Скрин отправки')}
+      <button class="btn" type="submit">Отправить</button>
+    </form>` : '<p class="mini">Нужен паспорт.</p>'}
+  </div>`;
+
+  // Заявка на HR (если ещё не HR и нет открытой заявки)
+  let hrCard = '';
+  if (acc.rank < LEVELS.hr) {
+    const hrPend = await db.get("SELECT id FROM hr_applications WHERE discord_id = ? AND status = 'pending'", [did]).catch(() => null);
+    hrCard = `<div class="card"><h2>Подать заявку на HR-Менеджера</h2>
+      ${hrPend ? '<p class="mini">Ваша заявка уже на рассмотрении.</p>' : `
+      <form method="POST" action="/me/hr_apply" class="form">${csrfField(user)}
+        <label>Часов в неделю в игре<input name="hours_per_week" required maxlength="60"></label>
+        <label>Когда готовы пройти мини-обучение<input name="training_ready" required maxlength="120"></label>
+        <button class="btn" type="submit">Отправить заявку</button>
+      </form>`}
+    </div>`;
+  }
+
+  // Возврат из AFK
+  const afkPass = passports.filter((pp) => pp.afk_since);
+  let afkCard = '';
+  if (afkPass.length) {
+    const reqs = await db.all('SELECT static FROM afk_return_requests WHERE discord_id = ?', [did]).catch(() => []);
+    const reqSet = new Set(reqs.map((r) => r.static));
+    afkCard = `<div class="card"><h2>Возврат из AFK</h2>
+      <p class="mini">Нажмите «Я вернулся» — руководство подтвердит, и AFK снимется.</p>
+      ${afkPass.map((pp) => reqSet.has(pp.static)
+        ? `<div class="mini">№ ${esc(pp.static)} — запрос отправлен, ждём подтверждения ⏳</div>`
+        : `<form method="POST" action="/me/afk_return" style="display:inline-block;margin:3px 6px 3px 0">${csrfField(user)}<input type="hidden" name="static" value="${esc(pp.static)}"><button class="btn sm" type="submit">Я вернулся (№ ${esc(pp.static)})</button></form>`).join('')}
+    </div>`;
+  }
+
+  return `<script>${IMGFORM_SCRIPT}</script>` + takenCard + afkCard + codewordCard + hrCard;
+}
+
 function memberForms(user, passports = [], blacklisted = false) {
   const passOpts = passports.map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('');
   return `
-  <div class="card"><h2>Сдать контракт</h2>
+  <script>${IMGFORM_SCRIPT}</script>
+  <div class="card"><h2>Взять контракт</h2>
     ${passports.length ? `
-    <p class="mini">Нужны два скриншота: «взял контракт» и «итог». Каждый — файл с устройства <b>или</b> ссылка.</p>
-    <form method="POST" action="/me/contract" class="form" onsubmit="return fcCtrSubmit(this)">
+    <p class="mini">Пришлите скрин «взял контракт». Потом, когда выполните — сдадите итог кнопкой в «Контракты в работе».</p>
+    <form method="POST" action="/me/contract_take" class="form" onsubmit="return fcImgFormSubmit(this)">
       ${csrfField(user)}
-      <label>Паспорт<select name="static" required>${passports.map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('')}</select></label>
-      <label>Скрин «Взял контракт» — файл<input type="file" accept="image/*" data-for="taken_data"></label>
-      <label>…или ссылка<input name="taken_url" maxlength="400" placeholder="https://..."></label>
-      <input type="hidden" name="taken_data">
-      <label>Скрин «Итог» — файл<input type="file" accept="image/*" data-for="result_data"></label>
-      <label>…или ссылка<input name="result_url" maxlength="400" placeholder="https://..."></label>
-      <input type="hidden" name="result_data">
-      <button class="btn" type="submit">Отправить на проверку</button>
-    </form>
-    <script>
-    function fcCtrSubmit(f){
-      var slots=[['taken_data','taken_url'],['result_data','result_url']];
-      var files=f.querySelectorAll('input[type=file][data-for]'), pending=0;
-      function finish(){
-        for(var i=0;i<slots.length;i++){
-          var d=f[slots[i][0]].value, u=(f[slots[i][1]].value||'').trim();
-          if(!d && !/^https?:\\/\\//i.test(u)){ alert('Приложите оба скриншота: файл или ссылку (http).'); return; }
-        }
-        f.submit();
-      }
-      files.forEach(function(inp){
-        var file=inp.files[0]; if(!file){return;}
-        pending++;
-        var img=new Image(), url=URL.createObjectURL(file);
-        img.onload=function(){
-          var s=Math.min(1,1280/Math.max(img.width,img.height));
-          var c=document.createElement('canvas'); c.width=Math.round(img.width*s)||1; c.height=Math.round(img.height*s)||1;
-          c.getContext('2d').drawImage(img,0,0,c.width,c.height);
-          try{ f[inp.dataset.for].value=c.toDataURL('image/jpeg',0.72); }catch(e){}
-          URL.revokeObjectURL(url); if(--pending===0)finish();
-        };
-        img.onerror=function(){ URL.revokeObjectURL(url); if(--pending===0)finish(); };
-        img.src=url;
-      });
-      if(pending===0)finish();
-      return false;
-    }
-    </script>`
+      <label>Паспорт<select name="static" required>${passOpts}</select></label>
+      ${imgOrUrlFields('taken_data', 'taken_url', 'Скрин «Взял контракт»')}
+      <button class="btn" type="submit">Взять контракт</button>
+    </form>`
       : '<p class="mini">У вас нет паспортов — сдать контракт нельзя.</p>'}
   </div>
   <div class="card"><h2>Запросить отпуск</h2>
@@ -1954,12 +2304,15 @@ function memberForms(user, passports = [], blacklisted = false) {
           <option value="question">Вопрос</option>
           <option value="complaint">Жалоба</option>
           <option value="other">Другое</option>
+          <option value="bug">🐞 Баг на сайте</option>
+          <option value="bug_discord">🐞 Баг Discord</option>
         </select>
       </label>
       <label>Тема<input name="subject" required maxlength="100"></label>
       <label>Описание<textarea name="description" rows="3" maxlength="1000"></textarea></label>
       <button class="btn" type="submit">Создать тикет в Discord</button>
     </form>
+    <p class="mini" style="margin-top:6px">Нашли ошибку на сайте? <a href="/bug">🐞 Сообщить о баге</a> — отдельная короткая форма.</p>
   </div>
   ${passports.length ? `<div class="card"><h2>Заявка на изменение Имени Фамилии</h2>
     <form method="POST" action="/me/data_change" class="form">${csrfField(user)}
@@ -2283,6 +2636,7 @@ async function profileBody(client, viewer, acc, targetId) {
   const selfOrHr = (viewer && viewer.id === targetId) || canHr;
   const aboutHidden = p.about_private && !selfOrHr;
   const contractsHidden = p.contracts_private && !selfOrHr;
+  const badgesHidden = p.badges_private && !selfOrHr;
   const contractHistCard = contractsHidden ? '' : `<div class="card"><h2>История контрактов (${contractHist.length})</h2>
     <div class="tablewrap"><table><tr><th>Когда</th><th>Итог</th><th>Пруф</th></tr>${chRows || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
   const aboutCard = (p.about && !aboutHidden) ? `<div class="card"><h2>Обо мне</h2>${mdToHtml(String(p.about).slice(0, 1000))}</div>` : '';
@@ -2318,7 +2672,7 @@ async function profileBody(client, viewer, acc, targetId) {
   // Лента активности: контракты + бейджи + благодарности, единый список по дате
   const feed = [];
   for (const c of contractHist.slice(0, 30)) feed.push({ at: c.submitted_at || c.reviewed_at, txt: c.status === 'fulfilled' ? '✅ контракт выполнен' : c.status === 'unfulfilled' ? '❌ контракт не выполнен' : '📄 контракт на проверке' });
-  for (const b of badgeAwards) feed.push({ at: b.awarded_at, txt: `🏅 бейдж «${esc((badges.LABELS && badges.LABELS[b.badge_key]) || b.badge_key)}»` });
+  if (!badgesHidden) for (const b of badgeAwards) feed.push({ at: b.awarded_at, txt: `🏅 бейдж «${esc((badges.LABELS && badges.LABELS[b.badge_key]) || b.badge_key)}»` });
   for (const th of thanksRows) feed.push({ at: th.created_at, txt: `🙏 благодарность от ${nickOf(client, th.from_id) || 'участника'}` });
   feed.sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
   const activityCard = (contractsHidden && !selfOrHr)
@@ -2368,7 +2722,7 @@ async function profileBody(client, viewer, acc, targetId) {
     <div class="tablewrap"><table><tr><th>Имя Фамилия</th><th>Паспорт</th><th>Ранг</th><th>Статус</th></tr>${passRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
   </div>
   ${weekContractsCard}
-  ${badgesCard(bs, p.pinned_badges)}
+  ${badgesHidden ? `<div class="card"><h2>Достижения</h2><span class="muted">Участник скрыл достижения.</span></div>` : badgesCard(bs, p.pinned_badges)}
   <div class="card"><h2>Карточка для Discord</h2>
     <pre id="mcard">${esc((ident ? ident.name + ' | ' + ident.static : p.name) + '\nРанг: ' + roleName(client, (ident && ident.roleId) || p.role_id) + '\nDiscord: <@' + targetId + '>\nКонтракты (всего): ' + bs.fulfilled + '\nЗа неделю: +' + week.fulfilled.length + ' / -' + week.unfulfilled.length + '\nПриглашений: ' + (invRow ? invRow.c : 0) + '\nВступил: ' + fmt(p.joined_at))}</pre>
     <button class="btn sm" type="button" onclick="navigator.clipboard.writeText(document.getElementById('mcard').textContent).then(()=>{this.textContent='Скопировано ✓'})">Скопировать</button>
@@ -2769,7 +3123,22 @@ async function compareBody(client, meId, otherId) {
   </div>`;
 }
 
-async function calendarBody(client) {
+async function calendarBody(client, user) {
+  let icalCard = '';
+  if (user) {
+    const tok = await getIcalToken(user.id).catch(() => null);
+    if (tok) {
+      const mine = `${baseUrl()}/calendar.ics?key=${tok}`;
+      const all = `${baseUrl()}/calendar-all.ics?key=${tok}`;
+      icalCard = `<div class="card"><h2>Подписка на календарь (.ics)</h2>
+        <p class="mini">Добавьте ссылку в Google/Apple Календарь как подписку по URL. Ссылки привязаны к вам — не публикуйте их.</p>
+        <label class="mini">Мои отпуска<input readonly onclick="this.select()" value="${esc(mine)}" style="width:100%;font-family:monospace;font-size:12px"></label>
+        <label class="mini" style="margin-top:6px;display:block">Все отпуска организации (только HR+)<input readonly onclick="this.select()" value="${esc(all)}" style="width:100%;font-family:monospace;font-size:12px"></label>
+        <div class="bar" style="margin-top:6px"><a class="btn ghost sm" href="${esc(mine)}">Скачать мои</a><a class="btn ghost sm" href="${esc(all)}">Скачать все</a>
+          <form method="POST" action="/me/ical_reset" style="display:inline" onsubmit="return confirm('Сбросить ссылки?')">${csrfField(user)}<button class="btn ghost sm" type="submit">Сбросить</button></form></div>
+      </div>`;
+    }
+  }
   const parts = await db.all('SELECT discord_id, name, static, vacation_until, afk_since FROM participants');
   const extras = await db.all('SELECT discord_id, name, static, vacation_until, afk_since FROM extra_passports');
   const all = [...parts, ...extras];
@@ -2781,6 +3150,7 @@ async function calendarBody(client) {
   const srows = sched.map((s) => `<tr><td>🎉 ${esc(s.prize)}</td><td>${fmt(s.start_at)}</td><td class="muted">через ${Math.max(0, Math.ceil((new Date(s.start_at) - Date.now()) / 3600000))} ч</td></tr>`).join('');
   return `
   <h1>Календарь</h1>
+  ${icalCard}
   <div class="card"><h2>Предстоящие розыгрыши (${sched.length})</h2>
     <div class="tablewrap"><table><tr><th>Приз</th><th>Старт</th><th>Осталось</th></tr>${srows || '<tr><td colspan="3">—</td></tr>'}</table></div></div>
   <div class="card"><h2>В отпуске (${vac.length})</h2>
@@ -2802,6 +3172,9 @@ async function searchBody(client, query) {
   const AU = await db.all("SELECT at, actor_tag, action, details FROM audit_log WHERE action LIKE ? OR details LIKE ? OR actor_tag LIKE ? OR actor_id = ? ORDER BY id DESC LIMIT 25", [like, like, like, q]);
   const TH = await db.all('SELECT from_id, to_id, note, created_at FROM thanks WHERE from_id = ? OR to_id = ? OR note LIKE ? ORDER BY id DESC LIMIT 25', [q, q, like]);
   const CN = await db.all("SELECT id, discord_id, status, submitted_at, message_url FROM contracts WHERE discord_id = ? OR message_url LIKE ? ORDER BY id DESC LIMIT 25", [q, like]);
+  const CW = await db.all("SELECT id, discord_id, name, static, status, submitted_at FROM codeword_submissions WHERE discord_id = ? OR name LIKE ? OR static LIKE ? OR discord_tag LIKE ? ORDER BY id DESC LIMIT 25", [q, like, like, like]).catch(() => []);
+  const HR = await db.all("SELECT id, discord_id, discord_tag, status, created_at FROM hr_applications WHERE discord_id = ? OR discord_tag LIKE ? ORDER BY id DESC LIMIT 25", [q, like]).catch(() => []);
+  const GB = await db.all("SELECT id, profile_id, author_id, text, created_at FROM guestbook WHERE text LIKE ? OR author_id = ? OR profile_id = ? ORDER BY id DESC LIMIT 25", [like, q, q]).catch(() => []);
   const sec = (title, rowsHtml, colsN) => `<div class="card"><h2>${esc(title)}</h2><div class="tablewrap"><table>${rowsHtml || `<tr><td colspan="${colsN}">—</td></tr>`}</table></div></div>`;
   return `
   <h1>Поиск: «${esc(q)}»</h1>
@@ -2812,7 +3185,10 @@ async function searchBody(client, query) {
   ${sec('Благодарности (' + TH.length + ')', '<tr><th>От</th><th>Кому</th><th>За что</th><th>Когда</th></tr>' + TH.map((r) => `<tr><td>${personLink(client, r.from_id)}</td><td>${personLink(client, r.to_id)}</td><td>${esc(r.note || '—')}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4)}
   ${sec('Аудит (' + AU.length + ')', '<tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Детали</th></tr>' + AU.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.actor_tag || '—')}</td><td>${esc(r.action || '')}</td><td class="mini">${renderMentions(client, esc((r.details || '').slice(0, 160)))}</td></tr>`).join(''), 4)}
   ${sec('Чёрный список (' + B.length + ')', '<tr><th>#</th><th>Discord ID</th><th>Паспорт</th><th>Причина</th></tr>' + B.map((r) => `<tr><td>#${r.id}</td><td>${esc(r.discord_id || '—')}</td><td>${esc(r.static || '—')}</td><td>${esc(r.reason || '—')}</td></tr>`).join(''), 4)}
-  ${sec('Тикеты (' + T.length + ')', '<tr><th>#</th><th>Тема</th><th>Тип</th><th>Статус</th></tr>' + T.map((r) => `<tr><td><a href="/ticket/${r.id}">#${r.id}</a></td><td>${esc(r.subject || '—')}</td><td>${esc(TICKET_CAT_RU[r.category] || r.category || '—')}</td><td>${esc(ruStatus(r.status))}</td></tr>`).join(''), 4)}`;
+  ${sec('Тикеты (' + T.length + ')', '<tr><th>#</th><th>Тема</th><th>Тип</th><th>Статус</th></tr>' + T.map((r) => `<tr><td><a href="/ticket/${r.id}">#${r.id}</a></td><td>${esc(r.subject || '—')}</td><td>${esc(TICKET_CAT_RU[r.category] || r.category || '—')}</td><td>${esc(ruStatus(r.status))}</td></tr>`).join(''), 4)}
+  ${sec('Кодовые слова (' + CW.length + ')', '<tr><th>#</th><th>Кто</th><th>Имя</th><th>Паспорт</th><th>Статус</th><th>Когда</th></tr>' + CW.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(r.name || '—')}</td><td>${esc(r.static || '—')}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.submitted_at)}</td></tr>`).join(''), 6)}
+  ${sec('Заявки в HR (' + HR.length + ')', '<tr><th>#</th><th>Кто</th><th>Статус</th><th>Когда</th></tr>' + HR.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4)}
+  ${sec('Гостевая книга (' + GB.length + ')', '<tr><th>Профиль</th><th>Автор</th><th>Текст</th><th>Когда</th></tr>' + GB.map((r) => `<tr><td><a href="/u/${esc(r.profile_id)}">профиль</a></td><td>${personLink(client, r.author_id)}</td><td>${esc((r.text || '').slice(0, 160))}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4)}`;
 }
 
 async function auditBody(client, sp, pageNum, user) {
@@ -2978,7 +3354,7 @@ async function panelApps(client, user, pageNum = 0) {
     const comments = await db.all('SELECT * FROM application_comments WHERE application_id = ? ORDER BY id ASC', [a.id]).catch(() => []);
     const thread = comments.map((c) => `<div class="mini" style="border-left:2px solid var(--line);padding-left:8px;margin:4px 0"><b>${esc(c.author_name || c.author_id)}</b> · ${fmt(c.at)}<br>${esc(c.text)}</div>`).join('');
     cards.push(`<div class="card">
-    <b>Заявка #${a.id}</b> — ${personLink(client, a.discord_id)} (${esc(a.discord_tag || '')})
+    <b>Заявка #${a.id}</b> — ${personLink(client, a.discord_id)} (${esc(a.discord_tag || '')}) ${accountAgeBadge(a.discord_id)}
     <div class="mini">${esc(a.name || '—')} · № ${esc(a.static || '—')} · LVL ${esc(a.lvl || '—')} · ${fmt(a.created_at)}</div>
     <div class="mini">Навыки: ${esc((a.skills || '—').slice(0, 300))}</div>
     <div class="mini">Пригласил: ${esc(a.invited_by || '—')}</div>
@@ -3069,6 +3445,256 @@ async function panelTexts(user) {
       </form>${extra}</div>`);
   }
   return parts.join('');
+}
+
+const FORM_FIELD_TYPES = ['text', 'textarea', 'select', 'number', 'checkbox'];
+// Приводит присланный JSON полей формы к безопасному массиву.
+function sanitizeFormFields(raw) {
+  let arr;
+  try { arr = JSON.parse(raw || '[]'); } catch (_) { return null; }
+  if (!Array.isArray(arr)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const f of arr.slice(0, 40)) {
+    if (!f || typeof f !== 'object') continue;
+    const key = String(f.key || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40);
+    const label = String(f.label || '').slice(0, 120).trim();
+    if (!key || !label || seen.has(key)) continue;
+    const type = FORM_FIELD_TYPES.includes(f.type) ? f.type : 'text';
+    const o = { key, label, type, required: !!f.required };
+    if (type === 'select') {
+      o.options = (Array.isArray(f.options) ? f.options : []).map((x) => String(x).slice(0, 80).trim()).filter(Boolean).slice(0, 30);
+      if (!o.options.length) continue;
+    }
+    seen.add(key);
+    out.push(o);
+  }
+  return out;
+}
+
+async function panelForms(client, user, acc) {
+  const canEdit = acc.rank >= LEVELS.owner;
+  const forms = await db.all('SELECT * FROM forms ORDER BY id DESC').catch(() => []);
+
+  const listRows = (await Promise.all(forms.map(async (f) => {
+    const pc = await db.get("SELECT COUNT(*) c FROM form_submissions WHERE form_id = ? AND status='pending'", [f.id]).catch(() => null);
+    const tc = await db.get('SELECT COUNT(*) c FROM form_submissions WHERE form_id = ?', [f.id]).catch(() => null);
+    return `<tr>
+      <td>${esc(f.name)}</td>
+      <td><a href="/form/${esc(f.slug)}" target="_blank" rel="noopener">/form/${esc(f.slug)}</a></td>
+      <td>${pc ? pc.c : 0} / ${tc ? tc.c : 0}</td>
+      <td>${f.active ? '✅' : '—'}</td>
+      <td style="white-space:nowrap">${canEdit ? `
+        <button class="btn ghost sm" type="button" onclick='fcFormLoad(${JSON.stringify(String(f.id))})'>изменить</button>
+        <form method="POST" action="/panel/forms/toggle" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${f.id}"><button class="btn ghost sm" type="submit">${f.active ? 'выкл' : 'вкл'}</button></form>
+        <form method="POST" action="/panel/forms/delete" style="display:inline" onsubmit="return confirm('Удалить форму «${esc(f.name)}» и все её заявки?')">${csrfField(user)}<input type="hidden" name="id" value="${f.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
+      ` : '<span class="mini">—</span>'}</td>
+    </tr>`;
+  }))).join('');
+  const listCard = `<div class="card"><h2>Формы (${forms.length})</h2>
+    ${forms.length ? `<div class="tablewrap"><table><tr><th>Название</th><th>Ссылка</th><th>Заявок (ждут / всего)</th><th>Активна</th><th></th></tr>${listRows}</table></div>` : '<p class="mini">Форм пока нет.</p>'}
+  </div>`;
+
+  let editorCard = '';
+  if (canEdit) {
+    const FORMS_MAP = Object.fromEntries(forms.map((f) => [String(f.id), {
+      name: f.name || '', slug: f.slug || '', description: f.description || '', channel_id: f.channel_id || '', fields: f.fields || '[]',
+    }]));
+    editorCard = `<div class="card" id="formEditor"><h2>Создать / изменить форму</h2>
+      <form method="POST" action="/panel/forms/save" class="form" onsubmit="return fcFormSubmit(this)">${csrfField(user)}
+        <input type="hidden" name="id" id="fe_id" value="">
+        <label>Название<input name="name" id="fe_name" required maxlength="80"></label>
+        <label>Адрес формы: /form/<input name="slug" id="fe_slug" required maxlength="40" pattern="[a-z0-9_-]+" placeholder="напр. hr-otchet"></label>
+        <label>Описание (необязательно)<textarea name="description" id="fe_desc" rows="2" maxlength="500"></textarea></label>
+        <label>ID Discord-канала для заявок<input name="channel_id" id="fe_channel" pattern="[0-9]*" maxlength="25"></label>
+        <h3 style="font-size:14px;margin:10px 0 4px">Поля формы</h3>
+        <div id="fe_rows"></div>
+        <div class="bar"><button class="btn ghost sm" type="button" onclick="fcFormAddRow()">+ Поле</button></div>
+        <textarea id="fe_fields" name="fields" style="display:none"></textarea>
+        <div class="bar" style="margin-top:8px">
+          <button class="btn" type="submit">Сохранить форму</button>
+          <button class="btn ghost sm" type="button" onclick="fcFormClear()">Новая / очистить</button>
+        </div>
+      </form>
+      <script>
+      var FORMS_MAP=${JSON.stringify(FORMS_MAP).replace(/</g, '\\u003c')};
+      function fcSlugify(s){return (s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40);}
+      function fcFormRow(fl){
+        fl=fl||{};
+        var d=document.createElement('div'); d.className='bar'; d.style.cssText='margin:4px 0;flex-wrap:wrap'; d.dataset.frow='1';
+        d.innerHTML='<input class="ff-label" placeholder="Вопрос / подпись поля" maxlength="120" style="flex:2;min-width:150px">'
+          +'<input class="ff-key" placeholder="ключ" maxlength="40" style="flex:1;min-width:80px">'
+          +'<select class="ff-type"><option value="text">строка</option><option value="textarea">текст</option><option value="select">выбор</option><option value="number">число</option><option value="checkbox">галочка</option></select>'
+          +'<label class="mini" style="display:flex;align-items:center;gap:3px"><input type="checkbox" class="ff-req"> обяз.</label>'
+          +'<input class="ff-opts" placeholder="варианты через запятую (для «выбор»)" maxlength="400" style="flex:2;min-width:150px">'
+          +'<button class="btn ghost sm" type="button" onclick="var r=this.parentNode;if(r.previousElementSibling)r.parentNode.insertBefore(r,r.previousElementSibling);fcFormSync()">▲</button>'
+          +'<button class="btn ghost sm" type="button" onclick="var r=this.parentNode,n=r.nextElementSibling;if(n)r.parentNode.insertBefore(n,r);fcFormSync()">▼</button>'
+          +'<button class="btn ghost sm" type="button" style="background:var(--bad)" onclick="this.parentNode.remove();fcFormSync()">✕</button>';
+        d.querySelector('.ff-label').value=fl.label||'';
+        d.querySelector('.ff-key').value=fl.key||'';
+        d.querySelector('.ff-type').value=fl.type||'text';
+        d.querySelector('.ff-req').checked=!!fl.required;
+        d.querySelector('.ff-opts').value=(fl.options||[]).join(', ');
+        d.querySelectorAll('input,select').forEach(function(e){e.addEventListener('input',fcFormSync);});
+        return d;
+      }
+      function fcFormAddRow(fl){document.getElementById('fe_rows').appendChild(fcFormRow(fl));fcFormSync();}
+      function fcFormSync(){
+        var rows=document.querySelectorAll('#fe_rows [data-frow]'), out=[];
+        rows.forEach(function(r){
+          var label=r.querySelector('.ff-label').value.trim();
+          var key=(r.querySelector('.ff-key').value.trim()||fcSlugify(label)).replace(/-/g,'_');
+          r.querySelector('.ff-key').value=key;
+          if(!label||!key)return;
+          var t=r.querySelector('.ff-type').value;
+          var o={key:key,label:label,type:t,required:r.querySelector('.ff-req').checked};
+          if(t==='select')o.options=r.querySelector('.ff-opts').value.split(',').map(function(x){return x.trim()}).filter(Boolean);
+          out.push(o);
+        });
+        document.getElementById('fe_fields').value=JSON.stringify(out);
+      }
+      function fcFormClear(){['fe_id','fe_name','fe_slug','fe_desc','fe_channel'].forEach(function(i){document.getElementById(i).value='';});document.getElementById('fe_rows').innerHTML='';fcFormAddRow();}
+      function fcFormLoad(id){
+        var f=FORMS_MAP[id]; if(!f)return;
+        document.getElementById('fe_id').value=id;
+        document.getElementById('fe_name').value=f.name||'';
+        document.getElementById('fe_slug').value=f.slug||'';
+        document.getElementById('fe_desc').value=f.description||'';
+        document.getElementById('fe_channel').value=f.channel_id||'';
+        var box=document.getElementById('fe_rows'); box.innerHTML='';
+        var arr=[]; try{arr=JSON.parse(f.fields||'[]')}catch(e){}
+        arr.forEach(function(fl){box.appendChild(fcFormRow(fl))});
+        if(!box.children.length)box.appendChild(fcFormRow());
+        fcFormSync();
+        document.getElementById('formEditor').scrollIntoView({behavior:'smooth'});
+      }
+      function fcFormSubmit(f){fcFormSync();return true;}
+      (function(){ if(!document.getElementById('fe_rows').children.length) fcFormAddRow(); })();
+      </script>
+    </div>`;
+  }
+
+  const pend = await db.all(
+    "SELECT s.*, f.name form_name, f.fields form_fields FROM form_submissions s LEFT JOIN forms f ON f.id = s.form_id WHERE s.status = 'pending' ORDER BY s.id DESC LIMIT 100",
+  ).catch(() => []);
+  const pendCard = `<div class="card"><h2>Заявки на рассмотрении (${pend.length})</h2>
+    ${pend.length ? pend.map((s) => {
+      let fields = []; try { fields = JSON.parse(s.form_fields || '[]'); } catch (_) {}
+      let data = {}; try { data = JSON.parse(s.data || '{}'); } catch (_) {}
+      const rows = fields.map((fl) => `<div class="mini"><b>${esc(fl.label)}:</b> ${esc(String(data[fl.key] == null ? '' : data[fl.key])).slice(0, 600) || '—'}</div>`).join('');
+      return `<div style="border-top:1px solid var(--line);padding-top:8px;margin-top:8px">
+        <div class="mini">#${s.id} · «${esc(s.form_name || '?')}» · ${personLink(client, s.discord_id)} · ${fmt(s.created_at)}</div>
+        ${rows || '<div class="mini">(без полей)</div>'}
+        <form method="POST" action="/panel/forms/review" class="bar" style="margin-top:6px;flex-wrap:wrap">${csrfField(user)}<input type="hidden" name="id" value="${s.id}">
+          <input name="note" placeholder="комментарий (виден автору при отклонении)" maxlength="300" style="flex:1;min-width:160px">
+          <button class="btn sm" name="act" value="approve" type="submit">Принять</button>
+          <button class="btn ghost sm" name="act" value="reject" type="submit">Отклонить</button>
+        </form>
+      </div>`;
+    }).join('') : '<p class="mini">Пусто.</p>'}
+  </div>`;
+
+  return `${!canEdit ? '<div class="muted">Создавать и менять формы может Владелец; вам доступен разбор заявок.</div>' : ''}${listCard}${editorCard}${pendCard}`;
+}
+
+// Страница «Сообщить о баге» — создаёт приватный тикет с категорией bug.
+async function bugReportBody(client, user, acc) {
+  const isMember = acc.rank >= LEVELS.member
+    || !!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]).catch(() => null));
+  if (!isMember) {
+    return `<h1>🐞 Сообщить о баге</h1>
+      <div class="card">Баг-репорт создаётся как приватный тикет — это доступно участникам организации. Если вы ещё не вступили, опишите проблему в Discord.</div>
+      <p><a href="/me">← в кабинет</a></p>`;
+  }
+  const openT = await db.get(
+    "SELECT id FROM tickets WHERE opener_id = ? AND status='open' AND (category IS NULL OR category != 'appeal')",
+    [user.id],
+  ).catch(() => null);
+  return `<h1>🐞 Сообщить о баге</h1>
+  <div class="card">
+    ${openT
+      ? `<p>У вас уже открыт тикет — <a href="/ticket/${openT.id}">#${openT.id}</a>. Опишите баг прямо в нём.</p>`
+      : `<p class="mini">Опишите, что сломалось и как это повторить. Создастся приватный тикет — переписку увидите только вы и руководство.</p>
+      <form method="POST" action="/me/ticket" class="form">${csrfField(user)}
+        <input type="hidden" name="from" value="bug">
+        <label>Где баг<select name="category">
+          <option value="bug">На сайте</option>
+          <option value="bug_discord">В Discord (бот)</option>
+        </select></label>
+        <label>Кратко: что за баг<input name="subject" maxlength="100" required placeholder="напр. не открывается страница профиля"></label>
+        <label>Где произошло (страница сайта, команда бота, канал)<input id="bugpage" name="page" maxlength="300" placeholder="/u/123 · /выплаты_hr · #канал"></label>
+        <label>Подробно: что делали, что ожидали, что получилось<textarea name="description" rows="5" maxlength="2000" required></textarea></label>
+        <button class="btn" type="submit">Отправить баг-репорт</button>
+      </form>
+      <script>(function(){try{var i=document.getElementById('bugpage');if(i&&!i.value&&document.referrer&&document.referrer.indexOf(location.origin)===0)i.value=document.referrer.slice(location.origin.length);}catch(e){}})();</script>`}
+  </div>
+  <p><a href="/me">← в кабинет</a></p>`;
+}
+
+// Публичная страница формы конструктора (/form/<slug>). Нужен вход, ранг не важен.
+async function formPublicBody(client, user, f) {
+  let fields = [];
+  try { fields = JSON.parse(f.fields || '[]'); } catch (_) {}
+  const mine = await db.get(
+    'SELECT status FROM form_submissions WHERE form_id = ? AND discord_id = ? ORDER BY id DESC LIMIT 1',
+    [f.id, user.id],
+  ).catch(() => null);
+  const controls = fields.map((fl) => {
+    const nm = 'f_' + fl.key;
+    const req = fl.required ? ' required' : '';
+    const star = fl.required ? ' *' : '';
+    if (fl.type === 'textarea') return `<label>${esc(fl.label)}${star}<textarea name="${esc(nm)}" rows="3" maxlength="4000"${req}></textarea></label>`;
+    if (fl.type === 'select') return `<label>${esc(fl.label)}${star}<select name="${esc(nm)}"${req}><option value="">— выбрать —</option>${(fl.options || []).map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join('')}</select></label>`;
+    if (fl.type === 'checkbox') return `<label class="chk"><input type="checkbox" name="${esc(nm)}" value="1"><span>${esc(fl.label)}</span></label>`;
+    if (fl.type === 'number') return `<label>${esc(fl.label)}${star}<input type="number" name="${esc(nm)}" step="any"${req}></label>`;
+    return `<label>${esc(fl.label)}${star}<input name="${esc(nm)}" maxlength="500"${req}></label>`;
+  }).join('');
+  return `<h1>${esc(f.name)}</h1>
+    ${f.description ? `<div class="card">${mdToHtml(String(f.description).slice(0, 500))}</div>` : ''}
+    ${mine && mine.status === 'pending' ? '<div class="card" style="border-color:var(--warn)">У вас уже есть заявка по этой форме на рассмотрении.</div>' : ''}
+    <div class="card"><form method="POST" action="/form/submit" class="form">${csrfField(user)}<input type="hidden" name="slug" value="${esc(f.slug)}">
+      ${controls || '<p class="mini">В форме пока нет полей.</p>'}
+      <button class="btn" type="submit">Отправить</button>
+    </form></div>
+    <p><a href="/me">← в кабинет</a></p>`;
+}
+
+async function panelAccounts(client, user) {
+  const rows = await db.all("SELECT discord_id, login, email, linked_discord_id, oauth_discord_id, first_login, login_count FROM web_users WHERE is_local = 1 ORDER BY first_login DESC LIMIT 300").catch(() => []);
+  const reqs = await db.all("SELECT * FROM password_reset_requests WHERE status = 'pending' ORDER BY id DESC LIMIT 100").catch(() => []);
+  const list = rows.map((r) => {
+    const linked = r.linked_discord_id
+      ? `${personLink(client, r.linked_discord_id)} <span class="mini">${esc(r.linked_discord_id)}</span>`
+      : '<span class="mini">—</span>';
+    const oauthOk = r.oauth_discord_id && guildOf(client) && guildOf(client).members.cache.get(r.oauth_discord_id);
+    return `<tr>
+      <td><b>${esc(r.login || '—')}</b><div class="mini">${esc(r.email || '')}</div></td>
+      <td>${linked}</td>
+      <td class="mini">${r.oauth_discord_id ? esc(r.oauth_discord_id) + (oauthOk ? ' ✅' : ' ⚠ не на сервере') : '—'}</td>
+      <td class="muted">${fmt(r.first_login)} · входов ${r.login_count || 0}</td>
+      <td style="white-space:nowrap">
+        <form method="POST" action="/panel/accounts/link" class="bar" style="margin:0;gap:4px">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.discord_id)}">
+          <input name="participant" placeholder="Discord ID / № паспорта" maxlength="30" style="max-width:150px">
+          <button class="btn ghost sm" type="submit">привязать к участнику</button>
+        </form>
+        ${r.linked_discord_id ? `<form method="POST" action="/panel/accounts/unlink" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.discord_id)}"><button class="btn ghost sm" type="submit">отвязать</button></form>` : ''}
+        <form method="POST" action="/panel/accounts/reset_pw" style="display:inline" onsubmit="return confirm('Сбросить пароль? Появится временный пароль — передайте его пользователю.')">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.discord_id)}"><button class="btn ghost sm" type="submit">сбросить пароль</button></form>
+      </td>
+    </tr>`;
+  }).join('');
+  return `
+  <div class="card"><h2>Локальные аккаунты (${rows.length})</h2>
+    <p class="mini">Вход по логину/паролю без Discord. «Привязать к участнику» — по Discord ID или № паспорта: тогда человек на сайте работает от имени этого участника.</p>
+    <div class="tablewrap"><table><tr><th>Логин / почта</th><th>Привязан к участнику</th><th>Свой Discord</th><th>Создан</th><th></th></tr>
+      ${list || '<tr><td colspan="5">пусто</td></tr>'}
+    </table></div>
+  </div>
+  <div class="card"><h2>Заявки на сброс пароля (${reqs.length})</h2>
+    ${reqs.length ? reqs.map((q) => `<div class="bar" style="border-top:1px solid var(--line);padding-top:8px">
+      <span class="mini"><b>${esc(q.login || '—')}</b> · ${esc(q.email || '—')} · ${fmt(q.created_at)}${q.note ? `<br>${esc(q.note)}` : ''}</span>
+      <form method="POST" action="/panel/accounts/reset_done" style="margin:0">${csrfField(user)}<input type="hidden" name="id" value="${q.id}"><button class="btn ghost sm" type="submit">Выполнено</button></form>
+    </div>`).join('') : '<p class="mini">Пусто.</p>'}
+  </div>`;
 }
 
 async function panelBroadcast(user) {
@@ -3220,6 +3846,12 @@ async function panelAdmin(client, user) {
   }
 
   return `
+  <div class="card" style="border-color:${config.ENABLE_PRESENCE ? 'var(--ok)' : 'var(--warn)'}">
+    <h2>Онлайн-статус участников</h2>
+    ${config.ENABLE_PRESENCE
+      ? '<p class="mini">Включён: зелёная точка у имени показывает, кто сейчас онлайн в Discord. Нужен привилегированный интент <b>Presence Intent</b> в Developer Portal.</p>'
+      : '<p class="mini">Выключен. Чтобы у имён появилась зелёная точка «онлайн», задайте <code>ENABLE_PRESENCE: true</code> в <code>config.js</code> и включите <b>Presence Intent</b> в Discord Developer Portal → Bot → Privileged Gateway Intents, затем перезапустите бота.</p>'}
+  </div>
   <div class="card"><h2>Название и тексты сайта</h2>
     <form method="POST" action="/admin/site" class="form">${csrfField(user)}
       <label>Название организации<input name="brand" value="${v('brand', config.SITE_BRAND)}" maxlength="60"></label>
@@ -3268,11 +3900,62 @@ async function panelAdmin(client, user) {
   </div>
 
   <div class="card"><h2>Пункты меню в шапке</h2>
-    <p class="mini">Один пункт в строке: <code>Текст | /path | tier</code>. tier: <code>all</code> (все), <code>member</code> (участники), <code>hr</code> (HR+). Ниже уже стандартное меню — правьте под себя. Полностью очистите поле, чтобы вернуть стандартное.</p>
-    <form method="POST" action="/admin/nav" class="form">${csrfField(user)}
-      <textarea name="nav" rows="12" maxlength="2000">${esc((SITE.nav && SITE.nav.trim()) ? SITE.nav : DEFAULT_NAV_TEXT)}</textarea>
+    <p class="mini">Собери меню кнопками. «Кому»: все / участники / HR+. Пустой список = вернуть стандартное меню.</p>
+    <form method="POST" action="/admin/nav" class="form" id="navForm" onsubmit="return fcNavSubmit(this)">${csrfField(user)}
+      <div id="navRows"></div>
+      <div class="bar">
+        <button class="btn ghost sm" type="button" onclick="fcNavAdd('','',' all')">+ Пункт</button>
+        <button class="btn ghost sm" type="button" onclick="fcNavReset()">Сбросить к стандартному</button>
+        <button class="btn ghost sm" type="button" onclick="var t=document.getElementById('navRaw');t.style.display=t.style.display==='none'?'':'none'">Текстом</button>
+      </div>
+      <div class="mini" style="margin:8px 0">Предпросмотр: <span id="navPreview" class="nav" style="display:inline-flex;flex-wrap:wrap;gap:4px"></span></div>
+      <textarea id="navRaw" name="nav" rows="8" maxlength="2000" style="display:none">${esc((SITE.nav && SITE.nav.trim()) ? SITE.nav : '')}</textarea>
       <button class="btn sm" type="submit">Сохранить меню</button>
     </form>
+    <datalist id="navPaths">
+      ${['/me', '/people', '/giveaways', '/faq', '/commands', '/dashboard', '/tickets', '/panel', '/panel?tab=apps', '/panel?tab=queues', '/panel?tab=contracts_check', '/panel?tab=members', '/panel?tab=giveaways', '/audit', '/leaderboards', '/calendar', '/search', '/notifications', '/compare', '/health', '/tools', '/rules', '/about'].map((x) => `<option value="${x}">`).join('')}
+    </datalist>
+    <script>
+    var NAV_DEFAULT=${JSON.stringify(DEFAULT_NAV_TEXT)};
+    function fcNavRow(txt,url,tier){
+      var d=document.createElement('div'); d.className='bar'; d.style.margin='4px 0'; d.dataset.row='1';
+      d.innerHTML='<input class="nv-t" placeholder="Название" maxlength="40" style="flex:1;min-width:120px">'
+        +'<input class="nv-u" list="navPaths" placeholder="/path" maxlength="120" style="flex:1;min-width:120px">'
+        +'<select class="nv-r"><option value="all">все</option><option value="member">участники</option><option value="hr">HR+</option></select>'
+        +'<button class="btn ghost sm" type="button" onclick="var r=this.parentNode;r.parentNode.insertBefore(r,r.previousElementSibling);fcNavSync()">▲</button>'
+        +'<button class="btn ghost sm" type="button" onclick="var r=this.parentNode,n=r.nextElementSibling;if(n)r.parentNode.insertBefore(n,r);fcNavSync()">▼</button>'
+        +'<button class="btn ghost sm" type="button" style="background:var(--bad)" onclick="this.parentNode.remove();fcNavSync()">✕</button>';
+      d.querySelector('.nv-t').value=txt||''; d.querySelector('.nv-u').value=url||''; d.querySelector('.nv-r').value=(tier||'all').trim()||'all';
+      d.querySelectorAll('input,select').forEach(function(e){e.addEventListener('input',fcNavSync);});
+      return d;
+    }
+    function fcNavAdd(t,u,r){document.getElementById('navRows').appendChild(fcNavRow(t,u,r));fcNavSync();}
+    function fcNavFromText(txt){
+      var box=document.getElementById('navRows'); box.innerHTML='';
+      (txt||'').split('\\n').forEach(function(l){
+        var p=l.split('|').map(function(x){return x.trim()});
+        if(p[0]&&p[1])box.appendChild(fcNavRow(p[0],p[1],p[2]||'all'));
+      });
+      if(!box.children.length)box.appendChild(fcNavRow('','','all'));
+      fcNavSync();
+    }
+    function fcNavSync(){
+      var rows=document.querySelectorAll('#navRows [data-row]'), lines=[], prev='';
+      rows.forEach(function(r){
+        var t=r.querySelector('.nv-t').value.trim(), u=r.querySelector('.nv-u').value.trim(), tr=r.querySelector('.nv-r').value;
+        if(t&&u){lines.push(t+' | '+u+' | '+tr); prev+='<a href="'+u.replace(/"/g,'')+'">'+t.replace(/</g,'&lt;')+'</a>';}
+      });
+      document.getElementById('navRaw').value=lines.join('\\n');
+      document.getElementById('navPreview').innerHTML=prev||'<span class="mini">(стандартное меню)</span>';
+    }
+    function fcNavReset(){ if(confirm('Загрузить стандартное меню в редактор?')) fcNavFromText(NAV_DEFAULT); }
+    function fcNavSubmit(f){ fcNavSync(); return true; }
+    (function(){
+      var raw=document.getElementById('navRaw').value.trim();
+      fcNavFromText(raw || NAV_DEFAULT);
+      document.getElementById('navRaw').addEventListener('change',function(){fcNavFromText(this.value);});
+    })();
+    </script>
   </div>
 
   <div class="card"><h2>Свой CSS</h2>
@@ -3308,6 +3991,13 @@ async function panelAdmin(client, user) {
       <button class="btn sm" type="submit">Опубликовать / обновить меню в каналах</button>
     </form>
     <p class="mini">То же, что команда /меню_создать: сообщения с кнопками «Подать заявку», «Отпуск», «Тикет» и т.д.</p>
+  </div>
+
+  <div class="card"><h2>Восстановить каналы-профили</h2>
+    <form method="POST" action="/admin/profiles_restore" onsubmit="return confirm('Создать недостающие каналы-профили для всех участников?')">${csrfField(user)}
+      <button class="btn sm" type="submit">Создать недостающие</button>
+    </form>
+    <p class="mini">То же, что /профили_восстановить: для каждого паспорта без рабочего канала создаётся новый.</p>
   </div>`;
 }
 
@@ -3341,6 +4031,23 @@ async function healthBody(client) {
     }
   } catch (_) {}
   const logins24 = await c('SELECT COUNT(*) c FROM web_logins WHERE at >= ?', [new Date(Date.now() - 864e5).toISOString()]);
+  const stuckH = (typeof config.STUCK_CONTRACT_HOURS === 'number' ? config.STUCK_CONTRACT_HOURS : 24);
+  const stuckCutoff = new Date(Date.now() - stuckH * 36e5).toISOString();
+  const stuckContracts = await db.get(
+    "SELECT COUNT(*) c FROM contracts WHERE (status='taken' AND taken_submitted_at <= ?) OR (status='pending' AND submitted_at <= ?)",
+    [stuckCutoff, stuckCutoff],
+  ).then((r) => (r ? r.c : 0)).catch(() => 0);
+  let uploadBytes = 0;
+  for (const t of ['contract_uploads', 'page_assets']) {
+    try { const r = await db.get(`SELECT COALESCE(SUM(size),0) s FROM ${t}`); uploadBytes += r ? r.s : 0; } catch (_) {}
+  }
+  let diskBytes = 0;
+  try {
+    const ud = db.dataDir ? require('path').join(db.dataDir, 'uploads') : 'data/uploads';
+    for (const f of fs.readdirSync(ud)) { try { diskBytes += fs.statSync(require('path').join(ud, f)).size; } catch (_) {} }
+  } catch (_) {}
+  const err24 = _errLog.filter((e) => e.at >= _since24());
+  const slow24 = _slowLog.filter((e) => e.at >= _since24());
   const tile = (n, l) => `<div class="tile"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
   return `
   <h1>Здоровье системы</h1>
@@ -3351,13 +4058,26 @@ async function healthBody(client) {
     ${tile(lastBackup, 'последний бэкап')}
     ${tile(logins24, 'входов за 24ч')}
     ${tile(g ? g.memberCount : '—', 'участников сервера')}
+    ${tile((uploadBytes / 1048576).toFixed(2) + ' МБ', 'скрины в БД (legacy)')}
+    ${tile((diskBytes / 1048576).toFixed(2) + ' МБ', 'скрины на диске')}
+    ${tile(stuckContracts, `контрактов висит >${stuckH}ч`)}
+    ${tile(err24.length, 'ошибок 5xx за 24ч')}
+    ${tile(slow24.length, 'медленных запросов (>1.5с) за 24ч')}
   </div></div>
+  ${err24.length ? `<div class="card"><h2>Последние ошибки веб-сервера</h2>
+    <div class="tablewrap"><table><tr><th>Когда</th><th>Путь</th><th>Ошибка</th></tr>
+      ${err24.slice(-15).reverse().map((e) => `<tr><td class="muted">${fmt(new Date(e.at).toISOString())}</td><td class="mini">${esc(e.path)}</td><td class="mini">${esc(String(e.msg).split('\n')[0].slice(0, 160))}</td></tr>`).join('')}
+    </table></div></div>` : ''}
+  ${slow24.length ? `<div class="card"><h2>Самые медленные запросы (за 24ч)</h2>
+    <div class="tablewrap"><table><tr><th>Когда</th><th>Путь</th><th>мс</th></tr>
+      ${slow24.slice().sort((a, b) => b.ms - a.ms).slice(0, 15).map((e) => `<tr><td class="muted">${fmt(new Date(e.at).toISOString())}</td><td class="mini">${esc(e.path)}</td><td>${e.ms}</td></tr>`).join('')}
+    </table></div></div>` : ''}
   <div class="card"><h2>Незакрытые очереди</h2><div class="grid">
     ${Object.entries(queues).map(([k, v]) => tile(v, k)).join('')}
   </div></div>
   <div class="card"><h2>Строк в таблицах</h2><div class="grid">
     ${await (async () => {
-      const tbls = ['participants', 'extra_passports', 'applications', 'kicks', 'vacations', 'contracts', 'invitations', 'blacklist', 'giveaways', 'tickets', 'audit_log', 'web_users', 'notifications'];
+      const tbls = ['participants', 'extra_passports', 'applications', 'kicks', 'vacations', 'contracts', 'contract_uploads', 'invitations', 'blacklist', 'giveaways', 'tickets', 'audit_log', 'web_users', 'notifications'];
       const out = [];
       for (const t of tbls) { try { const r = await db.get(`SELECT COUNT(*) c FROM ${t}`); out.push(tile(r ? r.c : 0, t)); } catch (_) {} }
       return out.join('');
@@ -3367,8 +4087,10 @@ async function healthBody(client) {
 
 // ---------- FAQ + реакции ----------
 async function faqBody(client, acc, user) {
-  const cats = acc.rank >= LEVELS.hr ? ['member', 'hr'] : ['member'];
-  const catTitle = { member: 'Для участников', hr: 'Для HR' };
+  const cats = acc.rank >= LEVELS.hr ? ['public', 'member', 'hr']
+    : acc.rank >= LEVELS.member ? ['public', 'member']
+    : ['public'];
+  const catTitle = { public: 'Для всех', member: 'Для участников', hr: 'Для HR' };
   const blocks = [];
   for (const cat of cats) {
     const entries = await db.all('SELECT * FROM faq_entries WHERE category = ? ORDER BY position, id', [cat]).catch(() => []);
@@ -3611,6 +4333,54 @@ async function ticketsListBody(client, sp, user) {
   </div>`;
 }
 
+// Выкачивает все сообщения канала тикета (страницами по 100, до ~4000).
+async function fetchAllTicketMessages(ch) {
+  const out = [];
+  let before;
+  for (let i = 0; i < 40; i++) {
+    const batch = await ch.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+    if (!batch || !batch.size) break;
+    const arr = [...batch.values()];
+    out.push(...arr);
+    before = arr[arr.length - 1].id;
+    if (batch.size < 100) break;
+  }
+  return out.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+}
+
+// Собирает автономный HTML-транскрипт переписки тикета. Картинки — ссылками.
+async function buildTicketTranscriptHtml(client, t) {
+  const g = guildOf(client);
+  if (!g) throw new Error('бот офлайн');
+  const ch = await g.channels.fetch(t.channel_id);
+  const msgs = await fetchAllTicketMessages(ch);
+  const rows = msgs.map((m) => {
+    const who = esc(m.member ? m.member.displayName : (m.author ? m.author.username : 'неизвестно'));
+    const when = esc(fmt(new Date(m.createdTimestamp).toISOString()));
+    const body = renderMentions(client, esc(m.content || '')).replace(/\n/g, '<br>');
+    const atts = [...m.attachments.values()].map((a) => `<div class="att"><a href="${esc(a.url)}" target="_blank" rel="noopener">📎 ${esc(a.name || 'вложение')}</a></div>`).join('');
+    const emb = m.embeds && m.embeds.length ? `<div class="att muted">[вложенных эмбедов: ${m.embeds.length}]</div>` : '';
+    return `<div class="msg"><div class="meta"><b>${who}</b> · ${when}</div><div class="body">${body || '<span class="muted">—</span>'}${atts}${emb}</div></div>`;
+  }).join('\n');
+  const title = `Транскрипт тикета #${t.id} — ${esc(t.subject || 'без темы')}`;
+  const html = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title><style>
+body{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:#0f1013;color:#e7e7ea;margin:0;padding:24px}
+.wrap{max-width:820px;margin:0 auto}
+h1{font-size:19px;margin:0 0 4px} .sub{color:#9a9aa2;margin-bottom:18px;font-size:13px}
+.msg{border-left:3px solid #2a2b31;padding:6px 0 6px 12px;margin:10px 0}
+.meta{color:#9a9aa2;font-size:12px;margin-bottom:2px}
+.body{white-space:normal;word-wrap:break-word}
+.att{margin-top:4px;font-size:13px} .muted{color:#9a9aa2}
+a{color:#8ea2ff}
+</style></head><body><div class="wrap">
+<h1>${title}</h1>
+<div class="sub">Автор: ${esc(t.opener_id)} · создан ${esc(fmt(t.created_at))}${t.closed_at ? ` · закрыт ${esc(fmt(t.closed_at))}` : ''} · сообщений: ${msgs.length} · выгружено ${esc(fmt(new Date().toISOString()))}</div>
+${rows || '<div class="muted">Сообщений нет.</div>'}
+</div></body></html>`;
+  return { html, count: msgs.length };
+}
+
 async function ticketPageBody(client, user, acc, tid) {
   const t = await db.get('SELECT * FROM tickets WHERE id = ?', [tid]);
   if (!t) return '<div class="card">Тикет не найден.</div><p><a href="/me">← в кабинет</a></p>';
@@ -3663,6 +4433,10 @@ async function ticketPageBody(client, user, acc, tid) {
           <select name="priority">
             ${['normal', 'high', 'low'].map((p) => `<option value="${p}" ${(t.priority || 'normal') === p ? 'selected' : ''}>${p === 'normal' ? 'обычный' : p === 'high' ? 'высокий' : 'низкий'}</option>`).join('')}
           </select></label>
+        <label>Категория
+          <select name="category">
+            ${Object.entries(TICKET_CAT_RU).filter(([k]) => k !== 'appeal').map(([k, v]) => `<option value="${k}" ${t.category === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+          </select></label>
         <label>Метки (через запятую)<input name="tags" value="${esc(t.tags || '')}" maxlength="200" placeholder="оплата, срочно, баг"></label>
         <button class="btn sm" type="submit">Сохранить</button>
       </form>
@@ -3697,6 +4471,16 @@ async function ticketPageBody(client, user, acc, tid) {
   } else if (closed && isStaff && t.rating != null) {
     ratingCard = `<div class="card"><h2>Оценка автора</h2>${t.rating ? '👍 помогли' : '👎 не помогли'} · ${fmt(t.rated_at)}</div>`;
   }
+  const tr = await db.get('SELECT msg_count, created_at, generated_by FROM ticket_transcripts WHERE ticket_id = ?', [t.id]).catch(() => null);
+  const transcriptCard = `<div class="card"><h2>Транскрипт переписки</h2>
+    ${tr
+      ? `<p class="mini">Сохранён ${fmt(tr.created_at)}${tr.generated_by ? ' · ' + personLink(client, tr.generated_by) : ''} · ${tr.msg_count} сообщ.</p>
+         <a class="btn sm" href="/ticket/${t.id}/transcript" target="_blank" rel="noopener">Открыть транскрипт</a>`
+      : '<p class="mini">Ещё не создан. Соберёт всю переписку канала в HTML-файл (картинки — ссылками).</p>'}
+    <form method="POST" action="/ticket/transcript" style="margin-top:8px">${csrfField(user)}<input type="hidden" name="id" value="${t.id}">
+      <button class="btn sm ghost" type="submit">${tr ? 'Пересобрать' : 'Сохранить переписку'}</button>
+    </form>
+  </div>`;
   return `
   <h1>🎫 ${esc(t.subject || 'Тикет')} #${t.id}</h1>
   <div class="muted">${esc(TICKET_CAT_RU[t.category] || t.category || '')} · ${closed ? 'закрыт' : 'открыт'} · приоритет ${priBadge} · автор ${personLink(client, t.opener_id)}${t.assigned_to ? ` · ведёт ${personLink(client, t.assigned_to)}` : ''}${t.tags ? ` · ${t.tags.split(',').map((x) => x.trim()).filter(Boolean).map((x) => `<a class="pill" href="/tickets?tag=${encodeURIComponent(x)}">${esc(x)}</a>`).join(' ')}` : ''}</div>
@@ -3707,6 +4491,7 @@ async function ticketPageBody(client, user, acc, tid) {
     <button class="btn" type="submit">Отправить в тикет</button></form></div>`}
   ${staffCard}
   ${ratingCard}
+  ${transcriptCard}
   ${tplManage}
   <p><a href="/me">← в кабинет</a></p>`;
 }
@@ -3736,7 +4521,7 @@ async function panelContractCheck(client, user, pageNum = 0) {
 
 // ---------- Управление гайдами FAQ (Владелец) ----------
 async function panelFaqManage(user) {
-  const cats = [['member', 'Для участников'], ['hr', 'Для HR']];
+  const cats = [['public', 'Для всех (видно и не-участникам)'], ['member', 'Для участников'], ['hr', 'Для HR']];
   const parts = [];
   for (const [cat, title] of cats) {
     const entries = await db.all('SELECT * FROM faq_entries WHERE category = ? ORDER BY position, id', [cat]).catch(() => []);
@@ -4085,17 +4870,42 @@ function commandsAllowed(rank, isHavirys) {
 }
 function commandsBody(acc, user) {
   const labels = HOOKS.tierLabels || {};
+  const descs = HOOKS.commandDescriptions || {};
   const grouped = commandsAllowed(acc.rank, user && user.id === OWNER_ID);
   const order = ['everyone', 'hr', 'deputy', 'owner', 'admin', 'owner_account_only'];
   const seen = new Set();
   const secs = [];
+  let total = 0;
   for (const t of [...order, ...Object.keys(grouped)]) {
     if (seen.has(t) || !grouped[t]) continue;
     seen.add(t);
-    const cmds = grouped[t].map((c) => `<span class="pill" style="${c.ok ? '' : 'opacity:.4'}">/${esc(c.name)}${c.ok ? '' : ' 🔒'}</span>`).join(' ');
-    secs.push(`<div class="card"><h2>${esc(labels[t] || t)}</h2>${cmds}</div>`);
+    const avail = grouped[t].filter((c) => c.ok).sort((a, b) => a.name.localeCompare(b.name));
+    if (!avail.length) continue;
+    total += avail.length;
+    const rows = avail.map((c) => `<tr>
+      <td style="white-space:nowrap"><code>/${esc(c.name)}</code></td>
+      <td>${esc(descs[c.name] || '—')}</td>
+    </tr>`).join('');
+    secs.push(`<div class="card"><h2>${esc(labels[t] || t)} (${avail.length})</h2>
+      <div class="tablewrap"><table><tr><th>Команда</th><th>Что делает</th></tr>${rows}</table></div></div>`);
   }
-  return `<h1>Команды бота</h1><p class="mini">Доступные вам — ярко, недоступные — бледно с 🔒.</p>${secs.join('')}`;
+  const help = acc.rank >= LEVELS.hr ? `<div class="card"><h2>Как что делать (шпаргалка HR)</h2>
+    <ul style="margin-left:18px;line-height:1.9">
+      <li><b>Заявки на вступление</b> — вкладка «Заявки» (или пункт в шапке): принять/отклонить, комментарии, «беру на рассмотрение».</li>
+      <li><b>Контракты</b> — «Контракты — проверка»: ✅ выполнен / ❌ невыполнен / 🚫 не контракт. Оба скрина видно в карточке.</li>
+      <li><b>Очереди</b> (паспорта, изменение данных, апелляции ЧС, HR-заявки, кодовые слова) — вкладка «Очереди», одобрить/отклонить с причиной.</li>
+      <li><b>Отпуск / AFK</b> — на профиле участника (<code>/u/&lt;id&gt;</code>) блок «Действия»: выдать/снять по паспорту или всем.</li>
+      <li><b>Ранги</b> — там же «Ранг паспорта»: повысить/понизить. Массово — «Сверка ролей» / «Пересчитать ранги».</li>
+      <li><b>Тикеты</b> — вкладка «Тикеты»: приоритет, метки, «взять на себя», закрыть с причиной, переоткрыть.</li>
+      <li><b>Розыгрыши</b> — вкладка «Розыгрыши»: создать/запланировать/повторяющийся, реролл, участники, ЧС, шаблоны.</li>
+      <li><b>Тексты</b> (правила/агитация/вакансия) — вкладка «Тексты», там же «разослать» / «опубликовать в канал».</li>
+      <li><b>Аудит</b> — вкладка «Панель» → «Аудит» или пункт в шапке: фильтры, пресеты, экспорт CSV, откат действий (5 мин).</li>
+      <li><b>Аналитика</b> — «Дашборд»: воронка найма, статистика HR, нагрузка HR, retention, тепловая карта, сравнение недель.</li>
+    </ul></div>` : '';
+  return `<h1>Команды бота</h1>
+    <p class="mini">Показаны только доступные вам команды (${total}). Описание — как в Discord.</p>
+    ${help}
+    ${secs.join('') || '<div class="card">Доступных команд нет.</div>'}`;
 }
 async function personCommandsCard(client, targetId) {
   const a = await accessFor(client, targetId).catch(() => ({ rank: 0 }));
@@ -4105,6 +4915,77 @@ async function personCommandsCard(client, targetId) {
   all.sort();
   return `<div class="card"><h2>Команды, доступные этому участнику (${all.length})</h2>
     <div class="mini">${all.map((n) => `<span class="pill">/${esc(n)}</span>`).join(' ') || '—'}</div></div>`;
+}
+
+// Разбор одного скрина из формы: data-URI (сжатый в браузере) ИЛИ http-ссылка.
+function resolveShot(body, dataField, urlField) {
+  const data = (body.get(dataField) || '').trim();
+  const url = (body.get(urlField) || '').trim();
+  const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(data);
+  if (m) {
+    let buf;
+    try { buf = Buffer.from(m[2], 'base64'); } catch (_) { return { err: 'Файл не читается.' }; }
+    if (buf.length > 1400 * 1024) return { err: 'Скриншот слишком большой.' };
+    if (buf.length < 8) return { err: 'Пустой файл.' };
+    // Проверка сигнатуры файла — заявленный image/* должен быть настоящим PNG/JPEG/WebP.
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    const isWebp = buf.length > 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP';
+    if (!isPng && !isJpeg && !isWebp) return { err: 'Файл не похож на картинку (PNG/JPEG/WebP).' };
+    const realMime = isPng ? 'image/png' : isJpeg ? 'image/jpeg' : 'image/webp';
+    return { buf, mime: realMime };
+  }
+  if (/^https?:\/\//i.test(url)) return { url: url.slice(0, 400) };
+  return {};
+}
+// ---------- Файлы загрузок на диске (data/uploads/) ----------
+const _fsMod = require('fs');
+const _pathMod = require('path');
+function uploadsDir() {
+  const d = db.dataDir ? _pathMod.join(db.dataDir, 'uploads') : _pathMod.join(process.cwd(), 'data', 'uploads');
+  try { _fsMod.mkdirSync(d, { recursive: true }); } catch (_) {}
+  return d;
+}
+function uploadExt(mime) {
+  return (mime || '').includes('png') ? 'png' : (mime || '').includes('webp') ? 'webp' : 'jpg';
+}
+async function saveUploadFile(prefix, mime, buf) {
+  const name = `${String(prefix).replace(/[^a-z0-9_-]/gi, '')}_${crypto.randomBytes(6).toString('hex')}.${uploadExt(mime)}`;
+  await _fsMod.promises.writeFile(_pathMod.join(uploadsDir(), name), buf);
+  return name;
+}
+async function readUploadFile(name) {
+  if (!name) return null;
+  try { return await _fsMod.promises.readFile(_pathMod.join(uploadsDir(), _pathMod.basename(name))); } catch (_) { return null; }
+}
+async function deleteUploadFile(name) {
+  if (!name) return;
+  try { await _fsMod.promises.unlink(_pathMod.join(uploadsDir(), _pathMod.basename(name))); } catch (_) {}
+}
+// Отдаёт байты записи-загрузки: с диска (file) или из legacy-BLOB (data),
+// лениво перенося BLOB на диск при первом обращении.
+async function loadUploadBytes(table, row) {
+  if (row && row.file) { const b = await readUploadFile(row.file); if (b) return b; }
+  if (row && row.data) {
+    try {
+      const fn = await saveUploadFile((table === 'page_assets' ? 'a' : 'c') + row.id, row.mime, row.data);
+      await db.run(`UPDATE ${table} SET file = ?, data = NULL WHERE id = ?`, [fn, row.id]);
+    } catch (_) {}
+    return row.data;
+  }
+  return null;
+}
+
+async function shotStore(ownerId, contractId, slot, s) {
+  if (s.buf) {
+    const fname = await saveUploadFile(`c${contractId || 0}${slot}`, s.mime, s.buf);
+    const r = await db.run(
+      'INSERT INTO contract_uploads (contract_id, owner_id, slot, mime, file, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [contractId || null, ownerId, slot, s.mime, fname, s.buf.length, new Date().toISOString()],
+    );
+    return { url: baseUrl() + '/cimg/' + r.lastID, buf: s.buf, mime: s.mime, id: r.lastID };
+  }
+  return { url: s.url };
 }
 
 // ---------- Обработка POST ----------
@@ -4117,8 +4998,13 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== заявка на вступление =====
   if (pathName === '/apply') {
     if ((body.get('website') || '').trim()) return '/me?' + qs({ ok: 'Заявка отправлена на рассмотрение.' }); // honeypot — тихо игнорируем
-    if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id])) return '/me?' + qs({ err: 'Вы уже участник организации.' });
-    if (await db.get('SELECT id FROM blacklist WHERE discord_id = ?', [user.id])) return '/apply?' + qs({ err: 'Вы в чёрном списке организации.' });
+    // Подать заявку можно только с Discord, который сейчас на сервере.
+    const applicantId = (user.local && String(user.id).startsWith('local:')) ? (user.oauthDiscordId || '') : user.id;
+    if (!applicantId || !(await memberOfGuild(client, applicantId))) {
+      return '/apply?' + qs({ err: user.local ? 'Привяжите Discord к аккаунту — и он должен быть на сервере организации.' : 'Ваш Discord не найден на сервере организации.' });
+    }
+    if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [applicantId])) return '/me?' + qs({ err: 'Вы уже участник организации.' });
+    if (await db.get('SELECT id FROM blacklist WHERE discord_id = ?', [applicantId])) return '/apply?' + qs({ err: 'Вы в чёрном списке организации.' });
     const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
     const stat = (body.get('static') || '').trim();
     const lvl = parseInt(body.get('lvl'), 10) || 0;
@@ -4126,14 +5012,14 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const refId = getCookie(cookieHeader, 'fc_ref');
     const invited = (body.get('invited_by') || '').trim() || refId || '';
     if (!name || !/^[0-9]+$/.test(stat) || lvl < 1) return '/apply?' + qs({ err: 'Проверьте поля: имя, № паспорта (только цифры), LVL.' });
-    if (await db.get("SELECT id FROM applications WHERE discord_id = ? AND status='pending'", [user.id])) return '/me?' + qs({ err: 'У вас уже есть заявка на рассмотрении.' });
+    if (await db.get("SELECT id FROM applications WHERE discord_id = ? AND status='pending'", [applicantId])) return '/me?' + qs({ err: 'У вас уже есть заявка на рассмотрении.' });
     const created = new Date().toISOString();
     const r = await db.run(
       `INSERT INTO applications (discord_id, discord_tag, name, static, lvl, skills, invited_by, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      [user.id, uname, name, stat, lvl, skills, invited, created],
+      [applicantId, uname, name, stat, lvl, skills, invited, created],
     );
-    const app = { id: r.lastID, discord_id: user.id, discord_tag: uname, name, static: stat, lvl, skills, invited_by: invited, status: 'pending', created_at: created };
+    const app = { id: r.lastID, discord_id: applicantId, discord_tag: uname, name, static: stat, lvl, skills, invited_by: invited, status: 'pending', created_at: created };
     const sent = await postTo(client, config.CHANNEL_APPLY_REVIEW, {
       content: REVIEW_MENTION() + ' — заявка подана через сайт',
       embeds: [webApplyEmbed(app)], components: webApplyComponents(app), ...REVIEW_MENTION_OPTS,
@@ -4142,6 +5028,32 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (refId) await db.run('UPDATE invite_links SET signups = signups + 1 WHERE creator_id = ?', [refId]).catch(() => {});
     await webAudit(client, user, 'Заявка на вступление (сайт)', `#${app.id} — ${name}, № ${stat}, LVL ${lvl}${refId ? ' (по ссылке ' + refId + ')' : ''}`);
     return '/me?' + qs({ ok: 'Заявка отправлена на рассмотрение.' });
+  }
+
+  // ===== локальный аккаунт: смена пароля =====
+  if (pathName === '/account/password') {
+    if (!user.local) return '/me?' + qs({ err: 'Только для локальных аккаунтов.' });
+    const row = await db.get('SELECT pass_hash, pass_salt FROM web_users WHERE discord_id = ?', [user.localId]).catch(() => null);
+    if (!row || !pwVerify(body.get('old') || '', row.pass_salt, row.pass_hash)) return '/account?' + qs({ err: 'Текущий пароль неверный.' });
+    const np = body.get('new') || '';
+    if (String(np).length < 8) return '/account?' + qs({ err: 'Новый пароль — минимум 8 символов.' });
+    if (np !== (body.get('new2') || '')) return '/account?' + qs({ err: 'Пароли не совпадают.' });
+    const rec = pwMake(np);
+    await db.run('UPDATE web_users SET pass_hash = ?, pass_salt = ?, sess_ver = COALESCE(sess_ver,0) + 1 WHERE discord_id = ?', [rec.hash, rec.salt, user.localId]);
+    _sessVerCache.delete(user.localId);
+    return '/login/local?' + qs({ ok: 'Пароль изменён — войдите заново.' });
+  }
+  if (pathName === '/account/discord_unlink') {
+    if (!user.local) return '/me?' + qs({ err: 'Только для локальных аккаунтов.' });
+    await db.run('UPDATE web_users SET oauth_discord_id = NULL WHERE discord_id = ?', [user.localId]);
+    return '/account?' + qs({ ok: 'Discord отвязан.' });
+  }
+
+  // ===== сброс ссылки-подписки на календарь отпусков =====
+  if (pathName === '/me/ical_reset') {
+    const token = crypto.randomBytes(18).toString('base64url');
+    await db.run('UPDATE web_users SET ical_token = ? WHERE discord_id = ?', [token, user.id]).catch(() => {});
+    return '/me?' + qs({ ok: 'Ссылка-подписка обновлена. Старая больше не работает.' });
   }
 
   // ===== выйти со всех устройств =====
@@ -4174,10 +5086,11 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== «Обо мне» на публичном профиле =====
   if (pathName === '/me/about') {
     if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Только для участников.' });
-    await db.run('UPDATE participants SET about = ?, about_private = ?, contracts_private = ? WHERE discord_id = ?', [
+    await db.run('UPDATE participants SET about = ?, about_private = ?, contracts_private = ?, badges_private = ? WHERE discord_id = ?', [
       (body.get('about') || '').slice(0, 1000),
       body.get('about_private') === '1' ? 1 : 0,
       body.get('contracts_private') === '1' ? 1 : 0,
+      body.get('badges_private') === '1' ? 1 : 0,
       user.id,
     ]);
     return '/me?' + qs({ ok: 'Сохранено.' });
@@ -4210,55 +5123,142 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=apps&' + qs({ ok: 'Комментарий добавлен.' });
   }
 
-  // ===== сдать контракт с сайта (участник): 2 скриншота, файл или ссылка =====
-  if (pathName === '/me/contract') {
+  const storeShot = (contractId, slot, s) => shotStore(user.id, contractId, slot, s);
+
+  // ===== контракт: этап 1 — «взял» =====
+  if (pathName === '/me/contract_take') {
     if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Только для участников.' });
     const stat = (body.get('static') || '').trim();
     const pps = await passportsLib.getAllPassports(user.id).catch(() => []);
     const pp = pps.find((x) => x.static === stat);
     if (!pp) return '/me?' + qs({ err: 'Выберите паспорт из списка.' });
-    const pend = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status = 'pending'", [user.id]).catch(() => null);
-    if (pend && pend.c >= 10) return '/me?' + qs({ err: 'У вас уже 10 контрактов на проверке — дождитесь решения.' });
-    const resolveSlot = (dataField, urlField) => {
-      const data = (body.get(dataField) || '').trim();
-      const url = (body.get(urlField) || '').trim();
-      const m = /^data:(image\/(?:png|jpeg|jpg|webp));base64,(.+)$/i.exec(data);
-      if (m) {
-        let buf;
-        try { buf = Buffer.from(m[2], 'base64'); } catch (_) { return { err: 'Файл не читается.' }; }
-        if (buf.length > 1400 * 1024) return { err: 'Скриншот слишком большой (после сжатия).' };
-        if (!buf.length) return { err: 'Пустой файл.' };
-        return { buf, mime: m[1] };
-      }
-      if (/^https?:\/\//i.test(url)) return { url: url.slice(0, 400) };
-      return {};
-    };
-    const taken = resolveSlot('taken_data', 'taken_url');
-    const result = resolveSlot('result_data', 'result_url');
-    if (taken.err || result.err) return '/me?' + qs({ err: taken.err || result.err });
-    if ((!taken.buf && !taken.url) || (!result.buf && !result.url)) {
-      return '/me?' + qs({ err: 'Нужны оба скриншота: «взял» и «итог» (файл или ссылка).' });
-    }
+    const openCnt = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status IN ('taken','pending')", [user.id]).catch(() => null);
+    if (openCnt && openCnt.c >= 15) return '/me?' + qs({ err: 'Слишком много незакрытых контрактов — сдайте итоги.' });
+    const shot = resolveShot(body, 'taken_data', 'taken_url');
+    if (shot.err) return '/me?' + qs({ err: shot.err });
+    if (!shot.buf && !shot.url) return '/me?' + qs({ err: 'Приложите скрин «взял» (файл или ссылку).' });
     const now = new Date().toISOString();
-    let cid;
-    try {
-      cid = await contracts.recordPendingContract(user.id, pp.profile_thread_id || null, null, null, now);
-    } catch (e) { return '/me?' + qs({ err: 'Не удалось: ' + e.message }); }
-    const store = async (slot, s) => {
-      if (s.buf) {
-        const r = await db.run(
-          'INSERT INTO contract_uploads (contract_id, owner_id, slot, mime, data, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [cid, user.id, slot, s.mime, s.buf, s.buf.length, now],
-        );
-        return '/cimg/' + r.lastID;
-      }
-      return s.url;
-    };
-    const takenUrl = await store('taken', taken);
-    const resultUrl = await store('result', result);
-    await db.run('UPDATE contracts SET message_url = ?, taken_message_url = ?, taken_submitted_at = ? WHERE id = ?', [resultUrl, takenUrl, now, cid]);
-    await webAudit(client, user, 'Контракт отправлен на проверку (сайт)', `#${cid} № ${stat}`);
-    return '/me?' + qs({ ok: 'Контракт отправлен на проверку HR.' });
+    const r = await db.run("INSERT INTO contracts (discord_id, thread_id, taken_submitted_at, status) VALUES (?, ?, ?, 'taken')",
+      [user.id, pp.profile_thread_id || null, now]);
+    const st = await storeShot(r.lastID, 'taken', shot);
+    await db.run('UPDATE contracts SET taken_message_url = ? WHERE id = ?', [st.url, r.lastID]);
+    await webAudit(client, user, 'Контракт взят (сайт)', `#${r.lastID} № ${stat}`);
+    return '/me?' + qs({ ok: 'Контракт взят. Когда выполните — сдайте итог.' });
+  }
+
+  // ===== контракт: этап 2 — «итог» → на проверку =====
+  if (pathName === '/me/contract_finish') {
+    const cid = parseInt(body.get('id'), 10) || 0;
+    const c = await db.get("SELECT * FROM contracts WHERE id = ? AND discord_id = ? AND status = 'taken'", [cid, user.id]);
+    if (!c) return '/me?' + qs({ err: 'Контракт не найден или уже сдан.' });
+    const shot = resolveShot(body, 'result_data', 'result_url');
+    if (shot.err) return '/me?' + qs({ err: shot.err });
+    if (!shot.buf && !shot.url) return '/me?' + qs({ err: 'Приложите скрин «итог».' });
+    const now = new Date().toISOString();
+    const st = await storeShot(cid, 'result', shot);
+    await db.run("UPDATE contracts SET message_url = ?, submitted_at = ?, status = 'pending', stuck_reminder_sent = 0 WHERE id = ?", [st.url, now, cid]);
+    // карточка на проверку в канал-профиль (кнопки бота contract_fulfilled/... сработают как обычно).
+    // Нет канала-профиля — постим в общий канал статистики контрактов, чтобы HR увидели.
+    if (g) {
+      try {
+        await hook('postContractReviewCardWeb')(g, cid, user.id, c.thread_id || config.CHANNEL_CONTRACTS_STATS);
+      } catch (e) { console.error('[web] contract review card:', e.message); }
+    }
+    await webAudit(client, user, 'Контракт сдан на проверку (сайт)', `#${cid}`);
+    return '/me?' + qs({ ok: 'Итог отправлен на проверку HR.' });
+  }
+
+  // ===== контракт: отмена взятого (до сдачи итога) =====
+  if (pathName === '/me/contract_cancel') {
+    const cid = parseInt(body.get('id'), 10) || 0;
+    const c = await db.get("SELECT id FROM contracts WHERE id = ? AND discord_id = ? AND status = 'taken'", [cid, user.id]);
+    if (!c) return '/me?' + qs({ err: 'Контракт не найден или уже сдан — отменить нельзя.' });
+    for (const up of await db.all('SELECT file FROM contract_uploads WHERE contract_id = ?', [cid]).catch(() => [])) {
+      if (up.file) await deleteUploadFile(up.file);
+    }
+    await db.run('DELETE FROM contract_uploads WHERE contract_id = ?', [cid]).catch(() => {});
+    await db.run("DELETE FROM contracts WHERE id = ? AND discord_id = ? AND status = 'taken'", [cid, user.id]);
+    await webAudit(client, user, 'Взятый контракт отменён (сайт)', `#${cid}`);
+    return '/me?' + qs({ ok: 'Контракт снят с работы.' });
+  }
+
+  // ===== кодовое слово =====
+  if (pathName === '/me/codeword') {
+    if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Только для участников.' });
+    const stat = (body.get('static') || '').trim();
+    const pps = await passportsLib.getAllPassports(user.id).catch(() => []);
+    const pp = pps.find((x) => x.static === stat);
+    if (!pp) return '/me?' + qs({ err: 'Выберите паспорт.' });
+    if (await db.get("SELECT id FROM codeword_submissions WHERE discord_id = ? AND status = 'pending' AND static = ?", [user.id, stat])) {
+      return '/me?' + qs({ err: 'По этому паспорту уже есть кодовое слово на проверке.' });
+    }
+    const shot = resolveShot(body, 'cw_data', 'cw_url');
+    if (shot.err) return '/me?' + qs({ err: shot.err });
+    if (!shot.buf && !shot.url) return '/me?' + qs({ err: 'Приложите скрин отправки.' });
+    const st = await storeShot(null, 'codeword', shot);
+    const now = new Date().toISOString();
+    const r = await db.run(
+      "INSERT INTO codeword_submissions (discord_id, discord_tag, name, static, screenshot_url, status, submitted_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+      [user.id, uname, pp.name, stat, st.url, now],
+    );
+    if (g) {
+      try {
+        const sent = await postTo(client, config.CHANNEL_CODEWORD, {
+          content: `📰 Кодовое слово через сайт — <@${user.id}> (${esc(pp.name)}, № ${stat})\n${st.url}`,
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`codeword_ok:${r.lastID}`).setLabel('✅ Подтвердить').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`codeword_no:${r.lastID}`).setLabel('❌ Отклонить').setStyle(ButtonStyle.Danger),
+          )],
+        });
+        if (sent) await db.run('UPDATE codeword_submissions SET review_message_id = ? WHERE id = ?', [sent.id, r.lastID]);
+      } catch (e) { console.error('[web] codeword post:', e.message); }
+    }
+    await webAudit(client, user, 'Кодовое слово отправлено (сайт)', `#${r.lastID} № ${stat}`);
+    return '/me?' + qs({ ok: 'Кодовое слово отправлено на подтверждение.' });
+  }
+
+  // ===== заявка на HR =====
+  if (pathName === '/me/hr_apply') {
+    if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Только для участников.' });
+    if (acc.rank >= LEVELS.hr) return '/me?' + qs({ err: 'Вы уже HR или выше.' });
+    if (await db.get("SELECT id FROM hr_applications WHERE discord_id = ? AND status = 'pending'", [user.id])) return '/me?' + qs({ err: 'Ваша заявка уже на рассмотрении.' });
+    const hrs = (body.get('hours_per_week') || '').trim().slice(0, 60);
+    const train = (body.get('training_ready') || '').trim().slice(0, 120);
+    if (!hrs || !train) return '/me?' + qs({ err: 'Заполните оба поля.' });
+    const now = new Date().toISOString();
+    const r = await db.run(
+      'INSERT INTO hr_applications (discord_id, discord_tag, hours_per_week, training_ready, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [user.id, uname, hrs, train, 'pending', now],
+    );
+    try { await hook('notifyHrApplication')(g, r.lastID); } catch (_) {}
+    await webAudit(client, user, 'Заявка на HR (сайт)', `#${r.lastID}`);
+    return '/me?' + qs({ ok: 'Заявка на HR отправлена. Смотрите ответ в «Очередях» / ЛС.' });
+  }
+
+  // ===== возврат из AFK (запрос, подтверждает руководство) =====
+  if (pathName === '/me/afk_return') {
+    const stat = (body.get('static') || '').trim();
+    const pps = await passportsLib.getAllPassports(user.id).catch(() => []);
+    const pp = pps.find((x) => x.static === stat);
+    if (!pp || !pp.afk_since) return '/me?' + qs({ err: 'По этому паспорту AFK не отмечен.' });
+    const key = `${user.id}:${stat}`;
+    if (await db.get('SELECT key FROM afk_return_requests WHERE key = ?', [key]).catch(() => null)) return '/me?' + qs({ ok: 'Запрос уже отправлен.' });
+    await db.run(
+      'INSERT INTO afk_return_requests (key, discord_id, static, afk_since, requested_at) VALUES (?, ?, ?, ?, ?)',
+      [key, user.id, stat, pp.afk_since, new Date().toISOString()],
+    );
+    if (g) {
+      try {
+        await postTo(client, config.CHANNEL_AFK_RETURN, {
+          content: `🔔 Возврат из AFK через сайт — <@${user.id}> (${esc(pp.name)}, № ${stat}), был AFK с ${esc(pp.afk_since)}`,
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`afk_return_confirm:${user.id}:${stat}`).setLabel('✅ Снять AFK').setStyle(ButtonStyle.Success),
+          )],
+        });
+      } catch (e) { console.error('[web] afk return post:', e.message); }
+    }
+    await webAudit(client, user, 'Запрос возврата из AFK (сайт)', `№ ${stat}`);
+    return '/me?' + qs({ ok: 'Запрос отправлен — руководство подтвердит.' });
   }
 
   // ===== отпуск =====
@@ -4285,14 +5285,21 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== тикет =====
   if (pathName === '/me/ticket') {
     if (!(await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id]))) return '/me?' + qs({ err: 'Доступно только участникам организации.' });
-    const CATS = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое' };
+    const CATS = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое', bug: 'Баг на сайте', bug_discord: 'Баг Discord' };
     const cat = body.get('category');
-    if (!CATS[cat]) return '/me?' + qs({ err: 'Неизвестный тип тикета.' });
-    if (!g) return '/me?' + qs({ err: 'Бот сейчас недоступен, попробуйте позже.' });
-    const subject = ((body.get('subject') || '').trim() || 'Без темы').slice(0, 100);
-    const desc = (body.get('description') || '').trim();
+    const isBug = cat === 'bug' || cat === 'bug_discord';
+    const backTo = body.get('from') === 'bug' ? '/bug?' : '/me?';
+    const backErr = (m) => backTo + qs({ err: m });
+    if (!CATS[cat]) return backErr('Неизвестный тип тикета.');
+    if (!g) return backErr('Бот сейчас недоступен, попробуйте позже.');
+    const subject = ((body.get('subject') || '').trim() || (isBug ? CATS[cat] : 'Без темы')).slice(0, 100);
+    let desc = (body.get('description') || '').trim();
+    if (isBug) {
+      const where = (body.get('page') || '').trim().slice(0, 300);
+      desc = (where ? `Где: ${where}\n\n` : '') + desc;
+    }
     if (await db.get("SELECT channel_id FROM tickets WHERE opener_id = ? AND status='open' AND (category IS NULL OR category != 'appeal')", [user.id])) {
-      return '/me?' + qs({ err: 'У вас уже есть открытый тикет в Discord.' });
+      return backErr('У вас уже есть открытый тикет в Discord — опишите баг прямо в нём.');
     }
     const overwrites = [
       { id: g.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
@@ -4313,7 +5320,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         topic: `[${CATS[cat]}] ${subject}`.slice(0, 1000),
       });
     } catch (e) {
-      return '/me?' + qs({ err: 'Не удалось создать канал тикета: ' + e.message });
+      return backErr('Не удалось создать канал тикета: ' + e.message);
     }
     const r = await db.run(
       "INSERT INTO tickets (channel_id, opener_id, subject, category, status, created_at) VALUES (?, ?, ?, ?, 'open', ?)",
@@ -4332,8 +5339,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       )],
       ...REVIEW_MENTION_OPTS,
     });
+    await channel.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription('👋 Спасибо за обращение! Опишите вопрос как можно подробнее — руководство ответит в течение суток. Если 5 дней не будет активности, тикет закроется автоматически.')] }).catch(() => {});
+    await db.run('UPDATE tickets SET last_activity = ? WHERE id = ?', [new Date().toISOString(), r.lastID]).catch(() => {});
     await webAudit(client, user, 'Открыт тикет (сайт)', `#${r.lastID} ${CATS[cat]}: ${subject}`);
-    return '/me?' + qs({ ok: 'Тикет создан в Discord.' });
+    return backTo + qs({ ok: isBug ? 'Спасибо! Баг-репорт создан — руководство ответит в тикете.' : 'Тикет создан в Discord.' });
   }
 
   // ===== розыгрыши (owner) =====
@@ -4849,6 +5858,163 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=texts&' + qs({ ok: 'Сохранена новая версия.' });
   }
 
+  // ===== конструктор форм: сохранение/удаление/переключение (Владелец) =====
+  if (pathName === '/panel/forms/save') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=forms&' + qs({ err: 'Формы может менять только Владелец.' });
+    const fid = parseInt(body.get('id'), 10) || 0;
+    const name = (body.get('name') || '').trim().slice(0, 80);
+    const slug = (body.get('slug') || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40);
+    const description = (body.get('description') || '').trim().slice(0, 500);
+    const channelId = (body.get('channel_id') || '').trim();
+    if (!name || !slug) return '/panel?tab=forms&' + qs({ err: 'Нужны название и адрес (slug).' });
+    if (channelId && !/^[0-9]{5,25}$/.test(channelId)) return '/panel?tab=forms&' + qs({ err: 'ID канала — только цифры.' });
+    const fields = sanitizeFormFields(body.get('fields'));
+    if (!fields || !fields.length) return '/panel?tab=forms&' + qs({ err: 'Добавьте хотя бы одно корректное поле (у «выбор» нужны варианты).' });
+    const dupe = await db.get('SELECT id FROM forms WHERE slug = ? AND id != ?', [slug, fid]).catch(() => null);
+    if (dupe) return '/panel?tab=forms&' + qs({ err: 'Форма с таким адресом уже есть.' });
+    const now = new Date().toISOString();
+    if (fid) {
+      await db.run('UPDATE forms SET name = ?, slug = ?, description = ?, fields = ?, channel_id = ? WHERE id = ?',
+        [name, slug, description, JSON.stringify(fields), channelId || null, fid]);
+    } else {
+      await db.run('INSERT INTO forms (slug, name, description, fields, channel_id, active, created_by, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+        [slug, name, description, JSON.stringify(fields), channelId || null, user.id, now]);
+    }
+    await webAuditMeta(client, user, 'Форма сохранена (сайт)', `${slug} — ${fields.length} полей`);
+    return '/panel?tab=forms&' + qs({ ok: 'Форма сохранена.' });
+  }
+  if (pathName === '/panel/forms/delete') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=forms&' + qs({ err: 'Только Владелец.' });
+    const fid = parseInt(body.get('id'), 10) || 0;
+    await db.run('DELETE FROM form_submissions WHERE form_id = ?', [fid]).catch(() => {});
+    await db.run('DELETE FROM forms WHERE id = ?', [fid]);
+    await webAuditMeta(client, user, 'Форма удалена (сайт)', `#${fid}`);
+    return '/panel?tab=forms&' + qs({ ok: 'Форма удалена.' });
+  }
+  if (pathName === '/panel/forms/toggle') {
+    if (acc.rank < LEVELS.owner) return '/panel?tab=forms&' + qs({ err: 'Только Владелец.' });
+    const fid = parseInt(body.get('id'), 10) || 0;
+    await db.run('UPDATE forms SET active = CASE WHEN active = 1 THEN 0 ELSE 1 END WHERE id = ?', [fid]);
+    return '/panel?tab=forms&' + qs({ ok: 'Готово.' });
+  }
+  // ===== разбор поданных заявок по формам (HR+) =====
+  if (pathName === '/panel/forms/review') {
+    if (acc.rank < LEVELS.hr) return '/panel?tab=forms&' + qs({ err: 'Недостаточно прав.' });
+    const sid = parseInt(body.get('id'), 10) || 0;
+    const act = body.get('act') === 'approve' ? 'approved' : 'rejected';
+    const note = (body.get('note') || '').trim().slice(0, 300);
+    const s = await db.get('SELECT * FROM form_submissions WHERE id = ?', [sid]);
+    if (!s) return '/panel?tab=forms&' + qs({ err: 'Заявка не найдена.' });
+    if (s.status !== 'pending') return '/panel?tab=forms&' + qs({ err: 'Заявка уже обработана.' });
+    const f = await db.get('SELECT name, channel_id FROM forms WHERE id = ?', [s.form_id]).catch(() => null);
+    await db.run('UPDATE form_submissions SET status = ?, reviewed_by = ?, review_note = ?, reviewed_at = ? WHERE id = ?',
+      [act, user.id, note || null, new Date().toISOString(), sid]);
+    try {
+      await pushNotify(s.discord_id, 'form',
+        act === 'approved'
+          ? `Ваша заявка по форме «${(f && f.name) || 'форма'}» принята.`
+          : `Ваша заявка по форме «${(f && f.name) || 'форма'}» отклонена${note ? ': ' + note : '.'}`,
+        '/me');
+    } catch (_) {}
+    if (f && f.channel_id && s.message_id && g) {
+      try {
+        const ch = await g.channels.fetch(f.channel_id);
+        const msg = await ch.messages.fetch(s.message_id);
+        await msg.reply({ content: `${act === 'approved' ? '✅ Принято' : '❌ Отклонено'} — <@${user.id}>${note ? `\n> ${note}` : ''}`, allowedMentions: { parse: [] } });
+        await msg.edit({ components: [] }).catch(() => {});
+      } catch (_) {}
+    }
+    await webAudit(client, user, 'Заявка по форме рассмотрена (сайт)', `#${sid} «${(f && f.name) || ''}» → ${act === 'approved' ? 'принято' : 'отклонено'}`);
+    return '/panel?tab=forms&' + qs({ ok: act === 'approved' ? 'Принято.' : 'Отклонено.' });
+  }
+
+  // ===== подача заявки по форме конструктора (любой вошедший) =====
+  if (pathName === '/form/submit') {
+    const slug = (body.get('slug') || '').trim().toLowerCase();
+    const f = await db.get('SELECT * FROM forms WHERE slug = ?', [slug]).catch(() => null);
+    if (!f || !f.active) return '/me?' + qs({ err: 'Форма недоступна.' });
+    const back = '/form/' + encodeURIComponent(slug) + '?';
+    let fields = [];
+    try { fields = JSON.parse(f.fields || '[]'); } catch (_) {}
+    const data = {};
+    for (const fl of fields) {
+      let v;
+      if (fl.type === 'checkbox') {
+        v = body.get('f_' + fl.key) === '1' ? 'да' : 'нет';
+        if (fl.required && v !== 'да') return back + qs({ err: `Отметьте: ${fl.label}` });
+      } else {
+        v = (body.get('f_' + fl.key) || '').trim().slice(0, 4000);
+        if (fl.type === 'select' && v && Array.isArray(fl.options) && !fl.options.includes(v)) v = '';
+        if (fl.required && !v) return back + qs({ err: `Заполните поле: ${fl.label}` });
+      }
+      data[fl.key] = v;
+    }
+    if (await db.get("SELECT id FROM form_submissions WHERE form_id = ? AND discord_id = ? AND status = 'pending'", [f.id, user.id])) {
+      return back + qs({ err: 'У вас уже есть заявка по этой форме на рассмотрении.' });
+    }
+    const now = new Date().toISOString();
+    const r = await db.run(
+      "INSERT INTO form_submissions (form_id, discord_id, discord_tag, data, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+      [f.id, user.id, uname, JSON.stringify(data), now],
+    );
+    if (g && f.channel_id) {
+      try {
+        const emb = new EmbedBuilder().setColor(0x5865f2).setTitle(`📋 Форма: ${String(f.name).slice(0, 200)}`)
+          .setDescription(`Заявка #${r.lastID} — <@${user.id}>`)
+          .addFields(fields.slice(0, 25).map((fl) => ({
+            name: String(fl.label).slice(0, 256),
+            value: (String(data[fl.key] == null || data[fl.key] === '' ? '—' : data[fl.key])).slice(0, 1024),
+          })));
+        const sent = await postTo(client, f.channel_id, {
+          embeds: [emb],
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`formsub_ok:${r.lastID}`).setLabel('✅ Принять').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`formsub_no:${r.lastID}`).setLabel('❌ Отклонить').setStyle(ButtonStyle.Danger),
+          )],
+        });
+        if (sent) await db.run('UPDATE form_submissions SET message_id = ? WHERE id = ?', [sent.id, r.lastID]);
+      } catch (e) { console.error('[web] форма → канал:', e.message); }
+    }
+    await webAudit(client, user, 'Заявка по форме подана (сайт)', `#${r.lastID} «${f.name}»`);
+    return back + qs({ ok: 'Заявка отправлена на рассмотрение.' });
+  }
+
+  // ===== локальные аккаунты (только havirys) =====
+  if (pathName.startsWith('/panel/accounts/')) {
+    if (user.id !== OWNER_ID) return '/panel?tab=accounts&' + qs({ err: 'Только havirys.' });
+    const lid = (body.get('id') || '').trim();
+    if (pathName === '/panel/accounts/link') {
+      const p = (body.get('participant') || '').trim();
+      let pid = null;
+      if (/^[0-9]{5,25}$/.test(p)) pid = p;
+      else if (p) { const row = await db.get('SELECT discord_id FROM participants WHERE static = ? UNION SELECT discord_id FROM extra_passports WHERE static = ? LIMIT 1', [p, p]).catch(() => null); pid = row && row.discord_id; }
+      if (!pid) return '/panel?tab=accounts&' + qs({ err: 'Участник не найден (Discord ID или № паспорта).' });
+      await db.run('UPDATE web_users SET linked_discord_id = ?, sess_ver = COALESCE(sess_ver,0)+1 WHERE discord_id = ? AND is_local = 1', [pid, lid]);
+      _sessVerCache.delete(lid); accessCache.delete(lid);
+      await webAuditMeta(client, user, 'Локальный аккаунт привязан к участнику', `${lid} → ${pid}`);
+      return '/panel?tab=accounts&' + qs({ ok: 'Привязано. Пользователю нужно войти заново.' });
+    }
+    if (pathName === '/panel/accounts/unlink') {
+      await db.run('UPDATE web_users SET linked_discord_id = NULL, sess_ver = COALESCE(sess_ver,0)+1 WHERE discord_id = ? AND is_local = 1', [lid]);
+      _sessVerCache.delete(lid);
+      await webAuditMeta(client, user, 'Локальный аккаунт отвязан', lid);
+      return '/panel?tab=accounts&' + qs({ ok: 'Отвязано.' });
+    }
+    if (pathName === '/panel/accounts/reset_pw') {
+      const temp = crypto.randomBytes(6).toString('base64url');
+      const rec = pwMake(temp);
+      await db.run('UPDATE web_users SET pass_hash = ?, pass_salt = ?, sess_ver = COALESCE(sess_ver,0)+1 WHERE discord_id = ? AND is_local = 1', [rec.hash, rec.salt, lid]);
+      _sessVerCache.delete(lid);
+      await webAuditMeta(client, user, 'Сброшен пароль локального аккаунта', lid);
+      return '/panel?tab=accounts&' + qs({ ok: `Временный пароль: ${temp} — передайте пользователю, пусть сменит.` });
+    }
+    if (pathName === '/panel/accounts/reset_done') {
+      await db.run("UPDATE password_reset_requests SET status = 'done', resolved_by = ?, resolved_at = ? WHERE id = ?", [user.id, new Date().toISOString(), parseInt(body.get('id'), 10) || 0]);
+      return '/panel?tab=accounts&' + qs({ ok: 'Заявка закрыта.' });
+    }
+    return '/panel?tab=accounts';
+  }
+
   // ===== рассылка (Владелец) =====
   if (pathName === '/panel/broadcast') {
     if (acc.rank < LEVELS.owner) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
@@ -5019,6 +6185,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== участие в розыгрыше с сайта =====
   if (pathName === '/g/enter') {
+    if (acc.rank < LEVELS.member) return '/me?' + qs({ err: 'Участвовать в розыгрышах могут только участники организации.' });
     const gid = parseInt(body.get('id'), 10) || 0;
     const gv = await giveaways.getGiveaway(gid);
     if (!gv || gv.status !== 'active') return '/giveaways?' + qs({ err: 'Розыгрыш недоступен.' });
@@ -5148,8 +6315,31 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (!text) return `/ticket/${tid}?` + qs({ err: 'Пустое сообщение.' });
     const sent = await postTo(client, t.channel_id, { content: `**${uname} (сайт):** ${text}`, allowedMentions: { parse: [] } });
     if (!sent) return `/ticket/${tid}?` + qs({ err: 'Не удалось отправить (канал закрыт?).' });
+    await db.run('UPDATE tickets SET last_activity = ?, autoclose_warned = 0 WHERE id = ?', [new Date().toISOString(), tid]).catch(() => {});
     if (t.opener_id && t.opener_id !== user.id) await pushNotify(t.opener_id, 'ticket', `Ответ в тикете «${t.subject || 'Тикет'}»`, `/ticket/${tid}`).catch(() => {});
     return `/ticket/${tid}?` + qs({ ok: 'Отправлено.' });
+  }
+
+  // ===== транскрипт переписки тикета (по запросу) =====
+  if (pathName === '/ticket/transcript') {
+    const tid = parseInt(body.get('id'), 10) || 0;
+    const t = await db.get('SELECT * FROM tickets WHERE id = ?', [tid]);
+    if (!t) return '/me?' + qs({ err: 'Тикет не найден.' });
+    if (t.opener_id !== user.id && acc.rank < LEVELS.hr) return '/me?' + qs({ err: 'Это не ваш тикет.' });
+    let built;
+    try {
+      built = await buildTicketTranscriptHtml(client, t);
+    } catch (e) {
+      return `/ticket/${tid}?` + qs({ err: 'Не удалось собрать транскрипт: ' + e.message });
+    }
+    const buf = Buffer.from(built.html, 'utf8');
+    await db.run(
+      `INSERT INTO ticket_transcripts (ticket_id, html, msg_count, generated_by, created_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(ticket_id) DO UPDATE SET html = excluded.html, msg_count = excluded.msg_count, generated_by = excluded.generated_by, created_at = excluded.created_at`,
+      [tid, buf, built.count, user.id, new Date().toISOString()],
+    );
+    await webAudit(client, user, 'Транскрипт тикета собран (сайт)', `#${tid} — ${built.count} сообщ.`);
+    return `/ticket/${tid}?` + qs({ ok: `Транскрипт готов (${built.count} сообщ.).` });
   }
 
   // ===== оценка тикета автором (после закрытия) =====
@@ -5199,8 +6389,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName === '/ticket/meta') {
       const pri = ['normal', 'high', 'low'].includes(body.get('priority')) ? body.get('priority') : 'normal';
       const tags = (body.get('tags') || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 10).join(',');
-      await db.run('UPDATE tickets SET priority = ?, tags = ? WHERE id = ?', [pri === 'normal' ? null : pri, tags || null, tid]);
-      await webAudit(client, user, 'Тикет: приоритет/метки (сайт)', `#${tid} → ${pri}${tags ? ' [' + tags + ']' : ''}`);
+      const cat = Object.keys(TICKET_CAT_RU).filter((k) => k !== 'appeal').includes(body.get('category')) ? body.get('category') : null;
+      await db.run(`UPDATE tickets SET priority = ?, tags = ?${cat ? ', category = ?' : ''} WHERE id = ?`,
+        cat ? [pri === 'normal' ? null : pri, tags || null, cat, tid] : [pri === 'normal' ? null : pri, tags || null, tid]);
+      await webAudit(client, user, 'Тикет: приоритет/категория/метки (сайт)', `#${tid} → ${pri}${cat ? ' /' + cat : ''}${tags ? ' [' + tags + ']' : ''}`);
       return back + qs({ ok: 'Сохранено.' });
     }
     if (pathName === '/ticket/assign') {
@@ -5270,7 +6462,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (acc.rank < LEVELS.owner) return '/panel?tab=faq_manage&' + qs({ err: 'Недостаточно прав.' });
     const refreshCat = async (cat) => { try { if (g) await faqDisplay.safeUpdateFaqChannel(g, cat); } catch (_) {} };
     if (pathName === '/panel/faq/add') {
-      const cat = body.get('category') === 'hr' ? 'hr' : 'member';
+      const cat = ['public', 'hr', 'member'].includes(body.get('category')) ? body.get('category') : 'member';
       const title = (body.get('title') || '').trim().slice(0, 120);
       const cont = (body.get('content') || '').trim().slice(0, 3000);
       if (!title || !cont) return '/panel?tab=faq_manage&' + qs({ err: 'Нужны заголовок и текст.' });
@@ -5601,7 +6793,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       for (const t of tabs) {
         await db.run('INSERT INTO panel_grants (discord_id, subject_type, tab, granted_by, granted_at) VALUES (?, ?, ?, ?, ?)', [sid, st, t, user.id, new Date().toISOString()]);
       }
-      _grantsCache.clear(); // роль затрагивает многих — сбрасываем весь кэш
+      // грант по участнику — сбрасываем только его; по роли — весь кэш
+      // (участников с ролью дёшево не перечислить).
+      if (st === 'role') _grantsCache.clear();
+      else _grantsCache.delete(sid);
       await webAuditMeta(client, user, 'Доступы к панели (сайт)', `${st === 'role' ? 'роль' : ''} ${sid} → ${tabs.join(', ') || 'убраны все'}`);
       return '/panel?tab=grants&' + qs({ ok: tabs.length ? `Выдано разделов: ${tabs.length}.` : 'Доступы убраны.' });
     }
@@ -5662,13 +6857,18 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       let buf;
       try { buf = Buffer.from(m[3], 'base64'); } catch (_) { return '/panel?tab=pages&' + qs({ err: 'Не удалось прочитать файл.' }); }
       if (buf.length > 512 * 1024) return '/panel?tab=pages&' + qs({ err: 'Файл больше 500 КБ.' });
-      await db.run('INSERT INTO page_assets (filename, mime, data, size, uploaded_by, uploaded_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [(body.get('filename') || 'image').slice(0, 120), m[1], buf, buf.length, user.id, new Date().toISOString()]);
+      const svg = /svg/i.test(m[1]);
+      const fname = svg ? null : await saveUploadFile('a', m[1], buf);
+      await db.run('INSERT INTO page_assets (filename, mime, data, file, size, uploaded_by, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [(body.get('filename') || 'image').slice(0, 120), m[1], svg ? buf : null, fname, buf.length, user.id, new Date().toISOString()]);
       await webAuditMeta(client, user, 'Загружена картинка страницы (сайт)', `${buf.length} байт`);
       return '/panel?tab=pages&' + qs({ ok: 'Картинка загружена.' });
     }
     if (pathName === '/admin/asset/del') {
-      await db.run('DELETE FROM page_assets WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
+      const aid = parseInt(body.get('id'), 10) || 0;
+      const a0 = await db.get('SELECT file FROM page_assets WHERE id = ?', [aid]).catch(() => null);
+      if (a0 && a0.file) await deleteUploadFile(a0.file);
+      await db.run('DELETE FROM page_assets WHERE id = ?', [aid]);
       await webAuditMeta(client, user, 'Удалена картинка страницы (сайт)', `#${body.get('id')}`);
       return '/panel?tab=pages&' + qs({ ok: 'Удалено.' });
     }
@@ -5751,6 +6951,17 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       hook('initMenus')(g).catch((e) => console.error('[web] initMenus:', e.message));
       await webAuditMeta(client, user, 'Переинициализация меню Discord (сайт)', '');
       return '/panel?tab=admin&' + qs({ ok: 'Меню публикуются (в фоне).' });
+    }
+
+    if (pathName === '/admin/profiles_restore') {
+      if (!g) return '/panel?tab=admin&' + qs({ err: 'Бот недоступен.' });
+      (async () => {
+        try {
+          const n = await hook('restoreProfiles')(g);
+          await webAuditMeta(client, user, 'Восстановление каналов-профилей (сайт)', `создано ${n}`).catch(() => {});
+        } catch (e) { console.error('[web] restoreProfiles:', e.message); }
+      })();
+      return '/panel?tab=admin&' + qs({ ok: 'Восстановление запущено (в фоне).' });
     }
 
     if (pathName === '/admin/role') {
@@ -5960,6 +7171,7 @@ function start(client, hooks = {}) {
   const port = process.env.PORT || 3000;
 
   const server = http.createServer(async (req, res) => {
+    const _reqStart = Date.now();
     const done = (code, headers, body) => { res.writeHead(code, headers); res.end(body); };
     const html = (code, body, extra = {}) => done(code, { 'Content-Type': 'text/html; charset=utf-8', ...extra }, body);
     const redirect = (loc, extra = {}) => done(302, { Location: loc, ...extra }, '');
@@ -5969,6 +7181,20 @@ function start(client, hooks = {}) {
       const path = u.pathname;
       let user = readSession(req.headers.cookie);
       if (user && !(await sessionFresh(user))) user = null; // «выйти со всех устройств»
+      // Локальный аккаунт (логин/пароль, без Discord). Если havirys привязал его
+      // к участнику — дальше работаем от имени этого участника (user.id подменяем).
+      if (user && String(user.id).startsWith('local:')) {
+        user.local = true;
+        user.localId = user.id;
+        try {
+          const lu = await db.get('SELECT username, linked_discord_id, oauth_discord_id FROM web_users WHERE discord_id = ?', [user.id]);
+          if (lu) {
+            if (lu.username) user.username = lu.username;
+            user.oauthDiscordId = lu.oauth_discord_id || null;
+            if (lu.linked_discord_id) user.id = lu.linked_discord_id;
+          }
+        } catch (_) {}
+      }
       const pageNum = Math.max(0, parseInt(u.searchParams.get('page') || '0', 10) || 0);
       const flash = flashBanner(u);
       const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
@@ -6016,6 +7242,66 @@ function start(client, hooks = {}) {
         return done(200, { 'Content-Type': 'text/html; charset=utf-8' }, mdToHtml((b.get('text') || '').slice(0, 20000)));
       }
 
+      // Выход через POST (CSRF-безопасно). GET /logout ниже оставлен для
+      // аварийных ссылок (страница заморозки, экран ошибки).
+      if (path === '/logout' && req.method === 'POST') {
+        const b = await readBody(req);
+        if (user && !csrfOk(user, b.get('_csrf'))) return redirect('/me?' + qs({ err: 'Сессия формы устарела.' }));
+        return redirect('/', { 'Set-Cookie': 'fc_sess=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
+      }
+
+      // ----- Локальные аккаунты: анонимные POST (регистрация / вход / сброс) -----
+      if ((path === '/register' || path === '/login/local' || path === '/forgot') && req.method === 'POST') {
+        const backP = path === '/register' ? '/register?' : path === '/forgot' ? '/forgot?' : '/login/local?';
+        if (!rateOk('auth:' + clientIp, 12, 60000)) return redirect(backP + qs({ err: 'Слишком много попыток — подождите минуту.' }));
+        const b = await readBody(req);
+        if (!anonCsrfOk(clientIp, b.get('_csrf'))) return redirect(backP + qs({ err: 'Форма устарела — обновите страницу.' }));
+
+        if (path === '/register') {
+          const login = (b.get('login') || '').trim();
+          const email = (b.get('email') || '').trim().toLowerCase();
+          const pw = b.get('password') || '';
+          const pw2 = b.get('password2') || '';
+          if (!LOGIN_RE.test(login)) return redirect('/register?' + qs({ err: 'Логин: 3–32 символа, латиница/цифры/._-' }));
+          if (!EMAIL_RE.test(email)) return redirect('/register?' + qs({ err: 'Укажите корректную почту.' }));
+          if (String(pw).length < 8) return redirect('/register?' + qs({ err: 'Пароль — минимум 8 символов.' }));
+          if (pw !== pw2) return redirect('/register?' + qs({ err: 'Пароли не совпадают.' }));
+          const dup = await db.get('SELECT 1 x FROM web_users WHERE is_local = 1 AND (LOWER(login) = ? OR LOWER(email) = ?)', [login.toLowerCase(), email]).catch(() => null);
+          if (dup) return redirect('/register?' + qs({ err: 'Логин или почта уже заняты.' }));
+          const localId = 'local:' + crypto.randomBytes(9).toString('base64url');
+          const rec = pwMake(pw);
+          const now = new Date().toISOString();
+          await db.run(
+            `INSERT INTO web_users (discord_id, username, avatar, first_login, last_login, login_count, is_local, login, email, pass_hash, pass_salt)
+             VALUES (?, ?, '', ?, ?, 1, 1, ?, ?, ?, ?)`,
+            [localId, login, now, now, login, email, rec.hash, rec.salt],
+          );
+          const cookie = await issueWebSession(req, client, localId);
+          return redirect('/me', { 'Set-Cookie': cookie });
+        }
+
+        if (path === '/login/local') {
+          const id = (b.get('login') || '').trim().toLowerCase();
+          const pw = b.get('password') || '';
+          const row = await db.get('SELECT discord_id, login, pass_hash, pass_salt FROM web_users WHERE is_local = 1 AND (LOWER(login) = ? OR LOWER(email) = ?)', [id, id]).catch(() => null);
+          if (!row || !pwVerify(pw, row.pass_salt, row.pass_hash)) {
+            await logDenial(client, null, `/login/local неверные данные (${clientIp})`).catch(() => {});
+            return redirect('/login/local?' + qs({ err: 'Неверный логин или пароль.' }));
+          }
+          const cookie = await issueWebSession(req, client, row.discord_id);
+          return redirect('/me', { 'Set-Cookie': cookie });
+        }
+
+        // /forgot
+        const login = (b.get('login') || '').trim().slice(0, 60);
+        const email = (b.get('email') || '').trim().toLowerCase().slice(0, 120);
+        const note = (b.get('note') || '').trim().slice(0, 500);
+        if (!login && !email) return redirect('/forgot?' + qs({ err: 'Укажите логин или почту.' }));
+        const r = await db.run('INSERT INTO password_reset_requests (login, email, note, status, created_at) VALUES (?, ?, ?, \'pending\', ?)', [login, email, note, new Date().toISOString()]);
+        try { await hook('notifyPasswordReset')(r.lastID); } catch (_) {}
+        return redirect('/login/local?' + qs({ ok: 'Заявка на сброс пароля отправлена — с вами свяжется руководство.' }));
+      }
+
       if (req.method === 'POST') {
         if (!rateOk(user ? 'u:' + user.id : 'ip:' + clientIp)) {
           await logDenial(client, user, `${path} (rate limit, ${clientIp})`).catch(() => {});
@@ -6037,21 +7323,52 @@ function start(client, hooks = {}) {
 
       if (path.startsWith('/asset/') && req.method === 'GET') {
         const aid = parseInt(path.slice(7), 10) || 0;
-        const a = await db.get('SELECT mime, data FROM page_assets WHERE id = ?', [aid]).catch(() => null);
-        if (!a || !a.data) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
-        return done(200, { 'Content-Type': a.mime || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' }, a.data);
+        const a = await db.get('SELECT id, mime, data, file FROM page_assets WHERE id = ?', [aid]).catch(() => null);
+        if (!a) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
+        const etag = `"a${aid}"`;
+        if ((req.headers['if-none-match'] || '') === etag) return done(304, { ETag: etag, 'Cache-Control': 'public, max-age=86400' }, '');
+        const buf = await loadUploadBytes('page_assets', a);
+        if (!buf) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
+        return done(200, { 'Content-Type': a.mime || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400', ETag: etag }, buf);
       }
 
       if (path.startsWith('/cimg/') && req.method === 'GET') {
         if (!user) return done(401, { 'Content-Type': 'text/plain' }, 'auth');
         const cid = parseInt(path.slice(6), 10) || 0;
-        const im = await db.get('SELECT owner_id, mime, data FROM contract_uploads WHERE id = ?', [cid]).catch(() => null);
-        if (!im || !im.data) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
+        const im = await db.get('SELECT id, owner_id, mime, data, file FROM contract_uploads WHERE id = ?', [cid]).catch(() => null);
+        if (!im) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
         if (im.owner_id !== user.id) {
           const a2 = await accessFor(client, user.id).catch(() => ({ rank: 0 }));
           if (a2.rank < LEVELS.hr) return done(403, { 'Content-Type': 'text/plain' }, 'forbidden');
         }
-        return done(200, { 'Content-Type': im.mime || 'image/jpeg', 'Cache-Control': 'private, max-age=3600' }, im.data);
+        const etag = `"c${cid}"`;
+        if ((req.headers['if-none-match'] || '') === etag) return done(304, { ETag: etag, 'Cache-Control': 'private, max-age=3600' }, '');
+        const buf = await loadUploadBytes('contract_uploads', im);
+        if (!buf) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
+        return done(200, { 'Content-Type': im.mime || 'image/jpeg', 'Cache-Control': 'private, max-age=3600', ETag: etag }, buf);
+      }
+
+      if (path.startsWith('/text/') && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для участников</h1><a class="btn" href="/apply">Подать заявку</a>' }));
+        const key = path.slice(6);
+        const TITLES = { rules: 'Свод правил', agitation: 'Агитация', hr_info: 'Вакансия HR-Менеджера' };
+        if (!TITLES[key]) return html(404, L({ title: 'Не найдено', user, level: acc.level, body: '<h1>Не найдено</h1>' }));
+        let txt = '';
+        try { const row = await contentVersions.getLatestVersion(key); txt = row ? row.content : ''; } catch (_) {}
+        if (!txt || !txt.trim()) txt = ({ rules: content.DEFAULT_RULES, agitation: content.DEFAULT_AGITATION, hr_info: content.DEFAULT_HR_INFO }[key]) || '';
+        const strip = `<div class="tabs"><a href="/text/rules"${key === 'rules' ? ' class="on"' : ''}>Правила</a><a href="/text/agitation"${key === 'agitation' ? ' class="on"' : ''}>Агитация</a><a href="/text/hr_info"${key === 'hr_info' ? ' class="on"' : ''}>Вакансия HR</a></div>`;
+        return html(200, L({ title: TITLES[key], user, level: acc.level, wide: true, body: flash + `<h1>${esc(TITLES[key])}</h1>${strip}<div class="card">${mdToHtml(txt)}</div>` }));
+      }
+
+      if (path.startsWith('/form/') && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        const slug = decodeURIComponent(path.slice(6)).split('/')[0].toLowerCase();
+        const f = slug ? await db.get('SELECT * FROM forms WHERE slug = ?', [slug]).catch(() => null) : null;
+        if (!f || !f.active) return html(404, L({ title: 'Форма не найдена', user, level: acc.level, body: '<h1>Форма не найдена или закрыта</h1><a class="btn" href="/me">В кабинет</a>' }));
+        return html(200, L({ title: f.name || 'Форма', user, level: acc.level, body: flash + await formPublicBody(client, user, f) }));
       }
 
       if ((path === '/rules' || path === '/about' || path.startsWith('/p/')) && req.method === 'GET') {
@@ -6064,13 +7381,142 @@ function start(client, hooks = {}) {
       }
 
       if (path === '/login') {
-        if (!process.env.CLIENT_ID) return html(500, L({ title: 'Ошибка', body: '<h1>CLIENT_ID не задан</h1>' }));
-        const params = new URLSearchParams({ client_id: process.env.CLIENT_ID, redirect_uri: redirectUri(), response_type: 'code', scope: 'identify' });
-        return redirect(`${DISCORD_API}/oauth2/authorize?${params.toString()}`);
+        if (u.searchParams.get('go') === 'discord' || u.searchParams.get('go') === 'link') {
+          if (!process.env.CLIENT_ID) return html(500, L({ title: 'Ошибка', body: '<h1>CLIENT_ID не задан</h1>' }));
+          const params = new URLSearchParams({ client_id: process.env.CLIENT_ID, redirect_uri: redirectUri(), response_type: 'code', scope: 'identify' });
+          if (u.searchParams.get('go') === 'link') params.set('state', 'link');
+          return redirect(`${DISCORD_API}/oauth2/authorize?${params.toString()}`);
+        }
+        if (user) return redirect('/me');
+        return html(200, L({ title: 'Вход', user: null, level: 'guest', body: flash + `
+          <h1>Вход</h1>
+          <div class="card" style="max-width:420px">
+            <a class="btn" href="/login?go=discord" style="width:100%;text-align:center">Войти через Discord</a>
+            <div class="mini" style="text-align:center;margin:10px 0">— или —</div>
+            <a class="btn ghost" href="/login/local" style="width:100%;text-align:center">Войти по логину и паролю</a>
+            <div class="mini" style="text-align:center;margin-top:10px">Нет аккаунта? <a href="/register">Зарегистрироваться</a></div>
+          </div>` }));
+      }
+
+      if (path === '/login/local' && req.method === 'GET') {
+        if (user) return redirect('/me');
+        return html(200, L({ title: 'Вход по паролю', user: null, level: 'guest', body: flash + `
+          <h1>Вход по логину и паролю</h1>
+          <div class="card" style="max-width:420px">
+            <form method="POST" action="/login/local" class="form">${anonCsrfField(clientIp)}
+              <label>Логин или почта<input name="login" required maxlength="120" autofocus></label>
+              <label>Пароль<input name="password" type="password" required maxlength="200"></label>
+              <button class="btn" type="submit">Войти</button>
+            </form>
+            <div class="mini" style="margin-top:10px"><a href="/register">Регистрация</a> · <a href="/forgot">Забыли пароль?</a> · <a href="/login?go=discord">Войти через Discord</a></div>
+          </div>` }));
+      }
+
+      if (path === '/register' && req.method === 'GET') {
+        if (user) return redirect('/me');
+        return html(200, L({ title: 'Регистрация', user: null, level: 'guest', body: flash + `
+          <h1>Регистрация без Discord</h1>
+          <div class="card" style="max-width:420px">
+            <p class="mini">Аккаунт по логину и паролю — для тех, у кого нет Discord. Чтобы подать заявку на вступление, позже нужно будет привязать Discord (аккаунт должен быть на сервере).</p>
+            <form method="POST" action="/register" class="form">${anonCsrfField(clientIp)}
+              <label>Логин (3–32, латиница/цифры/._-)<input name="login" required maxlength="32" pattern="[a-zA-Z0-9_.-]{3,32}"></label>
+              <label>Почта<input name="email" type="email" required maxlength="120"></label>
+              <label>Пароль (минимум 8 символов)<input name="password" type="password" required minlength="8" maxlength="200"></label>
+              <label>Повторите пароль<input name="password2" type="password" required minlength="8" maxlength="200"></label>
+              <button class="btn" type="submit">Создать аккаунт</button>
+            </form>
+            <div class="mini" style="margin-top:10px">Уже есть аккаунт? <a href="/login/local">Войти</a></div>
+          </div>` }));
+      }
+
+      if (path === '/forgot' && req.method === 'GET') {
+        return html(200, L({ title: 'Сброс пароля', user: null, level: 'guest', body: flash + `
+          <h1>Сброс пароля</h1>
+          <div class="card" style="max-width:420px">
+            <p class="mini">Писем мы не шлём. Заявка уйдёт руководству — с вами свяжутся в Discord и сбросят пароль вручную.</p>
+            <form method="POST" action="/forgot" class="form">${anonCsrfField(clientIp)}
+              <label>Ваш логин<input name="login" maxlength="60"></label>
+              <label>Почта аккаунта<input name="email" type="email" maxlength="120"></label>
+              <label>Как с вами связаться / комментарий<textarea name="note" rows="3" maxlength="500"></textarea></label>
+              <button class="btn" type="submit">Отправить заявку</button>
+            </form>
+            <div class="mini" style="margin-top:10px"><a href="/login/local">← ко входу</a></div>
+          </div>` }));
+      }
+
+      if (path === '/account' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        if (!user.local) return redirect('/me');
+        const lu = await db.get('SELECT login, email, linked_discord_id, oauth_discord_id FROM web_users WHERE discord_id = ?', [user.localId]).catch(() => null);
+        const acc = await accessFor(client, user.id);
+        const linkedTxt = lu && lu.linked_discord_id
+          ? `Привязан к участнику: <b>${esc(nickOf(client, lu.linked_discord_id) || lu.linked_discord_id)}</b> — на сайте вы работаете от его имени.`
+          : (lu && lu.oauth_discord_id
+            ? `Discord привязан (${esc(lu.oauth_discord_id)})${guildOf(client) && guildOf(client).members.cache.get(lu.oauth_discord_id) ? ' — вы на сервере ✅' : ' — но вас нет на сервере ⚠'}.`
+            : 'Discord не привязан. Чтобы подать заявку на вступление, привяжите Discord (аккаунт должен быть на сервере).');
+        return html(200, L({ title: 'Аккаунт', user, level: acc.level, body: flash + `
+          <h1>Мой аккаунт</h1>
+          <div class="card"><b>Логин:</b> ${esc(lu ? lu.login : user.username)}<br><b>Почта:</b> ${esc(lu ? lu.email || '—' : '—')}</div>
+          <div class="card"><h2>Discord</h2><p>${linkedTxt}</p>
+            ${lu && lu.linked_discord_id ? '' : `<a class="btn sm" href="/login?go=link">Привязать Discord</a>
+            ${lu && lu.oauth_discord_id ? `<form method="POST" action="/account/discord_unlink" style="display:inline;margin-left:6px">${csrfField(user)}<button class="btn ghost sm" type="submit">Отвязать</button></form>` : ''}`}
+          </div>
+          <div class="card"><h2>Сменить пароль</h2>
+            <form method="POST" action="/account/password" class="form">${csrfField(user)}
+              <label>Текущий пароль<input name="old" type="password" required maxlength="200"></label>
+              <label>Новый пароль (минимум 8)<input name="new" type="password" required minlength="8" maxlength="200"></label>
+              <label>Повторите новый<input name="new2" type="password" required minlength="8" maxlength="200"></label>
+              <button class="btn" type="submit">Сохранить</button>
+            </form>
+          </div>
+          <p><a href="/me">← в кабинет</a></p>` }));
       }
 
       if (path === '/logout') {
         return redirect('/', { 'Set-Cookie': 'fc_sess=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax' });
+      }
+
+      // Вход по одноразовой ссылке (Discord: команда /сайт или кнопка в канале входа).
+      if (path.startsWith('/m/') && req.method === 'GET') {
+        const token = decodeURIComponent(path.slice(3)).trim();
+        const row = token ? await db.get('SELECT * FROM magic_links WHERE token = ?', [token]).catch(() => null) : null;
+        const bad = !row || row.used_at || (row.expires_at && Date.parse(row.expires_at) < Date.now());
+        if (bad) {
+          return html(400, L({ title: 'Ссылка недействительна', body:
+            `<h1>Ссылка для входа недействительна или истекла</h1>
+             <div class="card">Одноразовые ссылки живут 10 минут и срабатывают один раз.<br><br>
+             Запросите новую: команда <b>/сайт</b> в Discord или кнопка «Войти на сайт» в канале входа.</div>
+             <a class="btn" href="/login">Войти через Discord</a>` }));
+        }
+        await db.run('UPDATE magic_links SET used_at = ? WHERE token = ?', [new Date().toISOString(), token]).catch(() => {});
+        try {
+          const cookie = await issueWebSession(req, client, row.discord_id);
+          return redirect('/me', { 'Set-Cookie': cookie });
+        } catch (err) {
+          console.error('[web] magic-link вход:', err.message);
+          return html(500, L({ title: 'Ошибка входа', body: '<h1>Не удалось войти по ссылке</h1><a class="btn" href="/login">Войти через Discord</a>' }));
+        }
+      }
+
+      // Подписка на календарь отпусков (.ics). Доступ по секретному токену в ?key=,
+      // чтобы календарные приложения (без входа) могли тянуть события.
+      if ((path === '/calendar.ics' || path === '/calendar-all.ics') && req.method === 'GET') {
+        const key = (u.searchParams.get('key') || '').trim();
+        const owner = key ? await db.get('SELECT discord_id FROM web_users WHERE ical_token = ?', [key]).catch(() => null) : null;
+        if (!owner) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Неверная ссылка-подписка.');
+        let ics;
+        if (path === '/calendar-all.ics') {
+          const oa = await accessFor(client, owner.discord_id).catch(() => ({ rank: 0 }));
+          if (oa.rank < LEVELS.hr) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Общий календарь доступен только HR и выше.');
+          ics = await buildVacationIcs(siteBrand() + ' — отпуска (все)', null);
+        } else {
+          ics = await buildVacationIcs(siteBrand() + ' — мои отпуска', owner.discord_id);
+        }
+        return done(200, {
+          'Content-Type': 'text/calendar; charset=utf-8',
+          'Content-Disposition': `inline; filename="${path === '/calendar-all.ics' ? 'vacations-all.ics' : 'vacations.ics'}"`,
+          'Cache-Control': 'private, max-age=900',
+        }, ics);
       }
 
       if (path.startsWith('/i/') && req.method === 'GET') {
@@ -6098,6 +7544,16 @@ function start(client, hooks = {}) {
           const me = await mr.json();
           const uname = me.username || me.global_name || me.id;
           const now = new Date().toISOString();
+
+          // Привязка Discord к локальному аккаунту (не вход) — state=link.
+          if (u.searchParams.get('state') === 'link' && user && user.local) {
+            const taken = await db.get('SELECT discord_id FROM web_users WHERE discord_id = ? OR (is_local = 1 AND oauth_discord_id = ?)', [me.id, me.id]).catch(() => null);
+            if (taken && taken.discord_id !== user.localId) {
+              return html(400, L({ title: 'Discord занят', user, body: '<h1>Этот Discord уже привязан к другому аккаунту</h1><a class="btn" href="/account">← к аккаунту</a>' }));
+            }
+            await db.run('UPDATE web_users SET oauth_discord_id = ? WHERE discord_id = ?', [me.id, user.localId]);
+            return redirect('/account?' + qs({ ok: 'Discord привязан.' }));
+          }
           await db.run(
             `INSERT INTO web_users (discord_id, username, avatar, first_login, last_login, login_count)
              VALUES (?, ?, ?, ?, ?, 1)
@@ -6131,6 +7587,17 @@ function start(client, hooks = {}) {
         if (!user) return redirect('/login');
         const level = (await accessFor(client, user.id)).level;
         if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [user.id])) return redirect('/me');
+        const eff = effectiveDiscordId(user);
+        if (!eff || !(await memberOfGuild(client, eff))) {
+          const inv = (SITE && SITE.invite) || config.SITE_DISCORD_INVITE || '';
+          return html(200, L({ title: 'Заявка на вступление', user, level, body: flash + `
+            <h1>Заявка на вступление</h1>
+            <div class="card">
+              <p>Чтобы подать заявку, нужно быть на Discord-сервере организации${user.local ? ' и привязать Discord к аккаунту (аккаунт должен быть на сервере)' : ''}.</p>
+              ${inv ? `<a class="btn" href="${esc(inv)}" target="_blank" rel="noopener">Зайти на Discord-сервер</a> ` : ''}
+              ${user.local ? '<a class="btn ghost" href="/login?go=link">Привязать Discord</a>' : ''}
+            </div>` }));
+        }
         return html(200, L({ title: 'Заявка на вступление', user, level, body: flash + applyBody(user, getCookie(req.headers.cookie, 'fc_ref')) }));
       }
 
@@ -6206,7 +7673,7 @@ function start(client, hooks = {}) {
         let bodyHtml;
         if (path === '/dashboard') bodyHtml = await dashboardBody(client, u.searchParams.get('days'));
         else if (path === '/leaderboards') bodyHtml = await leaderboardsBody(client, user.id);
-        else if (path === '/calendar') bodyHtml = await calendarBody(client);
+        else if (path === '/calendar') bodyHtml = await calendarBody(client, user);
         else bodyHtml = await searchBody(client, u.searchParams.get('q'));
         return html(200, L({ title: 'Аналитика', user, level: acc.level, wide: true, body: flash + bodyHtml }));
       }
@@ -6216,6 +7683,12 @@ function start(client, hooks = {}) {
         const acc = await accessFor(client, user.id);
         if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для участников организации</h1><a class="btn" href="/me">Мой профиль</a>' }));
         return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim()) }));
+      }
+
+      if (path === '/bug' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        return html(200, L({ title: 'Сообщить о баге', user, level: acc.level, body: flash + await bugReportBody(client, user, acc) }));
       }
 
       if (path === '/tickets' && req.method === 'GET') {
@@ -6255,6 +7728,7 @@ function start(client, hooks = {}) {
       if (path === '/giveaways' && req.method === 'GET') {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
+        if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Розыгрыши — для участников организации</h1><p class="muted">Розыгрыши проходят внутри организации.</p><a class="btn" href="/apply">Подать заявку</a>' }));
         return html(200, L({ title: 'Розыгрыши', user, level: acc.level, wide: true, body: flash + await giveawaysPublicBody(client) }));
       }
 
@@ -6284,8 +7758,21 @@ function start(client, hooks = {}) {
       if (path.startsWith('/g/') && req.method === 'GET') {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
+        if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Розыгрыши — для участников организации</h1><a class="btn" href="/apply">Подать заявку</a>' }));
         const gid = parseInt(decodeURIComponent(path.slice(3)), 10) || 0;
         return html(200, L({ title: 'Розыгрыш', user, level: acc.level, wide: true, body: flash + await giveawayPageBody(client, user, gid, acc) }));
+      }
+
+      if (/^\/ticket\/\d+\/transcript$/.test(path) && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        const tid = parseInt(path.split('/')[2], 10) || 0;
+        const t = await db.get('SELECT opener_id FROM tickets WHERE id = ?', [tid]).catch(() => null);
+        if (!t) return html(404, L({ title: 'Не найдено', user, level: acc.level, body: '<h1>Тикет не найден</h1>' }));
+        if (t.opener_id !== user.id && acc.rank < LEVELS.hr) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Транскрипт доступен автору тикета или HR+</h1>' }));
+        const trr = await db.get('SELECT html FROM ticket_transcripts WHERE ticket_id = ?', [tid]).catch(() => null);
+        if (!trr || !trr.html) return html(404, L({ title: 'Нет транскрипта', user, level: acc.level, body: `<h1>Транскрипт ещё не создан</h1><a class="btn" href="/ticket/${tid}">← к тикету</a>` }));
+        return done(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, max-age=300' }, trr.html);
       }
 
       if (path.startsWith('/ticket/') && req.method === 'GET') {
@@ -6444,7 +7931,11 @@ ${inner}
       return html(404, L({ title: '404', body: '<h1>404</h1><a class="btn" href="/">На главную</a>' }));
     } catch (err) {
       console.error('[web] Ошибка запроса:', err.message);
+      recordWebErr(req.url || '', err && (err.stack || err.message));
       try { html(500, layout({ title: '500', body: '<h1>Внутренняя ошибка</h1>' })); } catch (_) {}
+    } finally {
+      const ms = Date.now() - _reqStart;
+      if (ms > 1500) { _slowLog.push({ at: Date.now(), path: (req.url || '').split('?')[0], ms }); if (_slowLog.length > 300) _slowLog.splice(0, _slowLog.length - 300); }
     }
   });
 
@@ -6456,4 +7947,4 @@ ${inner}
   return server;
 }
 
-module.exports = { start };
+module.exports = { start, createMagicLink };

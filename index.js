@@ -2,6 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 const {
   Client,
   GatewayIntentBits,
@@ -53,6 +54,7 @@ const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
 const badges = require('./badges');
 const { notify, isMuted } = require('./notify');
+const web = require('./web');
 
 const client = new Client({
   intents: [
@@ -135,7 +137,7 @@ const REVIEW_CHANNELS = {
   passport: config.CHANNEL_APPLY_REVIEW,
 };
 
-const TICKET_CAT_LABEL = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое', appeal: 'Апелляция ЧС' };
+const TICKET_CAT_LABEL = { question: 'Вопрос', complaint: 'Жалоба', other: 'Другое', appeal: 'Апелляция ЧС', bug: 'Баг на сайте', bug_discord: 'Баг Discord' };
 
 // Кнопки в шапке тикета: взять на себя / освободить + закрыть.
 function ticketButtonsRow(ticketId, assignedTo) {
@@ -215,6 +217,7 @@ const TIER_INFO = {
 const COMMAND_DEFAULT_TIERS = {
   // --- Все участники сервера ---
   faq: 'everyone',
+  сайт: 'everyone',
 
   // --- Только роль `+`, `.` (Admin) ---
   настройка_изменить: 'admin', настройка_показать: 'admin', настройка_переключить: 'admin',
@@ -727,6 +730,21 @@ function buildProfileComponents(discordId) {
 // Раз в сутки (проверяется из часового таймера, сравнивает дату последней
 // отправки) — короткая сводка Владельцу в ЛС: новые заявки, увольнения,
 // просроченные контракты, у кого скоро кончается отпуск.
+// Раз в сутки: у кого 5+ непрочитанных уведомлений висят дольше суток —
+// мягкий пинок в ЛС со ссылкой на сайт (уважает mute-настройку колокольчика).
+async function sendUnreadNudges(guild) {
+  const dayAgo = new Date(Date.now() - 864e5).toISOString();
+  const rows = await db.all(
+    "SELECT discord_id, COUNT(*) c FROM notifications WHERE read_at IS NULL AND created_at <= ? AND (snooze_until IS NULL OR snooze_until <= ?) GROUP BY discord_id HAVING c >= 5",
+    [dayAgo, new Date().toISOString()],
+  ).catch(() => []);
+  for (const r of rows) {
+    if (String(r.discord_id).startsWith('local:') || String(r.discord_id).startsWith('nodiscord-')) continue;
+    if (await isMuted(r.discord_id, 'unread_digest')) continue;
+    await dmUser(guild, r.discord_id, `🔔 У вас ${r.c} непрочитанных уведомлений на сайте организации — загляните в раздел «Уведомления».`).catch(() => {});
+  }
+}
+
 async function sendDailyDigest(guild) {
   const lastSent = await db.getSetting('daily_digest_last_sent');
   const today = dates.mskDateStr(new Date());
@@ -979,6 +997,27 @@ async function sendPersonalWeeklyDigests(guild) {
 
 async function checkStuckContracts(guild) {
   const cutoff = new Date(Date.now() - config.STUCK_CONTRACT_HOURS * 60 * 60 * 1000).toISOString();
+
+  // «Взял, но не сдал итог» дольше нормы — напоминаем самому участнику (один раз).
+  const takenStuck = await db.all(
+    "SELECT id, discord_id, taken_submitted_at FROM contracts WHERE status = 'taken' AND taken_submitted_at <= ? AND stuck_reminder_sent = 0",
+    [cutoff],
+  ).catch(() => []);
+  for (const t of takenStuck) {
+    const hrs = Math.floor((Date.now() - new Date(t.taken_submitted_at)) / 36e5);
+    await dmUser(guild, t.discord_id, `⏰ Ваш взятый контракт #${t.id} висит ${hrs} ч — не забудьте сдать итог на сайте («Контракты в работе») или в канале-профиле.`).catch(() => {});
+    await notify(t.discord_id, 'contract', `Взятый контракт #${t.id} висит ${hrs} ч — сдайте итог`, '/me').catch(() => {});
+    await db.run('UPDATE contracts SET stuck_reminder_sent = 1 WHERE id = ?', [t.id]).catch(() => {});
+  }
+
+  // «Взял», но так и не сдал итог 7+ дней — помечаем abandoned (не считается).
+  const abandonCutoff = new Date(Date.now() - 7 * 864e5).toISOString();
+  const abandoned = await db.all("SELECT id, discord_id FROM contracts WHERE status = 'taken' AND taken_submitted_at <= ?", [abandonCutoff]).catch(() => []);
+  for (const a of abandoned) {
+    await db.run("UPDATE contracts SET status = 'abandoned' WHERE id = ?", [a.id]).catch(() => {});
+    await notify(a.discord_id, 'contract', `Взятый контракт #${a.id} снят автоматически — итог не сдан 7 дней`, '/me').catch(() => {});
+  }
+
   const stuck = await db.all(
     `SELECT * FROM contracts WHERE status = 'pending' AND submitted_at <= ? AND stuck_reminder_sent = 0`,
     [cutoff],
@@ -1008,6 +1047,38 @@ async function checkStuckContracts(guild) {
     } catch (err) {
       console.error(`Не удалось отправить напоминание о зависшем контракте в канал ${channelId}:`, err.message);
     }
+  }
+}
+
+// Тикеты без активности 4+ дней — предупреждаем; 5+ дней — авто-закрываем.
+async function checkSilentTickets(guild) {
+  const now = Date.now();
+  const open = await db.all("SELECT * FROM tickets WHERE status = 'open'").catch(() => []);
+  for (const t of open) {
+    const last = new Date(t.last_activity || t.created_at || now).getTime();
+    const days = (now - last) / 864e5;
+    try {
+      const ch = await guild.channels.fetch(t.channel_id).catch(() => null);
+      if (!ch) continue;
+      if (days >= 5) {
+        await ch.permissionOverwrites.edit(t.opener_id, { ViewChannel: false, SendMessages: false }).catch(() => {});
+        await ch.setParent(config.CHANNEL_TICKETS_ARCHIVE_CATEGORY, { lockPermissions: false }).catch(() => {});
+        if (!ch.name.startsWith('закрыт-')) await ch.setName(`закрыт-${ch.name}`.slice(0, 100)).catch(() => {});
+        await ch.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription('🔒 Тикет закрыт автоматически — 5 дней без ответа.')] }).catch(() => {});
+        await db.run("UPDATE tickets SET status = 'archived', closed_at = ?, closed_by = ?, close_reason = ? WHERE id = ?",
+          [new Date().toISOString(), client.user.id, 'авто: 5 дней тишины', t.id]);
+        await dmUser(guild, t.opener_id, {
+          content: `Ваш тикет «${t.subject || '—'}» закрыт автоматически (5 дней без ответа). Помогло ли обращение?`,
+          components: [row(
+            new ButtonBuilder().setCustomId(`ticket_rate:${t.id}:1`).setLabel('👍 Помогло').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`ticket_rate:${t.id}:0`).setLabel('👎 Не помогло').setStyle(ButtonStyle.Secondary),
+          )],
+        }).catch(() => {});
+      } else if (days >= 4 && !t.autoclose_warned) {
+        await ch.send({ content: `<@${t.opener_id}>`, embeds: [new EmbedBuilder().setColor(0xfee75c).setDescription('⏳ По этому тикету 4 дня нет ответа. Если вопрос ещё актуален — напишите здесь, иначе тикет закроется автоматически через сутки.')] }).catch(() => {});
+        await db.run('UPDATE tickets SET autoclose_warned = 1 WHERE id = ?', [t.id]).catch(() => {});
+      }
+    } catch (e) { console.error('checkSilentTickets:', e.message); }
   }
 }
 
@@ -1967,6 +2038,9 @@ const commands = [
     .setName('статистика_hr')
     .setDescription('Сводка по каждому HR: принято, удержано, проверено контрактов, закрыто тикетов')
     .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 30)').setRequired(false).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName('сайт')
+    .setDescription('Прислать в ЛС одноразовую ссылку для входа на сайт организации'),
   // Доступ ограничивается не через Discord-права, а проверкой роли/прав
   // в обработчике ниже — так гарантированно работает независимо от
   // настроек интеграций на сервере.
@@ -2296,6 +2370,28 @@ async function rerollGiveaway(guild, giveawayId, actor) {
   return winners;
 }
 
+// Общая логика команды /сайт и кнопки «Войти на сайт»: создаёт одноразовую
+// ссылку и присылает её в ЛС (с эфемерным фолбэком, если ЛС закрыты).
+// interaction должен быть уже deferReply({ ephemeral }).
+async function sendMagicLinkDM(interaction) {
+  try {
+    const url = await web.createMagicLink(interaction.user.id);
+    let dmOk = true;
+    try {
+      await interaction.user.send({
+        embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🔗 Вход на сайт организации')
+          .setDescription(`Ссылка действует **10 минут** и сработает **один раз**:\n${url}\n\nЕсли ссылку запрашивали не вы — просто не переходите по ней.`)],
+      });
+    } catch (_) { dmOk = false; }
+    return interaction.editReply(dmOk
+      ? '📩 Отправил ссылку для входа тебе в личные сообщения.'
+      : `⚠️ Не удалось написать в ЛС — открой личные сообщения от участников сервера.\nТвоя ссылка (10 минут, один переход):\n${url}`);
+  } catch (err) {
+    console.error('[сайт] не удалось создать ссылку входа:', err.message);
+    return interaction.editReply('❌ Не удалось создать ссылку входа. Попробуйте позже.');
+  }
+}
+
 async function sendOrEditMenu(channel, settingKey, payload) {
   const messageId = await db.getSetting(settingKey);
   if (messageId) {
@@ -2372,6 +2468,15 @@ async function initMenus(guild) {
     await sendOrEditMenu(ticketsChannel, 'tickets_menu_message_id', {
       embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🎫 Поддержка').setDescription('Нажмите кнопку, чтобы открыть приватный тикет — переписку увидите только вы и руководство.')],
       components: [row(new ButtonBuilder().setCustomId('ticket_open').setLabel('🎫 Открыть тикет').setStyle(ButtonStyle.Primary))],
+    });
+  });
+
+  await safeInitStep('канал входа на сайт', async () => {
+    const loginChannel = await guild.channels.fetch(config.CHANNEL_SITE_LOGIN);
+    await sendOrEditMenu(loginChannel, 'site_login_menu_message_id', {
+      embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('🔗 Вход на сайт организации')
+        .setDescription('Нажмите кнопку — бот пришлёт в личные сообщения одноразовую ссылку для входа (действует 10 минут).\n\nМожно также использовать команду `/сайт` или войти через Discord прямо на сайте.')],
+      components: [row(new ButtonBuilder().setCustomId('magic_link_request').setLabel('🔗 Войти на сайт').setStyle(ButtonStyle.Primary))],
     });
   });
 
@@ -3370,6 +3475,11 @@ client.on('interactionCreate', async (interaction) => {
     // ----- Слэш-команды -----
     if (interaction.isChatInputCommand()) {
       const cmd = interaction.commandName;
+
+      if (cmd === 'сайт') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        return sendMagicLinkDM(interaction);
+      }
 
       if (cmd === 'пинг') {
         if (!(await checkCommandAccess('пинг', interaction.member))) {
@@ -5851,6 +5961,35 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       const id = interaction.customId;
 
+      if (id === 'magic_link_request') {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        return sendMagicLinkDM(interaction);
+      }
+
+      if (id.startsWith('formsub_ok:') || id.startsWith('formsub_no:')) {
+        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав рассматривать заявки.');
+        const approve = id.startsWith('formsub_ok:');
+        const sid = id.split(':')[1];
+        const s = await db.get('SELECT * FROM form_submissions WHERE id = ?', [sid]);
+        if (!s) return safeReply(interaction, 'Заявка не найдена.');
+        if (s.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
+        const f = await db.get('SELECT name FROM forms WHERE id = ?', [s.form_id]).catch(() => null);
+        await db.run('UPDATE form_submissions SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?',
+          [approve ? 'approved' : 'rejected', interaction.user.id, new Date().toISOString(), sid]);
+        try {
+          await notify(s.discord_id, 'form', approve
+            ? `Ваша заявка по форме «${(f && f.name) || 'форма'}» принята.`
+            : `Ваша заявка по форме «${(f && f.name) || 'форма'}» отклонена.`, '/me');
+        } catch (_) {}
+        try { await interaction.message.edit({ components: [] }); } catch (_) {}
+        await logAudit(guild, interaction.user, 'Заявка по форме рассмотрена', [
+          { name: 'Заявка', value: `#${sid} «${(f && f.name) || ''}»`, inline: true },
+          { name: 'Итог', value: approve ? '✅ принято' : '❌ отклонено', inline: true },
+          { name: 'Автор', value: `<@${s.discord_id}>`, inline: true },
+        ]);
+        return safeReply(interaction, approve ? '✅ Заявка принята, автор уведомлён.' : '❌ Заявка отклонена, автор уведомлён.');
+      }
+
       if (id.startsWith('review_claim:') || id.startsWith('review_unclaim:')) {
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав рассматривать заявки.');
         const claiming = id.startsWith('review_claim:');
@@ -6846,6 +6985,8 @@ client.on('interactionCreate', async (interaction) => {
             new ButtonBuilder().setCustomId('ticket_new:question').setLabel('❓ Вопрос').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('ticket_new:complaint').setLabel('⚠️ Жалоба').setStyle(ButtonStyle.Danger),
             new ButtonBuilder().setCustomId('ticket_new:other').setLabel('📋 Другое').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('ticket_new:bug').setLabel('🐞 Баг на сайте').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('ticket_new:bug_discord').setLabel('🐞 Баг Discord').setStyle(ButtonStyle.Secondary),
           )],
         });
       }
@@ -8892,6 +9033,8 @@ client.on('interactionCreate', async (interaction) => {
           components: [ticketButtonsRow(result.lastID, null)],
           ...mentionOpts,
         });
+        await channel.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription('👋 Спасибо за обращение! Опишите вопрос как можно подробнее — руководство ответит в течение суток. Если 5 дней не будет активности, тикет закроется автоматически.')] }).catch(() => {});
+        await db.run('UPDATE tickets SET last_activity = ? WHERE id = ?', [new Date().toISOString(), result.lastID]).catch(() => {});
 
         await logAudit(guild, interaction.user, 'Открыт тикет', [
           { name: 'Автор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
@@ -9284,8 +9427,11 @@ client.on('messageCreate', async (message) => {
     if (message.channel.parentId === config.CHANNEL_TICKETS_ACTIVE_CATEGORY) {
       try {
         const t = await db.get("SELECT id, opener_id, subject FROM tickets WHERE channel_id = ? AND status = 'open'", [message.channel.id]);
-        if (t && t.opener_id && t.opener_id !== message.author.id) {
-          await notify(t.opener_id, 'ticket', `Ответ в тикете «${t.subject || 'Тикет'}»`, `/ticket/${t.id}`);
+        if (t) {
+          await db.run('UPDATE tickets SET last_activity = ?, autoclose_warned = 0 WHERE id = ?', [new Date().toISOString(), t.id]).catch(() => {});
+          if (t.opener_id && t.opener_id !== message.author.id) {
+            await notify(t.opener_id, 'ticket', `Ответ в тикете «${t.subject || 'Тикет'}»`, `/ticket/${t.id}`);
+          }
         }
       } catch (_) {}
     }
@@ -9401,7 +9547,7 @@ client.once('clientReady', async () => {
 
   // --- Сайт (вход через Discord) на том же домене/порту ---
   try {
-    require('./web').start(client, {
+    web.start(client, {
       syncEffectiveIdentity,
       syncStatusRoles,
       syncProfileChannelName,
@@ -9413,8 +9559,86 @@ client.once('clientReady', async () => {
       initMenus,
       checkContractPromotion,
       syncAllCommandPermissions,
+      // Карточка контракта на проверку для сдачи через сайт (скрины — из БД contract_uploads).
+      postContractReviewCardWeb: async (guild, contractId, discordId, threadId) => {
+        const c = await db.get('SELECT * FROM contracts WHERE id = ?', [contractId]);
+        if (!c) return;
+        const ups = await db.all('SELECT slot, mime, data, file FROM contract_uploads WHERE contract_id = ?', [contractId]).catch(() => []);
+        const uploadsDir = db.dataDir ? path.join(db.dataDir, 'uploads') : path.join(process.cwd(), 'data', 'uploads');
+        const files = [];
+        const infoE = new EmbedBuilder().setColor(0xfee75c).setTitle('Новый контракт на проверку (с сайта)').addFields({ name: 'Участник', value: `<@${discordId}>` });
+        const takenE = new EmbedBuilder().setColor(0xfee75c).setTitle('1️⃣ Взял контракт');
+        const doneE = new EmbedBuilder().setColor(0xfee75c).setTitle('2️⃣ Итог');
+        for (const u of ups) {
+          let buf = u.data ? Buffer.from(u.data) : null;
+          if (!buf && u.file) { try { buf = fs.readFileSync(path.join(uploadsDir, path.basename(u.file))); } catch (_) {} }
+          if (!buf) continue;
+          const nm = `${u.slot}.${(u.mime || '').includes('png') ? 'png' : 'jpg'}`;
+          files.push(new AttachmentBuilder(buf, { name: nm }));
+          (u.slot === 'taken' ? takenE : doneE).setImage(`attachment://${nm}`);
+        }
+        if (!ups.some((u) => u.slot === 'taken') && c.taken_message_url) takenE.setDescription(c.taken_message_url);
+        if (!ups.some((u) => u.slot === 'result') && c.message_url) doneE.setDescription(c.message_url);
+        const channel = await guild.channels.fetch(threadId).catch(() => null);
+        if (!channel) return;
+        const msg = await channel.send({
+          embeds: [infoE, takenE, doneE],
+          files,
+          components: [row(
+            new ButtonBuilder().setCustomId(`contract_fulfilled:${contractId}`).setLabel('✅ Выполнен').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`contract_unfulfilled:${contractId}`).setLabel('❌ Невыполнен').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId(`contract_rejected:${contractId}`).setLabel('🚫 Не контракт').setStyle(ButtonStyle.Secondary),
+          )],
+        });
+        await contracts.setReviewMessageId(contractId, msg.id);
+      },
+      notifyHrApplication: async (guild, reqId) => {
+        const reqRow = await db.get('SELECT * FROM hr_applications WHERE id = ?', [reqId]);
+        if (!reqRow || !guild) return;
+        const reviewChannel = await guild.channels.fetch(config.CHANNEL_HR_APPLY_REVIEW).catch(() => null);
+        if (!reviewChannel) return;
+        const sent = await reviewChannel.send({
+          content: config.ROLES_MEMBERS_LIST_ALLOWED.map((r) => `<@&${r}>`).join(' '),
+          embeds: [buildHrApplyEmbed(reqRow)],
+          components: buildHrApplyComponents(reqRow),
+          allowedMentions: { roles: config.ROLES_MEMBERS_LIST_ALLOWED },
+        });
+        await db.run('UPDATE hr_applications SET message_id = ? WHERE id = ?', [sent.id, reqId]).catch(() => {});
+      },
+      restoreProfiles: async (guild) => {
+        const parts = await db.all('SELECT discord_id FROM participants');
+        let n = 0;
+        for (const p of parts) {
+          if (String(p.discord_id).startsWith('nodiscord-')) continue;
+          const pps = await passportsLib.getAllPassports(p.discord_id);
+          for (const pp of pps) {
+            let ok = false;
+            if (pp.profile_thread_id) { try { await guild.channels.fetch(pp.profile_thread_id); ok = true; } catch (_) {} }
+            if (!ok) { try { await createProfileThread(guild, p.discord_id, pp.name, pp.static); n++; } catch (_) {} }
+          }
+        }
+        return n;
+      },
+      notifyPasswordReset: async (reqId) => {
+        try {
+          const q = await db.get('SELECT * FROM password_reset_requests WHERE id = ?', [reqId]);
+          if (!q) return;
+          const ownerId = config.OWNER_USER_ID;
+          if (!ownerId) return;
+          const u = await client.users.fetch(ownerId).catch(() => null);
+          if (!u) return;
+          await u.send({
+            embeds: [new EmbedBuilder().setColor(0xf2c94c).setTitle('🔑 Заявка на сброс пароля (сайт)')
+              .setDescription(`Логин: **${q.login || '—'}**\nПочта: ${q.email || '—'}\n${q.note ? `Комментарий: ${q.note}\n` : ''}\nРазобрать: панель сайта → «Аккаунты».`)],
+          }).catch(() => {});
+        } catch (e) { console.error('[web] notifyPasswordReset:', e.message); }
+      },
       commandDefaultTiers: COMMAND_DEFAULT_TIERS,
       tierLabels: Object.fromEntries(Object.entries(TIER_INFO).map(([k, v]) => [k, v.label])),
+      commandDescriptions: Object.fromEntries(commands.map((c) => {
+        const j = typeof c.toJSON === 'function' ? c.toJSON() : c;
+        return [j.name, j.description || ''];
+      })),
     });
   } catch (e) {
     console.error('[web] Не удалось запустить сайт:', e.message);
@@ -9425,6 +9649,28 @@ client.once('clientReady', async () => {
   if (overridesCount > 0) console.log(`Применено переопределений конфига из БД: ${overridesCount}`);
   await seedRejectTemplates();
   await registerCommands();
+
+  // Разовый перенос старых картинок-BLOB из БД на диск (data/uploads/) —
+  // облегчает бэкап. Идёт порциями, не блокируя старт.
+  (async () => {
+    try {
+      const upDir = db.dataDir ? path.join(db.dataDir, 'uploads') : path.join(process.cwd(), 'data', 'uploads');
+      fs.mkdirSync(upDir, { recursive: true });
+      for (const [tbl, pfx] of [['contract_uploads', 'c'], ['page_assets', 'a']]) {
+        const rows = await db.all(`SELECT id, mime, data FROM ${tbl} WHERE data IS NOT NULL AND (file IS NULL OR file = '') LIMIT 500`).catch(() => []);
+        for (const r of rows) {
+          try {
+            const ext = (r.mime || '').includes('png') ? 'png' : (r.mime || '').includes('webp') ? 'webp' : (r.mime || '').includes('svg') ? 'svg' : 'jpg';
+            if (ext === 'svg') continue; // svg оставляем в БД (мелкие, текстовые)
+            const nm = `${pfx}${r.id}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
+            fs.writeFileSync(path.join(upDir, nm), Buffer.from(r.data));
+            await db.run(`UPDATE ${tbl} SET file = ?, data = NULL WHERE id = ?`, [nm, r.id]);
+          } catch (_) {}
+        }
+        if (rows.length) console.log(`[uploads] перенесено на диск из ${tbl}: ${rows.length}`);
+      }
+    } catch (e) { console.error('[uploads] перенос на диск:', e.message); }
+  })();
 
   if (process.env.GUILD_ID) {
     try {
@@ -9471,6 +9717,7 @@ client.once('clientReady', async () => {
           const g = await client.guilds.fetch(process.env.GUILD_ID);
           await sendCodewordRefundList(g);
           await sendDailyDigest(g);
+          await sendUnreadNudges(g).catch((e) => console.error('unread nudges:', e.message));
         }
       } catch (err) {
         console.error('Ошибка ежедневной рассылки 23:59:', err.message);
@@ -9498,6 +9745,7 @@ client.once('clientReady', async () => {
         }
         await checkDiskSpace(guild);
         await checkStuckContracts(guild);
+        await checkSilentTickets(guild);
         await checkExpiredVacations(guild);
         await checkExpiredBlacklist(guild);
         await checkAnniversaries(guild);
