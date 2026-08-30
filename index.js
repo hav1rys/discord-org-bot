@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const crypto = require('crypto');
+let _backupTimeCache = null; // "HH:MM" МСК из настроек сайта; обновляется в часовом цикле
 const {
   Client,
   GatewayIntentBits,
@@ -1329,6 +1330,7 @@ async function syncEffectiveIdentity(guild, discordId) {
       console.error(`Не удалось синхронизировать роль ранга для ${discordId}:`, err.message);
     }
   }
+  try { web.invalidateAccess(discordId); } catch (_) {}
 }
 
 // Создаёт приватный пост-ветку в форуме контрактов для нового участника.
@@ -2182,7 +2184,8 @@ async function endGiveaway(guild, giveawayId, actor = null) {
   if (!giveaway || giveaway.status !== 'active') return [];
 
   const entries = await giveaways.getEntries(giveawayId);
-  const winners = giveaways.pickWinners(entries, giveaway.winners_count);
+  const weights = giveaway.weight_by_contracts ? await giveaways.contractWeights(entries).catch(() => null) : null;
+  const winners = giveaways.pickWinners(entries, giveaway.winners_count, weights);
   await giveaways.setStatus(giveawayId, 'ended');
   await giveaways.setWinners(giveawayId, winners.join(','));
 
@@ -2341,7 +2344,8 @@ async function rerollGiveaway(guild, giveawayId, actor) {
   if (!giveaway || giveaway.status !== 'ended') return [];
 
   const entries = await giveaways.getEntries(giveawayId);
-  const winners = giveaways.pickWinners(entries, giveaway.winners_count);
+  const weights = giveaway.weight_by_contracts ? await giveaways.contractWeights(entries).catch(() => null) : null;
+  const winners = giveaways.pickWinners(entries, giveaway.winners_count, weights);
   await giveaways.setWinners(giveawayId, winners.join(','));
 
   try {
@@ -6579,6 +6583,7 @@ client.on('interactionCreate', async (interaction) => {
         } catch (err) {
           return safeReply(interaction, '⛔ Не удалось выдать роль (проверьте права бота).');
         }
+        try { web.invalidateAccess(reqRow.discord_id); } catch (_) {}
         await db.run('UPDATE hr_applications SET status = ? WHERE id = ?', ['accepted', reqId]);
 
         await refreshReviewMessage(
@@ -6758,6 +6763,13 @@ client.on('interactionCreate', async (interaction) => {
         }
         if (!already && giveaway.min_role_id && !giveaways.meetsMinRole(interaction.member, giveaway.min_role_id)) {
           return safeReply(interaction, `⛔ Участвовать могут роли не ниже <@&${giveaway.min_role_id}>.`);
+        }
+        if (!already && giveaway.min_contracts_week) {
+          const wr = contracts.getWeekRange(0);
+          const cw = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [interaction.user.id, wr.start.toISOString(), wr.end.toISOString()]).then((x) => (x ? x.c : 0)).catch(() => 0);
+          if (cw < giveaway.min_contracts_week) {
+            return safeReply(interaction, `⛔ Нужно ≥ ${giveaway.min_contracts_week} выполненных контрактов за эту неделю (у вас ${cw}).`);
+          }
         }
         if (already) {
           await giveaways.removeEntry(giveawayId, interaction.user.id);
@@ -9633,6 +9645,90 @@ client.once('clientReady', async () => {
           }).catch(() => {});
         } catch (e) { console.error('[web] notifyPasswordReset:', e.message); }
       },
+      // Полная синхронизация Discord-стороны при решении по заявке с сайта:
+      // та же карточка «Принято/Отклонено», те же ЛС и запись в аудит Discord.
+      appMirrorAccepted: async (appId, byId, profileChannelUrl) => {
+        try {
+          const guild = await client.guilds.fetch(process.env.GUILD_ID);
+          const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
+          if (!app) return;
+          const actor = await client.users.fetch(byId).catch(() => null);
+          const ch = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW).catch(() => null);
+          if (ch && app.message_id) {
+            await refreshReviewMessage(ch, app.message_id, await applicationReviewEmbed({ ...app, status: 'accepted' }, guild.id), [], actionSummary(byId, '✅ Принято')).catch(() => {});
+          }
+          await dmUser(guild, app.discord_id, '✅ Ваша заявка на вступление принята! Добро пожаловать в организацию.').catch(() => {});
+          await notify(app.discord_id, 'apply', 'Ваша заявка на вступление принята — добро пожаловать!', '/me').catch(() => {});
+          if (profileChannelUrl) {
+            await dmUser(guild, app.discord_id,
+              `📸 Ваш профиль для отчётов по контрактам: ${profileChannelUrl}\n\n`
+              + `Туда нужно присылать скриншоты **на весь экран** по каждому контракту — 2 штуки:\n`
+              + `1️⃣ когда вы **взяли** контракт\n2️⃣ когда контракт **выполнен или не выполнен**\n\n`
+              + `Можно прислать оба скриншота одним сообщением, можно — двумя сообщениями подряд.`).catch(() => {});
+          }
+          const rulesText = await getCurrentText('rules', DEFAULT_RULES);
+          await dmUser(guild, app.discord_id, { embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(String(rulesText).slice(0, 4000))] }).catch(() => {});
+          await logAudit(guild, actor || { id: byId, tag: byId }, 'Заявка принята (через сайт)', [
+            { name: 'Кто принял', value: `<@${byId}> | ${(actor && actor.tag) || byId}`, inline: true },
+            { name: 'Кого принял', value: `<@${app.discord_id}> | № ${appId}`, inline: true },
+          ]).catch(() => {});
+        } catch (e) { console.error('[web] appMirrorAccepted:', e.message); }
+      },
+      appMirrorRejected: async (appId, byId) => {
+        try {
+          const guild = await client.guilds.fetch(process.env.GUILD_ID);
+          const app = await db.get('SELECT * FROM applications WHERE id = ?', [appId]);
+          if (!app) return;
+          const actor = await client.users.fetch(byId).catch(() => null);
+          const ch = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW).catch(() => null);
+          if (ch && app.message_id) {
+            await refreshReviewMessage(ch, app.message_id, await applicationReviewEmbed({ ...app, status: 'rejected', reject_reason: app.reject_reason }, guild.id), [], actionSummary(byId, '❌ Отклонено', app.reject_reason)).catch(() => {});
+          }
+          await dmUser(guild, app.discord_id, `❌ Ваша заявка на вступление была отклонена. Причина: ${app.reject_reason}`).catch(() => {});
+          await notify(app.discord_id, 'apply', `Заявка на вступление отклонена. Причина: ${app.reject_reason}`, '/apply').catch(() => {});
+          await logAudit(guild, actor || { id: byId, tag: byId }, 'Заявка отклонена (через сайт)', [
+            { name: 'Кто отклонил', value: `<@${byId}> | ${(actor && actor.tag) || byId}`, inline: true },
+            { name: 'Чья заявка', value: `<@${app.discord_id}> | № ${appId}`, inline: true },
+            { name: 'Причина', value: app.reject_reason || '—', inline: false },
+          ]).catch(() => {});
+        } catch (e) { console.error('[web] appMirrorRejected:', e.message); }
+      },
+      appMirrorComment: async (appId, authorName, text) => {
+        try {
+          const guild = await client.guilds.fetch(process.env.GUILD_ID);
+          const app = await db.get('SELECT message_id FROM applications WHERE id = ?', [appId]);
+          if (!app || !app.message_id) return;
+          const ch = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW).catch(() => null);
+          if (!ch) return;
+          const body = `💬 **${authorName}** — комментарий с сайта к заявке #${appId}:\n> ${String(text).replace(/\n/g, '\n> ').slice(0, 1500)}`;
+          try { const msg = await ch.messages.fetch(app.message_id); await msg.reply({ content: body, allowedMentions: { parse: [] } }); }
+          catch (_) { await ch.send({ content: body, allowedMentions: { parse: [] } }).catch(() => {}); }
+        } catch (e) { console.error('[web] appMirrorComment:', e.message); }
+      },
+      // Прямое добавление участника с сайта (без заявки) — как ручной ввод в Discord.
+      addParticipantDirect: async (discordId, name, staticNum, lvl, byId) => {
+        const guild = await client.guilds.fetch(process.env.GUILD_ID);
+        const actor = await client.users.fetch(byId).catch(() => null);
+        try {
+          const member = await guild.members.fetch(discordId);
+          await member.roles.add([config.ROLE_APPLY, config.ROLE_ORGANIZATION].filter(Boolean));
+        } catch (_) {}
+        await syncEffectiveIdentity(guild, discordId);
+        await history.logJoined(discordId, staticNum, name, `Добавлен напрямую через сайт`).catch(() => {});
+        let url = null;
+        try { url = await createProfileThread(guild, discordId, name, staticNum); } catch (_) {}
+        await dmUser(guild, discordId, '✅ Вас добавили в организацию. Добро пожаловать!').catch(() => {});
+        await notify(discordId, 'apply', 'Вас добавили в организацию — добро пожаловать!', '/me').catch(() => {});
+        if (url) await dmUser(guild, discordId, `📸 Ваш профиль для отчётов по контрактам: ${url}`).catch(() => {});
+        const rulesText = await getCurrentText('rules', DEFAULT_RULES);
+        await dmUser(guild, discordId, { embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(String(rulesText).slice(0, 4000))] }).catch(() => {});
+        await safeUpdateMembersList(guild).catch(() => {});
+        await logAudit(guild, actor || { id: byId, tag: byId }, 'Участник добавлен напрямую (сайт)', [
+          { name: 'Кто добавил', value: `<@${byId}>`, inline: true },
+          { name: 'Кого', value: `<@${discordId}> | ${name} № ${staticNum}`, inline: true },
+        ]).catch(() => {});
+        return url;
+      },
       commandDefaultTiers: COMMAND_DEFAULT_TIERS,
       tierLabels: Object.fromEntries(Object.entries(TIER_INFO).map(([k, v]) => [k, v.label])),
       commandDescriptions: Object.fromEntries(commands.map((c) => {
@@ -9648,6 +9744,7 @@ client.once('clientReady', async () => {
   const overridesCount = await configStore.loadOverrides();
   if (overridesCount > 0) console.log(`Применено переопределений конфига из БД: ${overridesCount}`);
   await seedRejectTemplates();
+  try { _backupTimeCache = await db.getSetting('backup.time'); } catch (_) {}
   await registerCommands();
 
   // Разовый перенос старых картинок-BLOB из БД на диск (data/uploads/) —
@@ -9670,6 +9767,24 @@ client.once('clientReady', async () => {
         if (rows.length) console.log(`[uploads] перенесено на диск из ${tbl}: ${rows.length}`);
       }
     } catch (e) { console.error('[uploads] перенос на диск:', e.message); }
+  })();
+
+  // Разово: даты бейджей по стажу (месяц/90 дней/год) у старых участников
+  // проставлены «сегодня» — пересчитываем от joined_at (детерминированно).
+  (async () => {
+    try {
+      const map = { month: 30, veteran90: 90, year1: 365 };
+      const rows = await db.all(
+        "SELECT ba.rowid AS rid, ba.badge_key AS k, p.joined_at AS j FROM badge_awards ba JOIN participants p ON p.discord_id = ba.discord_id WHERE ba.badge_key IN ('month','veteran90','year1') AND p.joined_at IS NOT NULL",
+      ).catch(() => []);
+      let n = 0;
+      for (const r of rows) {
+        const want = new Date(new Date(r.j).getTime() + map[r.k] * 864e5).toISOString();
+        const res = await db.run('UPDATE badge_awards SET awarded_at = ? WHERE rowid = ? AND (awarded_at IS NULL OR awarded_at > ?)', [want, r.rid, want]).catch(() => ({ changes: 0 }));
+        if (res && res.changes) n++;
+      }
+      if (n) console.log(`[badges] пересчитаны даты бейджей по стажу: ${n}`);
+    } catch (e) { console.error('[badges] backfill дат:', e.message); }
   })();
 
   if (process.env.GUILD_ID) {
@@ -9706,6 +9821,8 @@ client.once('clientReady', async () => {
       await uploadBackupFile(filePath, 'ежедневный автоматический');
       mediaCache.cleanupOldCache();
     },
+    // время автобэкапа (МСК, "HH:MM") — правится в панели → «Настройки»; кэш обновляется в часовом цикле
+    () => _backupTimeCache,
   );
 
   // 23:59 МСК — список подтверждённых кодовых слов + ежедневная сводка Владельцу в ЛС
@@ -9746,6 +9863,9 @@ client.once('clientReady', async () => {
         await checkDiskSpace(guild);
         await checkStuckContracts(guild);
         await checkSilentTickets(guild);
+        // авто-публикация запланированных доп. страниц
+        await db.run("UPDATE site_pages SET published = 1, publish_at = NULL WHERE published = 0 AND publish_at IS NOT NULL AND publish_at <= ?", [new Date().toISOString()]).catch(() => {});
+        try { _backupTimeCache = await db.getSetting('backup.time'); } catch (_) {}
         await checkExpiredVacations(guild);
         await checkExpiredBlacklist(guild);
         await checkAnniversaries(guild);

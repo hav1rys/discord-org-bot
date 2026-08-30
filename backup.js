@@ -66,19 +66,30 @@ function cleanupOldBackups(onError) {
 // onSuccess(filePath), если передана — вызывается при успехе, с путём к
 // файлу — используется, чтобы отправить копию в отдельный Discord-канал
 // на случай, если сам сайт/сервер бота умрёт (п. "чтобы она не потерялась").
-function scheduleDailyBackup(notifyFn, onSuccess) {
+// timeGetter() — необязательная функция, возвращающая строку "HH:MM" МСК из
+// настроек (правится в панели → «Настройки»). По умолчанию 23:59.
+function scheduleDailyBackup(notifyFn, onSuccess, timeGetter) {
+  const nextRun = () => {
+    let h = 23; let m = 59;
+    try {
+      const t = timeGetter && timeGetter();
+      const mm = /^(\d{1,2}):(\d{2})$/.exec(String(t || ''));
+      if (mm) { h = Math.min(23, +mm[1]); m = Math.min(59, +mm[2]); }
+    } catch (_) {}
+    return dates.nextMskTime(h, m).getTime() - Date.now();
+  };
   function runAndReschedule() {
     const filePath = backupNow(notifyFn);
     if (filePath && onSuccess) {
       onSuccess(filePath);
     }
     cleanupOldBackups(notifyFn);
-    setTimeout(runAndReschedule, dates.nextMskTime(23, 59).getTime() - Date.now());
+    setTimeout(runAndReschedule, nextRun());
   }
 
-  const msUntil = dates.nextMskTime(23, 59).getTime() - Date.now();
+  const msUntil = nextRun();
   setTimeout(runAndReschedule, msUntil);
-  console.log(`Резервное копирование БД запланировано на 23:59 МСК (через ${Math.round(msUntil / 60000)} мин.)`);
+  console.log(`Резервное копирование БД запланировано (через ${Math.round(msUntil / 60000)} мин.)`);
 }
 
 // Список файлов резервных копий с датой изменения и размером — для /backup_list

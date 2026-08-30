@@ -1,4 +1,5 @@
 const db = require('./db');
+const contracts = require('./contracts');
 
 const WEEKDAY_NAMES = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
 
@@ -107,15 +108,40 @@ async function countEntries(giveawayId) {
   return row ? row.cnt : 0;
 }
 
-// Случайные победители без повторов
-function pickWinners(entries, count) {
+// Случайные победители без повторов. weights (необязательно) — карта
+// discord_id -> число «билетов» (по умолчанию 1); чем больше, тем выше шанс.
+function pickWinners(entries, count, weights) {
   const pool = [...entries];
   const winners = [];
   while (winners.length < count && pool.length > 0) {
-    const idx = Math.floor(Math.random() * pool.length);
+    let idx;
+    if (weights) {
+      const w = pool.map((id) => Math.max(0.0001, weights[id] || 1));
+      const total = w.reduce((a, b) => a + b, 0);
+      let roll = Math.random() * total;
+      idx = 0;
+      while (idx < w.length - 1 && (roll -= w[idx]) > 0) idx++;
+    } else {
+      idx = Math.floor(Math.random() * pool.length);
+    }
     winners.push(pool.splice(idx, 1)[0]);
   }
   return winners;
+}
+
+// Бонус-билеты за активность: 1 + (выполненные контракты за эту неделю, максимум +9).
+async function contractWeights(entries) {
+  if (!entries.length) return {};
+  const r = contracts.getWeekRange(0);
+  const ph = entries.map(() => '?').join(',');
+  const rows = await db.all(
+    `SELECT discord_id, COUNT(*) c FROM contracts WHERE status='fulfilled' AND submitted_at BETWEEN ? AND ? AND discord_id IN (${ph}) GROUP BY discord_id`,
+    [r.start.toISOString(), r.end.toISOString(), ...entries],
+  ).catch(() => []);
+  const w = {};
+  for (const id of entries) w[id] = 1;
+  for (const row of rows) w[row.discord_id] = 1 + Math.min(9, row.c);
+  return w;
 }
 
 // ---------- Повторяющиеся розыгрыши ----------
@@ -188,6 +214,7 @@ module.exports = {
   getEntries,
   countEntries,
   pickWinners,
+  contractWeights,
   createRecurringRule,
   getRecurringRule,
   getActiveRecurringRules,

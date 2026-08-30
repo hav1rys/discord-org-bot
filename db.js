@@ -395,6 +395,8 @@ const SCHEMA = {
       status: "TEXT DEFAULT 'active'", // active | ended | cancelled
       required_role_id: 'TEXT', // если задано — участвовать может только эта роль (и роли выше по иерархии)
       min_role_id: 'TEXT', // если задано — участвовать может эта роль ранга и ВЫШЕ по иерархии ROLE_IDS
+      min_contracts_week: 'INTEGER', // если задано — участвовать может тот, у кого >= N выполненных контрактов на этой неделе
+      weight_by_contracts: 'INTEGER', // 1 — шанс победы взвешивается по контрактам за неделю (бонус-билеты за активность)
       recurring_rule_id: 'INTEGER', // если создан из шаблона повтора — ссылка на giveaway_recurring_rules.id
       winners: 'TEXT', // discord id победителей через запятую (для /розыгрыш_история)
       prize_tiers: 'TEXT', // необяз. призовые места: строки «диапазон | приз», напр. «1 | X\n2-3 | Y»
@@ -659,6 +661,7 @@ const SCHEMA = {
       content: 'TEXT',
       nav: 'INTEGER DEFAULT 0', // 1 — показывать ссылку в шапке
       published: 'INTEGER DEFAULT 1', // 0 — черновик, виден только havirys
+      publish_at: 'TEXT', // если задано и в будущем — авто-публикация в это время
       updated_at: 'TEXT',
     },
   },
@@ -929,6 +932,7 @@ const SCHEMA = {
       tab: 'TEXT',
       granted_by: 'TEXT',
       granted_at: 'TEXT',
+      expires_at: 'TEXT', // NULL — бессрочно; иначе доступ снимается автоматически
     },
     indexes: [['discord_id']],
   },

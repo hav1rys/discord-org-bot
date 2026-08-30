@@ -26,7 +26,7 @@ const faq = require('./faq');
 const faqDisplay = require('./faq_display');
 const configStore = require('./config_store');
 const csvLib = require('./csv');
-const { notify: pushNotify, unreadCount } = require('./notify');
+const { notify: pushNotify, unreadCount, invalidateUnread } = require('./notify');
 
 const OWNER_ID = config.OWNER_USER_ID; // havirys — полный доступ, включая редактор БД
 
@@ -280,6 +280,8 @@ a:hover{text-decoration:underline}
 .wrap{max-width:760px;margin:0 auto;padding:28px 18px 60px}
 .wrap.wide{max-width:1040px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:16px 0}
+/* Личный кабинет: карточки в 2 колонки на широких экранах, чтобы меньше скроллить */
+@media(min-width:900px){ .mecols{column-count:2;column-gap:16px} .mecols>*{break-inside:avoid;-webkit-column-break-inside:avoid} .mecols>.card{margin-top:0} }
 h1{font-size:26px;line-height:1.25;margin-bottom:6px;color:var(--text)}
 h2{font-size:16px;margin-bottom:12px;color:var(--text)}
 h3{color:var(--text)}
@@ -302,6 +304,7 @@ tr:last-child td{border-bottom:0}
 .badge.bad{color:var(--bad)}
 .badge.warn{color:var(--warn)}
 .pill{display:inline-block;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:2px 8px;font-size:12.5px;margin:2px 4px 2px 0}
+mark{background:var(--warn);color:#000;border-radius:3px;padding:0 2px}
 .feat{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .feat .c{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:16px}
 .feat .c h3{font-size:15px;margin-bottom:6px}
@@ -512,6 +515,102 @@ const CLIENT_SCRIPT = `
       var n=bl?parseInt(bl.textContent,10):0;
       if(n>0) document.title='('+n+') '+document.title;
     }catch(e){}
+    // PWA: регистрируем service worker и показываем кнопку «Установить приложение»
+    try{
+      if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(function(){});
+      var deferredPrompt=null;
+      window.addEventListener('beforeinstallprompt',function(e){
+        e.preventDefault(); deferredPrompt=e;
+        var b=document.createElement('button');
+        b.textContent='📲 Установить приложение'; b.className='btn ghost sm';
+        b.style.cssText='position:fixed;left:16px;bottom:16px;z-index:150';
+        b.onclick=function(){ b.remove(); if(deferredPrompt){deferredPrompt.prompt();deferredPrompt=null;} };
+        document.body.appendChild(b);
+        window.addEventListener('appinstalled',function(){ try{b.remove();}catch(_){} });
+      });
+    }catch(e){}
+    // Клавиатурная навигация по вкладкам (.tabs): ← → между ссылками, Home/End
+    try{
+      document.querySelectorAll('.tabs').forEach(function(tb){
+        var links=[].slice.call(tb.querySelectorAll('a'));
+        if(!links.length)return;
+        tb.setAttribute('role','navigation');
+        links.forEach(function(a){
+          a.addEventListener('keydown',function(e){
+            var i=links.indexOf(a),n=null;
+            if(e.key==='ArrowRight'||e.key==='ArrowDown')n=links[(i+1)%links.length];
+            else if(e.key==='ArrowLeft'||e.key==='ArrowUp')n=links[(i-1+links.length)%links.length];
+            else if(e.key==='Home')n=links[0];
+            else if(e.key==='End')n=links[links.length-1];
+            if(n){e.preventDefault();n.focus();}
+          });
+        });
+      });
+    }catch(e){}
+    // Командная палитра: Ctrl+K / Cmd+K
+    try{
+      var PAL=[
+        ['Мой профиль','/me'],['Участники','/people'],['Розыгрыши','/giveaways'],['FAQ / Гайды','/faq'],
+        ['Команды','/commands'],['Уведомления','/notifications'],['Сравнение','/compare'],['Правила','/text/rules'],
+        ['Дашборд','/dashboard'],['Тикеты','/tickets'],['Календарь','/calendar'],['Поиск везде','/search'],
+        ['Аудит','/audit'],['Лидерборды','/leaderboards'],['Здоровье системы','/health'],['Инструменты','/tools'],
+        ['Панель','/panel'],['Панель — Заявки','/panel?tab=apps'],['Панель — Очереди','/panel?tab=queues'],
+        ['Панель — Контракты (проверка)','/panel?tab=contracts_check'],['Панель — Формы','/panel?tab=forms'],
+        ['Панель — Доступы','/panel?tab=grants'],['Панель — Аккаунты','/panel?tab=accounts'],
+        ['Сообщить о баге','/bug'],['Скачать мои данные','/me/export.json']
+      ];
+      var ov=null,inp=null,lst=null,sel=0,items=[];
+      function close(){ if(ov){ov.remove();ov=null;} }
+      function build(){
+        ov=document.createElement('div');
+        ov.style.cssText='position:fixed;inset:0;z-index:400;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;padding-top:12vh';
+        ov.innerHTML='<div style="width:min(560px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.4)">'
+          +'<input id="palInp" placeholder="Куда перейти…" style="width:100%;border:0;padding:14px 16px;font-size:15px;background:var(--panel);color:var(--text);outline:none">'
+          +'<div id="palList" style="max-height:52vh;overflow:auto"></div></div>';
+        document.body.appendChild(ov);
+        inp=ov.querySelector('#palInp'); lst=ov.querySelector('#palList');
+        ov.addEventListener('click',function(e){ if(e.target===ov)close(); });
+        inp.addEventListener('input',render); inp.addEventListener('keydown',keys);
+        inp.focus(); render();
+      }
+      function render(){
+        var q=(inp.value||'').toLowerCase().trim();
+        items=PAL.filter(function(p){return !q||p[0].toLowerCase().indexOf(q)>=0||p[1].indexOf(q)>=0;}).slice(0,40);
+        if(q&&/^\\d{5,}$/.test(q)) items.unshift(['Профиль ID '+q,'/u/'+q]);
+        sel=0;
+        lst.innerHTML=items.map(function(p,i){return '<div class="palrow" data-i="'+i+'" style="padding:9px 16px;cursor:pointer;'+(i===0?'background:var(--panel2)':'')+'">'+p[0].replace(/</g,'&lt;')+' <span class="mini" style="opacity:.6">'+p[1]+'</span></div>';}).join('')||'<div style="padding:12px 16px" class="mini">ничего не найдено</div>';
+        Array.prototype.forEach.call(lst.querySelectorAll('.palrow'),function(r){ r.onclick=function(){ go(+r.dataset.i); }; });
+      }
+      function mark(){ Array.prototype.forEach.call(lst.querySelectorAll('.palrow'),function(r,i){ r.style.background=i===sel?'var(--panel2)':''; }); var a=lst.querySelector('.palrow[data-i="'+sel+'"]'); if(a)a.scrollIntoView({block:'nearest'}); }
+      function go(i){ var p=items[i]; if(p){ location.href=p[1]; } }
+      function keys(e){
+        if(e.key==='Escape'){close();return;}
+        if(e.key==='ArrowDown'){e.preventDefault();sel=Math.min(sel+1,items.length-1);mark();}
+        else if(e.key==='ArrowUp'){e.preventDefault();sel=Math.max(sel-1,0);mark();}
+        else if(e.key==='Enter'){e.preventDefault();go(sel);}
+      }
+      document.addEventListener('keydown',function(e){
+        if((e.ctrlKey||e.metaKey)&&(e.key==='k'||e.key==='K')){ e.preventDefault(); if(ov)close(); else build(); }
+      });
+    }catch(e){}
+    // Недавно просмотренные профили (только в этом браузере)
+    try{
+      var mProf=location.pathname.match(/^\\/u\\/([0-9]+)$/);
+      var recent=JSON.parse(localStorage.getItem('fc_recent')||'[]'); if(!Array.isArray(recent))recent=[];
+      if(mProf){
+        var nm=(document.querySelector('.phead h1')||document.querySelector('h1'));
+        nm=nm?nm.textContent.replace(/\\s+/g,' ').trim().slice(0,40):mProf[1];
+        recent=recent.filter(function(x){return x&&x.id!==mProf[1];});
+        recent.unshift({id:mProf[1],name:nm}); recent=recent.slice(0,8);
+        localStorage.setItem('fc_recent',JSON.stringify(recent));
+      }
+      var box=document.getElementById('fc-recent');
+      if(box&&recent.length){
+        box.innerHTML='<span class="mini">Недавно смотрели:</span> '+recent.map(function(x){
+          return '<a class="pill" href="/u/'+encodeURIComponent(x.id)+'">'+(x.name||x.id).replace(/</g,'&lt;')+'</a>';
+        }).join(' ');
+      }
+    }catch(e){}
     // Защита от двойной отправки: форма без onsubmit блокируется на 6 сек
     try{
       document.querySelectorAll('form').forEach(function(f){
@@ -613,8 +712,11 @@ function mdInline(s) {
   return replaceShortcodes(s)
     .replace(/!\[([^\]\n]*)\]\(((?:https?:)?\/[^\s)]+)\)/g, '<img src="$2" alt="$1" loading="lazy">')
     .replace(/\[([^\]\n]+)\]\(((?:https?:)?\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    // «текст(https://…)» без квадратных скобок — как в Discord: сам URL в ссылку
-    .replace(/(\()((?:https?:\/\/|www\.)[^\s)]+)(\))/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>$3')
+    // «текст(https://…)» без квадратных скобок — делаем сам «текст» ссылкой,
+    // а URL прячем. «текст» обязан начинаться и заканчиваться буквой/цифрой,
+    // чтобы не хватать голую пунктуацию вроде «см. (https://…)».
+    .replace(/([\p{L}\p{N}][\p{L}\p{N}._-]{0,58})\(((?:https?:\/\/|www\.)[^\s)]+)\)/gu,
+      (m, txt, u) => `<a href="${u.startsWith('www.') ? 'https://' + u : u}" target="_blank" rel="noopener">${txt}</a>`)
     // голые ссылки в тексте
     .replace(/(^|[\s(])((?:https?:\/\/|www\.)[^\s<)]+[^\s<).,;:!?"'])/g, (m, pre, u) => `${pre}<a href="${u.startsWith('www.') ? 'https://' + u : u}" target="_blank" rel="noopener">${u}</a>`)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
@@ -644,7 +746,49 @@ function mdToHtml(src) {
     out.push(mdInline(line) + '<br>');
   }
   closeLists();
-  return `<div class="md">${out.join('\n').replace(/%%CODEBLK(\d+)%%/g, (mm, i) => blocks[+i] || '')}</div>`;
+  let html = `<div class="md">${out.join('\n').replace(/%%CODEBLK(\d+)%%/g, (mm, i) => blocks[+i] || '')}</div>`;
+  // <@&id> / <@id> в пользовательских текстах → красивые чипы (а не сырой тег).
+  if (_mdClient) { try { html = renderMentions(_mdClient, html); } catch (_) {} }
+  return html;
+}
+let _mdClient = null;
+
+// Простой построчный diff (LCS) → HTML. Для истории версий страниц.
+function lineDiffHtml(oldText, newText) {
+  const a = String(oldText).split('\n');
+  const b = String(newText).split('\n');
+  const n = a.length; const m = b.length;
+  // Защита от OOM на огромном тексте — LCS-таблица O(n*m).
+  if (n > 1500 || m > 1500) {
+    const mx = Math.max(n, m);
+    const out2 = [];
+    for (let k = 0; k < mx; k++) {
+      const oldL = a[k]; const newL = b[k];
+      if (oldL === newL) out2.push(`<div style="white-space:pre-wrap;font-family:monospace;font-size:12.5px">  ${esc(oldL || '') || '&nbsp;'}</div>`);
+      else {
+        if (oldL !== undefined) out2.push(`<div style="background:color-mix(in srgb,var(--bad) 22%,transparent);white-space:pre-wrap;font-family:monospace;font-size:12.5px">− ${esc(oldL) || '&nbsp;'}</div>`);
+        if (newL !== undefined) out2.push(`<div style="background:color-mix(in srgb,var(--ok) 22%,transparent);white-space:pre-wrap;font-family:monospace;font-size:12.5px">+ ${esc(newL) || '&nbsp;'}</div>`);
+      }
+    }
+    return out2.join('') || '<span class="muted">Различий нет.</span>';
+  }
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0; let j = 0;
+  const line = (cls, pre, s) => `<div style="${cls}white-space:pre-wrap;font-family:monospace;font-size:12.5px">${pre}${esc(s) || '&nbsp;'}</div>`;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push(line('', '  ', a[i])); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push(line('background:color-mix(in srgb,var(--bad) 22%,transparent);', '− ', a[i])); i++; }
+    else { out.push(line('background:color-mix(in srgb,var(--ok) 22%,transparent);', '+ ', b[j])); j++; }
+  }
+  while (i < n) { out.push(line('background:color-mix(in srgb,var(--bad) 22%,transparent);', '− ', a[i++])); }
+  while (j < m) { out.push(line('background:color-mix(in srgb,var(--ok) 22%,transparent);', '+ ', b[j++])); }
+  return out.join('') || '<span class="muted">Различий нет.</span>';
 }
 
 // ---------- Настройки сайта (правит havirys, лежат в settings) ----------
@@ -742,13 +886,13 @@ function topbar(user, level, notif, panelGrant) {
   const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
   if (!user) {
     const gnav = (SITE._navPages || []).map((pg) => `<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`).join('');
-    const gtoggle = gnav ? `<button id="navtoggle" type="button" aria-label="Меню" onclick="var n=this.nextElementSibling;if(n)n.classList.toggle('open')">☰</button>` : '';
+    const gtoggle = gnav ? `<button id="navtoggle" type="button" aria-label="Меню" aria-expanded="false" onclick="var n=this.nextElementSibling;if(n){var o=n.classList.toggle('open');this.setAttribute('aria-expanded',o?'true':'false');}">☰</button>` : '';
     return `<div class="top">${gtoggle}<div class="left nav">${themeToggle()}${gnav}</div><div class="right"><a class="btn sm" href="/login">Войти</a>${brand}</div></div>`;
   }
   const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${notif ? `<b style="color:var(--bad)"> ${notif}</b>` : ''}</a>`;
   const bug = `<a href="/bug" class="tglbtn" style="text-decoration:none" title="Сообщить о баге">🐞</a>`;
   return `<div class="top">
-    <button id="navtoggle" type="button" aria-label="Меню" onclick="var n=document.querySelector('.top .left.nav');if(n)n.classList.toggle('open')">☰</button>
+    <button id="navtoggle" type="button" aria-label="Меню" aria-expanded="false" onclick="var n=document.querySelector('.top .left.nav');if(n){var o=n.classList.toggle('open');this.setAttribute('aria-expanded',o?'true':'false');}">☰</button>
     <div class="left nav">${navItems(level, panelGrant).join('')}</div>
     <div class="right">${bug}${bell}${themeToggle()}${brand}</div>
   </div>`;
@@ -843,7 +987,11 @@ async function landingBody(st) {
   ${SITE.hide_agitation === '1' ? '' : `<div class="card">
     <h2>${esc(SITE.agitation_title || 'Текущая агитация')}</h2>
     ${mdToHtml(ag.slice(0, 5000))}
-  </div>`}`;
+  </div>`}
+  ${(SITE.discord_widget === '1' && process.env.GUILD_ID) ? `<div class="card"><h2>Discord-сервер</h2>
+    <iframe src="https://discord.com/widget?id=${esc(process.env.GUILD_ID)}&theme=dark" width="100%" height="400" allowtransparency="true" frameborder="0" sandbox="allow-popups allow-popups-to-escape-sandbox allow-scripts allow-same-origin" style="border-radius:10px;max-width:400px"></iframe>
+    <p class="mini">Виджет должен быть включён в настройках сервера Discord (Настройки сервера → Виджет).</p>
+  </div>` : ''}`;
 }
 
 function statPlaceholders(st) {
@@ -943,6 +1091,7 @@ async function panelLanding(user) {
       ${cb('hide_stats', 'Спрятать «Организация в цифрах»')}
       ${cb('hide_giveaways', 'Спрятать «Идут розыгрыши»')}
       ${cb('hide_agitation', 'Спрятать «Текущую агитацию»')}
+      ${cb('discord_widget', 'Показывать виджет Discord-сервера на главной')}
       <label>Заголовок блока «Организация в цифрах»<input name="stats_title" value="${esc(SITE.stats_title || 'Организация в цифрах')}" maxlength="80"></label>
       <label>Плитки «в цифрах» — строка «Значение | Подпись». Значение: число или {участников} {паспортов} {контракты} {розыгрышей} {выполнено} {невыполнено} {вебпользователи}
         <textarea name="stats" rows="5" maxlength="1200">${esc(SITE.stats && SITE.stats.trim() ? SITE.stats : DEFAULT_STATS)}</textarea></label>
@@ -969,20 +1118,31 @@ async function panelLanding(user) {
   </div>${list}`;
 }
 
-async function panelGrants(client, user) {
-  const rows = await db.all("SELECT discord_id, COALESCE(subject_type,'user') st, tab, granted_by, granted_at FROM panel_grants ORDER BY st, discord_id").catch(() => []);
+async function panelGrants(client, user, sp) {
+  const rows = await db.all("SELECT discord_id, COALESCE(subject_type,'user') st, tab, granted_by, granted_at, expires_at FROM panel_grants ORDER BY st, discord_id").catch(() => []);
   const bySubject = new Map(); // key: st|id
   for (const r of rows) {
     const k = r.st + '|' + r.discord_id;
-    if (!bySubject.has(k)) bySubject.set(k, { st: r.st, id: r.discord_id, tabs: [], by: r.granted_by, at: r.granted_at });
+    if (!bySubject.has(k)) bySubject.set(k, { st: r.st, id: r.discord_id, tabs: [], by: r.granted_by, at: r.granted_at, exp: r.expires_at });
     bySubject.get(k).tabs.push(r.tab);
   }
+  // ?edit=role:<id> / ?edit=user:<id> — сервер сам подставляет субъект и галочки,
+  // не полагаясь на JS (раньше редактор не показывал уже выданные разделы).
+  const editRaw = (sp && sp.get && sp.get('edit')) || '';
+  const em = /^(role|user):([0-9]{5,25})$/.exec(editRaw);
+  const editSt = em ? em[1] : 'user';
+  const editId = em ? em[2] : '';
+  const editTabs = new Set((em && bySubject.get(editSt + '|' + editId) || { tabs: [] }).tabs);
   const label = (t) => (PANEL_TABS.find(([i]) => i === t) || [t, t])[1];
   const tabsList = PANEL_TABS.filter(([id]) => GRANTABLE_TABS.has(id));
   const g = guildOf(client);
+  const roleMemberCount = (r) => {
+    const n = r.members ? r.members.size : 0;
+    return n > 0 ? `${n} чел.` : 'кол-во ?';
+  };
   const roleOpts = g
     ? g.roles.cache.filter((r) => r.name !== '@everyone').sort((a, b) => b.position - a.position)
-      .map((r) => `<option value="${esc(r.id)}">${esc(r.name)} — ${r.members.size} чел.</option>`).join('')
+      .map((r) => `<option value="${esc(r.id)}"${editSt === 'role' && editId === r.id ? ' selected' : ''}>${esc(r.name)} — ${roleMemberCount(r)}</option>`).join('')
     : '';
   const subjName = (st, id) => {
     if (st !== 'role') return `${personLink(client, id)} <span class="mini">${esc(id)}</span>`;
@@ -992,9 +1152,9 @@ async function panelGrants(client, user) {
   const cur = [...bySubject.values()].map((info) => `<tr>
     <td>${subjName(info.st, info.id)}</td>
     <td>${info.tabs.map((t) => `<span class="pill">${esc(label(t))}</span>`).join(' ')}</td>
-    <td class="mini">${info.by ? personLink(client, info.by) : '—'} · ${fmt(info.at)}</td>
+    <td class="mini">${info.by ? personLink(client, info.by) : '—'} · ${fmt(info.at)}${info.exp ? `<br><span class="badge warn">до ${fmt(info.exp)}</span>` : ''}</td>
     <td style="white-space:nowrap">
-      <button class="btn ghost sm" type="button" onclick='fcGrantEdit(${JSON.stringify(info.st)}, ${JSON.stringify(info.id)}, ${JSON.stringify(info.tabs)})'>изменить</button>
+      <a class="btn ghost sm" href="/panel?tab=grants&edit=${esc(info.st)}:${esc(info.id)}">изменить</a>
       <form method="POST" action="/admin/grants/save" style="display:inline">${csrfField(user)}<input type="hidden" name="subject_type" value="${esc(info.st)}"><input type="hidden" name="subject_id" value="${esc(info.id)}"><button class="btn ghost sm" style="background:var(--bad)" type="submit" onclick="return confirm('Убрать все доступы у этого субъекта?')">убрать все</button></form>
     </td>
   </tr>`).join('');
@@ -1002,16 +1162,22 @@ async function panelGrants(client, user) {
   <div class="card"><h2>Выдать доступ к разделам панели</h2>
     <p class="mini">Доступ можно выдать <b>участнику</b> (по Discord ID) или <b>всем с ролью</b>. Инфраструктурные разделы (База данных, Админ, Права команд, Главная, Страницы) выдать нельзя.</p>
     <form method="POST" action="/admin/grants/save" class="form" id="grantForm">${csrfField(user)}
-      <label>Кому<select name="subject_type" id="grantType" onchange="fcGrantType()">
-        <option value="user">Конкретному участнику</option>
-        <option value="role">Всем с ролью</option>
+      <label>Кому<select name="subject_type" id="grantType" onchange="fcGrantType();fcGrantAuto()">
+        <option value="user"${editSt === 'user' ? ' selected' : ''}>Конкретному участнику</option>
+        <option value="role"${editSt === 'role' ? ' selected' : ''}>Всем с ролью</option>
       </select></label>
-      <label id="grantUserRow">Discord ID участника<input name="subject_user" id="grantUser" pattern="[0-9]{5,25}" maxlength="25" oninput="fcGrantAuto()"></label>
-      <label id="grantRoleRow" style="display:none">Роль<select name="subject_role" id="grantRole" onchange="fcGrantAuto()">${roleOpts || '<option value="">(бот офлайн — ролей нет)</option>'}</select></label>
-      <div class="mini" id="grantHint" style="margin:2px 0 6px"></div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px;margin:8px 0">
-        ${tabsList.map(([id, lbl]) => `<label class="chk"><input type="checkbox" name="tab" value="${id}"><span>${esc(lbl)}</span></label>`).join('')}
+      <label id="grantUserRow"${editSt === 'role' ? ' style="display:none"' : ''}>Discord ID участника<input name="subject_user" id="grantUser" pattern="[0-9]{5,25}" maxlength="25" oninput="fcGrantAuto()" value="${editSt === 'user' ? esc(editId) : ''}"></label>
+      <label id="grantRoleRow"${editSt === 'role' ? '' : ' style="display:none"'}>Роль<select name="subject_role" id="grantRole" onchange="fcGrantAuto()">${roleOpts || '<option value="">(бот офлайн — ролей нет)</option>'}</select></label>
+      <div class="mini" id="grantHint" style="margin:2px 0 6px">${editId ? (editTabs.size ? `Сейчас выдано: ${editTabs.size} разд. — отмечены ниже, меняйте и сохраняйте.` : 'Этому субъекту доступы ещё не выдавались.') : ''}</div>
+      <div class="bar" style="flex-wrap:wrap;gap:4px;margin:4px 0">
+        <span class="mini">Пресет:</span>
+        ${[['HR-помощник', ['apps', 'queues', 'contracts_check']], ['Модератор ЧС', ['blacklist', 'queues']], ['Аналитик', ['overview', 'sla', 'members', 'contracts', 'invites']]]
+          .map(([nm, ts]) => `<button type="button" class="btn ghost sm" onclick='var s=${JSON.stringify(ts)};document.querySelectorAll("#grantForm input[name=tab]").forEach(function(c){c.checked=s.indexOf(c.value)>=0})'>${esc(nm)}</button>`).join('')}
       </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:4px;margin:8px 0">
+        ${tabsList.map(([id, lbl]) => `<label class="chk"><input type="checkbox" name="tab" value="${id}"${editTabs.has(id) ? ' checked' : ''}><span>${esc(lbl)}</span></label>`).join('')}
+      </div>
+      <label>Действует до (необязательно — иначе бессрочно)<input type="date" name="expires_at"></label>
       <div class="bar">
         <button class="btn sm" type="submit">Сохранить доступы</button>
         <button class="btn ghost sm" type="button" onclick="document.querySelectorAll('#grantForm input[name=tab]').forEach(function(c){c.checked=true})">отметить все</button>
@@ -1020,30 +1186,33 @@ async function panelGrants(client, user) {
     </form>
     <script>
     var GRANT_MAP=${JSON.stringify(Object.fromEntries([...bySubject.values()].map((i) => [i.st + '|' + i.id, i.tabs])))};
+    // Только переключение видимости полей — галочки НЕ трогаем (их ставит сервер).
     function fcGrantType(){var t=document.getElementById('grantType').value;
       document.getElementById('grantUserRow').style.display=t==='user'?'':'none';
-      document.getElementById('grantRoleRow').style.display=t==='role'?'':'none';
-      fcGrantAuto();}
+      document.getElementById('grantRoleRow').style.display=t==='role'?'':'none';}
+    // Подставляет уже выданные галочки при смене субъекта пользователем.
     function fcGrantAuto(){
       var f=document.getElementById('grantForm'), st=document.getElementById('grantType').value;
       var id=st==='role'?f.subject_role.value:(f.subject_user.value||'').trim();
       var have=GRANT_MAP[st+'|'+id];
-      var s=new Set(have||[]);
-      f.querySelectorAll('input[name=tab]').forEach(function(c){c.checked=s.has(c.value)});
+      if(id){
+        var s=new Set(have||[]);
+        f.querySelectorAll('input[name=tab]').forEach(function(c){c.checked=s.has(c.value)});
+      }
       document.getElementById('grantHint').textContent=have?('Сейчас выдано: '+have.length+' разд. — отмечено ниже, меняйте и сохраняйте.'):(id?'Этому субъекту доступы ещё не выдавались.':'');
     }
-    function fcGrantEdit(st,id,tabs){var f=document.getElementById('grantForm');
-      document.getElementById('grantType').value=st; fcGrantType();
-      if(st==='role')f.subject_role.value=id; else f.subject_user.value=id;
-      var s=new Set(tabs); f.querySelectorAll('input[name=tab]').forEach(function(c){c.checked=s.has(c.value)});
-      document.getElementById('grantHint').textContent='Редактирование: '+tabs.length+' разд.';
-      f.scrollIntoView({behavior:'smooth'});}
     fcGrantType();
     </script>
   </div>
   <div class="card"><h2>Кому сейчас выдан доступ (${bySubject.size})</h2>
     <div class="tablewrap"><table><tr><th>Субъект</th><th>Разделы</th><th>Кем выдано</th><th></th></tr>
       ${cur || '<tr><td colspan="4">пока никому</td></tr>'}
+    </table></div>
+  </div>
+  <div class="card"><h2>История изменений доступов</h2>
+    <div class="tablewrap"><table><tr><th>Когда</th><th>Кто</th><th>Что</th></tr>
+      ${(await db.all("SELECT at, actor_tag, details FROM audit_log WHERE action LIKE '%оступы к панели%' ORDER BY id DESC LIMIT 30").catch(() => []))
+        .map((a) => `<tr><td class="muted">${fmt(a.at)}</td><td class="mini">${esc(a.actor_tag || '—')}</td><td class="mini">${renderMentions(client, esc((a.details || '').slice(0, 200)))}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
     </table></div>
   </div>`;
 }
@@ -1073,7 +1242,8 @@ async function panelPages(client, user) {
     const verHtml = vers.length ? `<details style="margin-top:8px"><summary class="mini" style="cursor:pointer">история версий (${vers.length})</summary>
       <div class="tablewrap" style="margin-top:6px"><table><tr><th>Когда</th><th>Кто</th><th></th></tr>
         ${vers.map((v) => `<tr><td class="muted">${fmt(v.saved_at)}</td><td>${personLink(client, v.saved_by)}</td>
-          <td><form method="POST" action="/admin/page/revert" style="display:inline">${csrfField(user)}<input type="hidden" name="vid" value="${v.id}"><button class="btn ghost sm" type="submit" onclick="return confirm('Откатить страницу к этой версии? Текущая уйдёт в историю.')">откатить</button></form></td></tr>`).join('')}
+          <td style="white-space:nowrap"><a class="btn ghost sm" href="/panel/page_diff?slug=${esc(p.slug)}&vid=${v.id}">разница</a>
+          <form method="POST" action="/admin/page/revert" style="display:inline">${csrfField(user)}<input type="hidden" name="vid" value="${v.id}"><button class="btn ghost sm" type="submit" onclick="return confirm('Откатить страницу к этой версии? Текущая уйдёт в историю.')">откатить</button></form></td></tr>`).join('')}
       </table></div></details>` : '';
     list.push(`<div class="card">
     <form method="POST" action="/admin/page/save" class="form">${csrfField(user)}<input type="hidden" name="orig" value="${esc(p.slug)}">
@@ -1082,8 +1252,10 @@ async function panelPages(client, user) {
       <label>Содержимое (форматирование как в Discord)<textarea name="content" data-md rows="8" maxlength="20000">${esc(p.content || '')}</textarea></label>
       <label class="chk"><input type="checkbox" name="nav" value="1" ${p.nav ? 'checked' : ''}><span>Показывать пункт в меню шапки</span></label>
       <label class="chk"><input type="checkbox" name="published" value="1" ${(p.published == null || p.published) ? 'checked' : ''}><span>Опубликована (снять — черновик, видит только havirys)</span></label>
+      <label>Авто-публикация в (необязательно — если время в будущем, страница опубликуется сама)<input type="datetime-local" name="publish_at" value="${p.publish_at ? esc(String(p.publish_at).slice(0, 16)) : ''}"></label>
       <div class="bar">
         ${!p.published && p.published != null ? '<span class="badge warn">черновик</span>' : ''}
+        ${p.publish_at && !p.published ? `<span class="badge">публикация ${fmt(p.publish_at)}</span>` : ''}
         <button class="btn sm" type="submit">Сохранить</button>
         <a class="btn ghost sm" href="/p/${esc(p.slug)}" target="_blank">Открыть</a>
         <button class="btn ghost sm" formaction="/admin/page/del" style="background:var(--bad)" type="submit" onclick="return confirm('Удалить страницу?')">Удалить</button>
@@ -1133,13 +1305,19 @@ async function myGiveawaysCard(did) {
   for (const g of [...mine, ...wonExtra]) byId.set(g.id, g);
   const rows = [...byId.values()].sort((a, b) => b.id - a.id);
   if (!rows.length) return '';
-  const won = rows.filter((g) => (g.winners || '').split(',').includes(did)).length;
+  const winRows = rows.filter((g) => (g.winners || '').split(',').includes(did));
+  const won = winRows.length;
   const list = rows.map((g) => {
     const iWon = (g.winners || '').split(',').includes(did);
     const st = g.status === 'active' ? `идёт, до ${fmt(g.ends_at)}` : (iWon ? '🏆 победа' : 'участвовал');
     return `<tr><td><a href="/g/${g.id}">${esc(g.prize)}</a></td><td>${st}</td></tr>`;
   }).join('');
+  const winsBlock = won
+    ? `<h3 style="font-size:14px;margin:6px 0">🏆 Ваши выигрыши (${won})</h3>
+       <div class="bar" style="flex-wrap:wrap;gap:4px;margin-bottom:8px">${winRows.map((g) => `<a class="pill" href="/g/${g.id}">${esc(g.prize)}</a>`).join('')}</div>`
+    : '';
   return `<div class="card"><h2>Мои розыгрыши (${rows.length}${won ? `, побед: ${won}` : ''})</h2>
+    ${winsBlock}
     <div class="tablewrap"><table><tr><th>Приз</th><th>Статус</th></tr>${list}</table></div></div>`;
 }
 
@@ -1175,6 +1353,7 @@ async function meBody(client, user) {
     <div class="tablewrap"><table><tr><th>Когда</th><th>IP</th><th>Браузер</th></tr>
       ${logins.map((l) => `<tr><td class="muted">${fmt(l.at)}</td><td>${esc(l.ip || '—')}</td><td class="mini">${esc((l.ua || '—').slice(0, 90))}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
     </table></div>
+    <p class="mini" style="margin-top:10px"><a href="/me/export.json">⬇ Скачать все мои данные (JSON)</a></p>
   </div>`;
 
   const icalTok = await getIcalToken(did).catch(() => null);
@@ -1229,6 +1408,7 @@ async function meBody(client, user) {
       <div class="muted">Discord: ${esc(user.username)} · ID ${esc(did)} · вступил ${fmt(p.joined_at)} · <a href="/u/${esc(did)}">полный профиль</a> · <a href="/u/${esc(did)}/card">карточка</a> · <a href="/compare">сравнить с другим</a></div>
       <div style="margin-top:8px">${logoutBtn}</div>
     </div></div>
+    <div class="mecols">
     <div class="card"><h2>Роли на сервере</h2>${roleTags}</div>
     ${await myProgressCard(client, did, p)}
     <div class="card"><h2>Паспорта (${passports.length})</h2>
@@ -1240,6 +1420,9 @@ async function meBody(client, user) {
     <div class="card"><h2>Контракты за ${esc(contracts.formatWeekLabel(range))}</h2>
       <span class="badge ok">✅ выполнено ${week.fulfilled.length}</span>
       <span class="badge bad">❌ не выполнено ${week.unfulfilled.length}</span>
+      ${(() => { const norm = config.WEEKLY_PROMOTION_CONTRACT_THRESHOLD || 3; const pct = Math.min(100, Math.round(week.fulfilled.length / norm * 100));
+        return `<div style="margin-top:8px"><div class="mini">Для повышения на этой неделе засчитано <b>${week.fulfilled.length}</b> из ${norm}${week.fulfilled.length >= norm ? ' — порог набран ✅' : ` (ещё ${norm - week.fulfilled.length} для стрика повышения)`}. Обязательной нормы нет.</div>
+        <div class="progress"><i style="width:${pct}%"></i></div></div>`; })()}
     </div>
     ${badgesCard(bs, p.pinned_badges)}
     <div class="card"><h2>Закрепить бейджи</h2>
@@ -1266,7 +1449,8 @@ async function meBody(client, user) {
     ${await memberActionsExtra(client, user, p, passports, acc)}
     ${icalCard}
     ${loginsCard}
-    ${memberForms(user, passports, canAppeal)}`;
+    ${memberForms(user, passports, canAppeal)}
+    </div>`;
 }
 
 // ---------- Панель управления ----------
@@ -1310,14 +1494,22 @@ async function panelActionAllowed(client, user, acc, tab) {
   return (await getPanelGrants(client, user && user.id)).has(tab);
 }
 const _grantsCache = new Map(); // discordId -> { at, set:Set }
+let _grantsPurgeAt = 0;
 // Разделы, выданные участнику лично + всем его ролям.
 async function getPanelGrants(client, discordId) {
   if (!discordId) return new Set();
   const hit = _grantsCache.get(discordId);
   if (hit && Date.now() - hit.at < 30000) return hit.set;
   const set = new Set();
+  const nowIso = new Date().toISOString();
+  const NOT_EXPIRED = "(expires_at IS NULL OR expires_at > ?)";
   try {
-    const uRows = await db.all("SELECT tab FROM panel_grants WHERE discord_id = ? AND COALESCE(subject_type,'user') = 'user'", [String(discordId)]);
+    // чистим протухшие не чаще раза в 10 минут на весь процесс
+    if (Date.now() - _grantsPurgeAt > 600000) {
+      _grantsPurgeAt = Date.now();
+      db.run('DELETE FROM panel_grants WHERE expires_at IS NOT NULL AND expires_at <= ?', [nowIso]).catch(() => {});
+    }
+    const uRows = await db.all(`SELECT tab FROM panel_grants WHERE discord_id = ? AND COALESCE(subject_type,'user') = 'user' AND ${NOT_EXPIRED}`, [String(discordId), nowIso]);
     for (const r of uRows) set.add(r.tab);
     // роли участника
     let roleIds = [];
@@ -1328,7 +1520,7 @@ async function getPanelGrants(client, discordId) {
     } catch (_) {}
     if (roleIds.length) {
       const ph = roleIds.map(() => '?').join(',');
-      const rRows = await db.all(`SELECT tab FROM panel_grants WHERE subject_type = 'role' AND discord_id IN (${ph})`, roleIds);
+      const rRows = await db.all(`SELECT tab FROM panel_grants WHERE subject_type = 'role' AND discord_id IN (${ph}) AND ${NOT_EXPIRED}`, [...roleIds, nowIso]);
       for (const r of rRows) set.add(r.tab);
     }
   } catch (_) {}
@@ -1372,7 +1564,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'sla') body = await panelSla(client, user, pageNum);
   else if (tab === 'apps') body = await panelApps(client, user, pageNum);
   else if (tab === 'queues') body = await panelQueues(client, user, pageNum);
-  else if (tab === 'contracts_check') body = await panelContractCheck(client, user, pageNum);
+  else if (tab === 'contracts_check') body = await panelContractCheck(client, user, pageNum, sp);
   else if (tab === 'role_check') body = await panelRoleCheck(client, user);
   else if (tab === 'members') body = await panelMembers(client, pageNum, user);
   else if (tab === 'contracts') body = await panelContracts(client);
@@ -1390,7 +1582,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'admin') body = await panelAdmin(client, user);
   else if (tab === 'landing') body = await panelLanding(user);
   else if (tab === 'pages') body = await panelPages(client, user);
-  else if (tab === 'grants') body = await panelGrants(client, user);
+  else if (tab === 'grants') body = await panelGrants(client, user, sp);
   else if (tab === 'accounts') body = await panelAccounts(client, user);
   else if (tab === 'data') body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
@@ -1603,6 +1795,8 @@ async function panelGiveaways(client, acc, user) {
         <label>ID канала для публикации<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
         <label>ID обязательной роли — только эта роль (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
         <label>ID минимальной роли — этот ранг и ВЫШЕ (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Мин. выполненных контрактов за эту неделю (необязательно)<input name="min_contracts_week" type="number" min="0" max="99"></label>
+        <label class="chk"><input type="checkbox" name="weight_by_contracts" value="1"><span>Бонус-билеты за активность: шанс победы растёт с числом контрактов за неделю (1 + контракты, максимум ×10)</span></label>
         <label>Призовые места (необязательно) — строка «место | приз», напр. «1 | Машина», «2-3 | 500к»<textarea name="prize_tiers" rows="3" maxlength="800" placeholder="1 | Главный приз&#10;2-3 | Утешительный приз"></textarea></label>
         <button class="btn" type="submit">Создать и опубликовать</button>
       </form>
@@ -1706,8 +1900,7 @@ async function panelData(client, table, pageNum, user, sp) {
   const q = sp ? (sp.get('q') || '').trim() : '';
   const sortReq = sp ? (sp.get('sort') || '') : '';
   const dir = sp && sp.get('dir') === 'asc' ? 'ASC' : 'DESC';
-  let info = [];
-  try { info = await db.all(`PRAGMA table_info(${table})`); } catch (_) {}
+  const info = await tableInfo(table);
   const colNames = info.map((ci) => ci.name);
   const sortCol = colNames.includes(sortReq) ? sortReq : 'rowid';
 
@@ -1753,7 +1946,13 @@ async function panelData(client, table, pageNum, user, sp) {
       ${q ? `<a class="btn ghost sm" href="/panel?tab=data&table=${esc(table)}">сброс</a>` : ''}
     </form>
     <h2>${esc(title)} — найдено ${total}</h2>
-    ${canEdit ? `<p class="muted" style="margin-bottom:10px">Режим редактирования (havirys): ✏️ — изменить строку. ${addBtn} <a class="btn ghost sm" href="/export/table/${esc(table)}.csv">⬇ Скачать всю таблицу CSV</a></p>` : ''}
+    ${canEdit ? `<p class="muted" style="margin-bottom:10px">Режим редактирования (havirys): ✏️ — изменить строку. ${addBtn} <a class="btn ghost sm" href="/export/table/${esc(table)}.csv">⬇ Скачать всю таблицу CSV</a></p>
+    <details style="margin-bottom:10px"><summary class="mini">CSV с выбором колонок</summary>
+      <form method="GET" action="/export/table/${esc(table)}.csv" class="bar" style="flex-wrap:wrap;gap:4px;margin-top:6px">
+        ${colNames.map((c) => `<label class="chk"><input type="checkbox" name="cols" value="${esc(c)}" checked><span>${esc(c)}</span></label>`).join('')}
+        <button class="btn ghost sm" type="submit">⬇ Скачать выбранное</button>
+      </form>
+    </details>` : ''}
     <div class="tablewrap"><table><tr>${head}</tr>${trs || '<tr><td>—</td></tr>'}</table></div>
     ${pager(`/panel?tab=data&${baseQ}&sort=${sortCol}&dir=${dir.toLowerCase()}`, pageNum, total)}
   </div>`;
@@ -1771,8 +1970,53 @@ function pager(baseHref, pageNum, total) {
 // ============ v3: запись через сайт ============
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits, ChannelType } = dj;
 
+let _guildRef = null;
 function guildOf(client) {
-  return client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
+  if (_guildRef) return _guildRef;
+  const g = client && process.env.GUILD_ID ? client.guilds.cache.get(process.env.GUILD_ID) : null;
+  if (g) _guildRef = g; // кэшируем только когда бот уже подключён (объект стабильный)
+  return g;
+}
+
+// Подписанная временная ссылка на /cimg/<id> — открывается без входа на сайт
+// (для скринов в сообщениях Discord: кодовое слово и т.п.). Живёт 30 дней.
+function signedCimgUrl(idOrUrl) {
+  const m = /\/cimg\/(\d+)/.exec(String(idOrUrl || ''));
+  const id = m ? m[1] : String(idOrUrl || '');
+  if (!/^\d+$/.test(id)) return String(idOrUrl || '');
+  const exp = Date.now() + 30 * 864e5;
+  return `${baseUrl()}/cimg/${id}?t=${exp}.${sign('cimg:' + id + ':' + exp)}`;
+}
+function cimgTokenOk(id, tq) {
+  const p = String(tq || '').split('.');
+  if (p.length !== 2 || !/^\d+$/.test(p[0]) || Number(p[0]) < Date.now()) return false;
+  try {
+    const exp2 = sign('cimg:' + id + ':' + p[0]);
+    return p[1].length === exp2.length && crypto.timingSafeEqual(Buffer.from(p[1]), Buffer.from(exp2));
+  } catch (_) { return false; }
+}
+
+// Ссылка на пруф контракта: если это картинка (наш /cimg/... или .png/.jpg) —
+// показываем миниатюрой; иначе обычной ссылкой (напр. на сообщение Discord).
+function contractProof(url, label) {
+  if (!url) return '';
+  const u = String(url);
+  const isImg = /\/cimg\/\d+/.test(u) || /\.(png|jpe?g|webp|gif)(\?|$)/i.test(u);
+  if (isImg) {
+    return `<a href="${esc(u)}" target="_blank" rel="noopener" title="${esc(label)}"><img src="${esc(u)}" alt="${esc(label)}" loading="lazy" style="max-width:150px;max-height:110px;border-radius:8px;border:1px solid var(--line);vertical-align:middle;margin:2px 6px 2px 0"></a>`;
+  }
+  return `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+}
+
+// PRAGMA table_info кэшируется — схема во время работы не меняется (только
+// на старте в db.init). Экономит запрос на каждом открытии редактора БД / правке.
+const _tblInfoCache = new Map();
+async function tableInfo(table) {
+  if (_tblInfoCache.has(table)) return _tblInfoCache.get(table);
+  let info = [];
+  try { info = await db.all(`PRAGMA table_info(${table})`); } catch (_) {}
+  if (info.length) _tblInfoCache.set(table, info);
+  return info;
 }
 // Есть ли этот Discord-аккаунт сейчас на сервере организации.
 async function memberOfGuild(client, discordId) {
@@ -1825,24 +2069,24 @@ function csrfField(user) {
 }
 
 // Анонимный CSRF-токен (для форм входа/регистрации, где ещё нет пользователя):
-// привязан к IP и подписан общим секретом, живёт 2 часа.
-function anonCsrf(ip) {
-  const base = `anon.${ip || '0'}.${Math.floor(Date.now() / 1000)}`;
-  return `${base}.${sign(base)}`;
+// подписанная метка времени, живёт 2 часа. Разделитель «|» — в base64url и в
+// метке его нет (а IP не кладём: у IPv4/IPv6 есть точки/двоеточия).
+function anonCsrf() {
+  const base = `anon|${Math.floor(Date.now() / 1000)}`;
+  return `${base}|${sign(base)}`;
 }
-function anonCsrfOk(ip, token) {
-  const p = String(token || '').split('.');
-  if (p.length !== 4 || p[0] !== 'anon') return false;
-  const base = p.slice(0, 3).join('.');
+function anonCsrfOk(_ip, token) {
+  const p = String(token || '').split('|');
+  if (p.length !== 3 || p[0] !== 'anon') return false;
+  const base = `${p[0]}|${p[1]}`;
   try {
     const exp = sign(base);
-    if (p[3].length !== exp.length || !crypto.timingSafeEqual(Buffer.from(p[3]), Buffer.from(exp))) return false;
+    if (p[2].length !== exp.length || !crypto.timingSafeEqual(Buffer.from(p[2]), Buffer.from(exp))) return false;
   } catch (_) { return false; }
-  if (p[1] !== String(ip || '0')) return false;
-  return (Date.now() / 1000 - Number(p[2])) < 7200;
+  return (Date.now() / 1000 - Number(p[1])) < 7200;
 }
-function anonCsrfField(ip) {
-  return `<input type="hidden" name="_csrf" value="${esc(anonCsrf(ip))}">`;
+function anonCsrfField() {
+  return `<input type="hidden" name="_csrf" value="${esc(anonCsrf())}">`;
 }
 
 // ---------- Пароли локальных аккаунтов (scrypt, без сторонних зависимостей) ----------
@@ -2171,7 +2415,7 @@ function imgOrUrlFields(dataName, urlName, fileLabel) {
 }
 // Один обработчик на все формы «скрин или ссылка»: сжимает выбранные файлы и шлёт.
 const IMGFORM_SCRIPT = `
-function fcImgFormSubmit(f){
+if(!window.fcImgFormSubmit) window.fcImgFormSubmit=function fcImgFormSubmit(f){
   var hid=f.querySelectorAll('input[type=file][data-img]'), pending=0;
   function done(){
     var okAll=true;
@@ -2194,7 +2438,7 @@ function fcImgFormSubmit(f){
     img.src=url; });
   if(pending===0)done();
   return false;
-}`;
+};`;
 
 // Доп. действия участника: контракты в работе, кодовое слово, заявка на HR, возврат из AFK.
 async function memberActionsExtra(client, user, p, passports, acc) {
@@ -2242,16 +2486,25 @@ async function memberActionsExtra(client, user, p, passports, acc) {
     </form>` : '<p class="mini">Нужен паспорт.</p>'}
   </div>`;
 
-  // Заявка на HR (если ещё не HR и нет открытой заявки)
+  // Заявка на HR (если ещё не HR и нет открытой заявки) + статус последней
   let hrCard = '';
   if (acc.rank < LEVELS.hr) {
-    const hrPend = await db.get("SELECT id FROM hr_applications WHERE discord_id = ? AND status = 'pending'", [did]).catch(() => null);
+    const hrLast = await db.get("SELECT id, status, reject_reason, created_at FROM hr_applications WHERE discord_id = ? ORDER BY id DESC LIMIT 1", [did]).catch(() => null);
+    const hrPend = hrLast && hrLast.status === 'pending';
+    const statusLine = hrLast
+      ? (hrLast.status === 'pending'
+        ? `<p class="mini">Ваша заявка от ${fmt(hrLast.created_at)} — <span class="badge warn">на рассмотрении</span></p>`
+        : hrLast.status === 'accepted'
+          ? `<p class="mini">Последняя заявка — <span class="badge ok">принята</span> ${fmt(hrLast.created_at)}</p>`
+          : `<p class="mini">Последняя заявка (${fmt(hrLast.created_at)}) — <span class="badge bad">отклонена</span>${hrLast.reject_reason ? `: ${esc(hrLast.reject_reason)}` : ''}</p>`)
+      : '';
     hrCard = `<div class="card"><h2>Подать заявку на HR-Менеджера</h2>
-      ${hrPend ? '<p class="mini">Ваша заявка уже на рассмотрении.</p>' : `
+      ${statusLine}
+      ${hrPend ? '' : `
       <form method="POST" action="/me/hr_apply" class="form">${csrfField(user)}
         <label>Часов в неделю в игре<input name="hours_per_week" required maxlength="60"></label>
         <label>Когда готовы пройти мини-обучение<input name="training_ready" required maxlength="120"></label>
-        <button class="btn" type="submit">Отправить заявку</button>
+        <button class="btn" type="submit">${hrLast ? 'Подать заявку снова' : 'Отправить заявку'}</button>
       </form>`}
     </div>`;
   }
@@ -2365,7 +2618,7 @@ async function panelBlacklist(client, user) {
 async function rowEditBody(client, user, table, pk) {
   const def = DATA_TABLES[table];
   if (!def) return '<div class="card">Неизвестная таблица.</div>';
-  const info = await db.all(`PRAGMA table_info(${table})`);
+  const info = await tableInfo(table);
   const rowObj = await db.get(`SELECT rowid AS __rid, * FROM ${table} WHERE rowid = ?`, [pk]);
   if (!rowObj) return '<div class="card">Строка не найдена.</div>';
   const fields = info.map((ci) => {
@@ -2399,7 +2652,7 @@ async function rowEditBody(client, user, table, pk) {
 async function rowNewBody(client, user, table) {
   const def = DATA_TABLES[table];
   if (!def) return '<div class="card">Неизвестная таблица.</div>';
-  const info = await db.all(`PRAGMA table_info(${table})`);
+  const info = await tableInfo(table);
   const fields = info.filter((ci) => !(ci.pk && /INT/i.test(ci.type))).map((ci) =>
     `<label>${esc(ci.name)} <span class="muted">${esc(ci.type)}</span><input name="f_${esc(ci.name)}"></label>`).join('');
   return `
@@ -2479,6 +2732,7 @@ async function peopleBody(client, acc, query, pageNum, user) {
     : tableBlock;
   return `
   <h1>Участники</h1>
+  <div id="fc-recent" class="bar" style="flex-wrap:wrap;gap:4px;margin-bottom:8px"></div>
   <div class="card">
     <form method="GET" action="/people" class="form">
       <label>Поиск по имени / паспорту / Discord ID<input name="q" value="${esc(q)}" maxlength="60"></label>
@@ -2514,16 +2768,19 @@ async function profileBody(client, viewer, acc, targetId) {
   const week = await contracts.getUserWeekStats(targetId, range);
   const invRow = await db.get("SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed'", [targetId]);
   const hist = await history.getHistory(targetId).catch(() => []);
-  const contractHist = await db.all("SELECT status, submitted_at, reviewed_at, message_url FROM contracts WHERE discord_id = ? ORDER BY COALESCE(submitted_at, reviewed_at) DESC LIMIT 40", [targetId]).catch(() => []);
+  const contractHist = await db.all("SELECT status, submitted_at, reviewed_at, message_url, taken_message_url FROM contracts WHERE discord_id = ? ORDER BY COALESCE(submitted_at, reviewed_at) DESC LIMIT 40", [targetId]).catch(() => []);
   const thanksRows = await db.all('SELECT from_id, note, created_at FROM thanks WHERE to_id = ? ORDER BY id DESC LIMIT 30', [targetId]).catch(() => []);
   const thanksCnt = thanksRows.length;
   const badgeAwards = await db.all('SELECT badge_key, awarded_at FROM badge_awards WHERE discord_id = ? ORDER BY awarded_at DESC LIMIT 20', [targetId]).catch(() => []);
-  // 12 недель контрактов для спарклайна
-  const sparkWeeks = [];
-  for (let w = 11; w >= 0; w--) {
-    const r = contracts.getWeekRange(w);
-    const c = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [targetId, r.start.toISOString(), r.end.toISOString()]).catch(() => null);
-    sparkWeeks.push(c ? c.c : 0);
+  // 12 недель контрактов для спарклайна — одним запросом, раскладываем по неделям в памяти
+  const spWk = [];
+  for (let w = 11; w >= 0; w--) { const r = contracts.getWeekRange(w); spWk.push([r.start.getTime(), r.end.getTime()]); }
+  const oldest = spWk[0][0];
+  const sparkWeeks = new Array(12).fill(0);
+  const spRows = await db.all("SELECT submitted_at FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at >= ?", [targetId, new Date(oldest).toISOString()]).catch(() => []);
+  for (const row of spRows) {
+    const t = new Date(row.submitted_at).getTime();
+    for (let i = 0; i < 12; i++) { if (t >= spWk[i][0] && t <= spWk[i][1]) { sparkWeeks[i]++; break; } }
   }
   const nicks = await db.all('SELECT * FROM nickname_history WHERE discord_id = ? ORDER BY id DESC LIMIT 20', [targetId]).catch(() => []);
   const promos = await db.all(
@@ -2631,7 +2888,7 @@ async function profileBody(client, viewer, acc, targetId) {
   const chRows = contractHist.map((c) => `<tr>
     <td class="muted">${fmt(c.submitted_at || c.reviewed_at)}</td>
     <td><span class="badge ${c.status === 'fulfilled' ? 'ok' : c.status === 'unfulfilled' ? 'bad' : 'warn'}">${esc(ruStatus(c.status))}</span></td>
-    <td>${c.message_url ? `<a href="${esc(c.message_url)}" target="_blank" rel="noopener">открыть</a>` : '—'}</td>
+    <td>${[contractProof(c.taken_message_url, 'взял'), contractProof(c.message_url, 'итог')].filter(Boolean).join(' ') || '—'}</td>
   </tr>`).join('');
   const selfOrHr = (viewer && viewer.id === targetId) || canHr;
   const aboutHidden = p.about_private && !selfOrHr;
@@ -2829,11 +3086,33 @@ function zipStore(files) {
 }
 
 // ---------- Дашборд / аналитика (HR+) ----------
+const _dashCache = new Map(); // days -> { at, html }
 async function dashboardBody(client, periodDays) {
+  const dKey = String(periodDays || '30');
+  const hit = _dashCache.get(dKey);
+  if (hit && Date.now() - hit.at < 90000) return hit.html;
+  const html = await dashboardBodyBuild(client, periodDays);
+  _dashCache.set(dKey, { at: Date.now(), html });
+  return html;
+}
+async function dashboardBodyBuild(client, periodDays) {
   const c = (sql, p = []) => db.get(sql, p).then((r) => (r ? r.c : 0));
-  const days = [7, 30, 90].includes(+periodDays) ? +periodDays : 30;
+  const dNum = parseInt(periodDays, 10);
+  const days = Number.isFinite(dNum) && dNum >= 1 && dNum <= 366 ? dNum : 30;
   const since30 = new Date(Date.now() - days * 864e5).toISOString();
-  const periodBar = `<div class="bar"><span class="mini">Период:</span>${[7, 30, 90].map((d) => `<a class="btn ${d === days ? '' : 'ghost '}sm" href="/dashboard?days=${d}">${d} дн.</a>`).join('')}</div>`;
+  const periodBar = `<div class="bar" style="flex-wrap:wrap"><span class="mini">Период:</span>
+    ${[7, 30, 90, 180].map((d) => `<a class="btn ${d === days ? '' : 'ghost '}sm" href="/dashboard?days=${d}">${d} дн.</a>`).join('')}
+    <form method="GET" action="/dashboard" style="display:inline-flex;gap:4px"><input name="days" type="number" min="1" max="366" value="${days}" style="width:70px"><button class="btn ghost sm" type="submit">свой</button></form>
+  </div>`;
+
+  // Удовлетворённость тикетами за период (#40)
+  const tr = await db.all("SELECT rating FROM tickets WHERE rating IS NOT NULL AND rated_at >= ?", [since30]).catch(() => []);
+  const tUp = tr.filter((x) => x.rating).length;
+  const satCard = `<div class="card"><h2>Оценки закрытых тикетов за ${days} дн.</h2>
+    ${tr.length ? `<div class="grid"><div class="tile"><div class="n">👍 ${tUp}</div><div class="l">помогло</div></div>
+      <div class="tile"><div class="n">👎 ${tr.length - tUp}</div><div class="l">не помогло</div></div>
+      <div class="tile"><div class="n">${Math.round((tUp / tr.length) * 100)}%</div><div class="l">довольны</div></div></div>`
+      : '<span class="muted">За период оценок не было.</span>'}</div>`;
 
   const apps = await db.all('SELECT status, created_at, reviewed_at FROM applications WHERE created_at >= ?', [since30]);
   const total = apps.length;
@@ -2847,17 +3126,39 @@ async function dashboardBody(client, periodDays) {
     ? Math.round(reviewed.reduce((s, a) => s + (new Date(a.reviewed_at) - new Date(a.created_at)), 0) / reviewed.length / 3600000)
     : 0;
 
-  // по неделям: контракты за 6 недель
+  // по неделям: контракты за 6 недель — одним запросом
   const weeks = [];
-  for (let w = 5; w >= 0; w--) {
-    const r = contracts.getWeekRange(w);
-    const f = await c("SELECT COUNT(*) c FROM contracts WHERE status='fulfilled' AND submitted_at BETWEEN ? AND ?", [r.start.toISOString(), r.end.toISOString()]);
-    weeks.push({ label: contracts.formatWeekLabel(r).replace(/\s*—.*/, ''), value: f });
+  const wkR = [];
+  for (let w = 5; w >= 0; w--) { const r = contracts.getWeekRange(w); wkR.push(r); weeks.push({ label: contracts.formatWeekLabel(r).replace(/\s*—.*/, ''), value: 0, _s: r.start.getTime(), _e: r.end.getTime() }); }
+  const wkRows = await db.all("SELECT submitted_at FROM contracts WHERE status='fulfilled' AND submitted_at >= ?", [new Date(wkR[0].start).toISOString()]).catch(() => []);
+  for (const row of wkRows) {
+    const t = new Date(row.submitted_at).getTime();
+    for (const wk of weeks) { if (t >= wk._s && t <= wk._e) { wk.value++; break; } }
   }
 
   const onVac = await c('SELECT COUNT(*) c FROM participants WHERE vacation_until IS NOT NULL') + await c('SELECT COUNT(DISTINCT discord_id) c FROM extra_passports WHERE vacation_until IS NOT NULL');
   const onAfk = await c('SELECT COUNT(*) c FROM participants WHERE afk_since IS NOT NULL');
   const tile = (n, l) => `<div class="tile"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`;
+
+  // В зоне риска: на прошлой неделе было заметно контрактов, на этой — спад до 0/1.
+  const norm = config.WEEKLY_PROMOTION_CONTRACT_THRESHOLD || 3;
+  const rThis = contracts.getWeekRange(0);
+  const rPrev = contracts.getWeekRange(1);
+  const cntThis = await db.all("SELECT discord_id, COUNT(*) c FROM contracts WHERE status='fulfilled' AND submitted_at BETWEEN ? AND ? GROUP BY discord_id", [rThis.start.toISOString(), rThis.end.toISOString()]).catch(() => []);
+  const cntPrev = await db.all("SELECT discord_id, COUNT(*) c FROM contracts WHERE status='fulfilled' AND submitted_at BETWEEN ? AND ? GROUP BY discord_id", [rPrev.start.toISOString(), rPrev.end.toISOString()]).catch(() => []);
+  const mapThis = new Map(cntThis.map((r) => [r.discord_id, r.c]));
+  const onLeave = new Set((await db.all("SELECT discord_id FROM participants WHERE vacation_until IS NOT NULL OR afk_since IS NOT NULL").catch(() => [])).map((r) => r.discord_id));
+  const atRisk = cntPrev
+    .filter((r) => r.c >= norm && (mapThis.get(r.discord_id) || 0) <= 1 && !onLeave.has(r.discord_id))
+    .map((r) => ({ id: r.discord_id, prev: r.c, now: mapThis.get(r.discord_id) || 0 }))
+    .sort((a, b) => (b.prev - b.now) - (a.prev - a.now))
+    .slice(0, 12);
+  const riskCard = `<div class="card"><h2>В зоне риска — падение активности (${atRisk.length})</h2>
+    ${atRisk.length
+      ? `<div class="tablewrap"><table><tr><th>Участник</th><th>Прошлая нед.</th><th>Эта нед.</th></tr>
+        ${atRisk.map((x) => `<tr><td>${personLink(client, x.id)}</td><td>${x.prev}</td><td style="color:var(--bad);font-weight:700">${x.now}</td></tr>`).join('')}
+      </table></div>`
+      : '<span class="muted">Резких спадов нет.</span>'}</div>`;
 
   // Сравнение недель: эта vs прошлая
   const r0 = contracts.getWeekRange(0); const r1 = contracts.getWeekRange(1);
@@ -2968,7 +3269,8 @@ async function dashboardBody(client, periodDays) {
   <div class="card"><h2>Скорость рассмотрения заявок</h2>
     <p class="mini">Среднее время до решения за ${days} дн.: <b>${avgH} ч</b> · рассмотрено ${reviewed.length} из ${total}</p>
   </div>
-  <div class="card"><h2>Выполненные контракты по неделям</h2>${barChart(weeks)}</div>
+  <div class="card"><h2>Выполненные контракты по неделям</h2>${barChart(weeks)}
+    <p class="mini" style="margin-top:6px"><a href="/export/chart.csv?type=weekly_contracts">⬇ данные графика (CSV)</a></p></div>
   <div class="card"><h2>Эта неделя vs прошлая</h2><div class="grid">
     ${tile(`${cw.contracts}${delta(cw.contracts, lw.contracts)}`, `контракты (было ${lw.contracts})`)}
     ${tile(`${cw.apps}${delta(cw.apps, lw.apps)}`, `заявки (было ${lw.apps})`)}
@@ -2978,6 +3280,8 @@ async function dashboardBody(client, periodDays) {
     <div class="grid">${tile(onVac, 'в отпуске')}${tile(onAfk, 'AFK')}</div>
   </div>
   ${retCard}
+  ${riskCard}
+  ${satCard}
   ${heatHtml}
   ${await (async () => {
     // Статистика HR по людям за 30 дней
@@ -3075,16 +3379,22 @@ async function leaderboardsBody(client, viewerId) {
     <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Побед</th></tr>${gwTop.map(([w, n], i) => `<tr${rowCls(w)}><td>${i + 1}</td><td>${personLink(client, w)}</td><td>${n}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
 }
 
-async function compareBody(client, meId, otherId) {
+async function compareBody(client, meId, otherId, periodDays) {
   const range = contracts.getWeekRange(0);
+  const pd = [30, 90, 180, 365].includes(+periodDays) ? +periodDays : 90;
+  const since = new Date(Date.now() - pd * 864e5).toISOString();
   const gather = async (id) => {
     const p = await db.get('SELECT name, joined_at FROM participants WHERE discord_id = ?', [id]).catch(() => null);
     const bs = await computeBadgesAndStreak(client, id);
     const week = await contracts.getUserWeekStats(id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
+    const periodC = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status = 'fulfilled' AND submitted_at >= ?", [id, since]).catch(() => null);
+    const thanks = await db.get('SELECT COUNT(*) c FROM thanks WHERE to_id = ? AND created_at >= ?', [id, since]).catch(() => null);
+    const tks = await db.get("SELECT COUNT(*) c FROM tickets WHERE opener_id = ? AND created_at >= ?", [id, since]).catch(() => null);
     return {
       id, name: (p && p.name) || nickOf(client, id) || ('ID ' + String(id).slice(-6)),
       inOrg: !!p,
       fulfilled: bs.fulfilled || 0, week: week.fulfilled.length,
+      periodC: periodC ? periodC.c : 0, thanks: thanks ? thanks.c : 0, tickets: tks ? tks.c : 0,
       invites: bs.invConfirmed || 0, streak: bs.streak || 0,
       days: bs.days || 0, wins: bs.wins || 0, badges: (bs.badges || []).length,
     };
@@ -3096,6 +3406,7 @@ async function compareBody(client, meId, otherId) {
     .map((r) => `<option value="${esc(r.discord_id)}" ${r.discord_id === otherId ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
   const picker = `<div class="card"><form method="GET" action="/compare" class="form">
     <label>Сравнить меня с<select name="with">${opts}</select></label>
+    <label>Период для метрик за период<select name="days">${[30, 90, 180, 365].map((d) => `<option value="${d}" ${d === pd ? 'selected' : ''}>${d} дн.</option>`).join('')}</select></label>
     <button class="btn sm" type="submit">Сравнить</button>
   </form></div>`;
 
@@ -3113,6 +3424,9 @@ async function compareBody(client, meId, otherId) {
       <tr><th>Показатель</th><th>${esc(me.name)}</th><th>${esc(ot.name)}</th></tr>
       ${row('Контракты за всё время', me.fulfilled, ot.fulfilled)}
       ${row('Контракты на этой неделе', me.week, ot.week)}
+      ${row(`Контракты за ${pd} дн.`, me.periodC, ot.periodC)}
+      ${row(`Благодарностей за ${pd} дн.`, me.thanks, ot.thanks)}
+      ${row(`Тикетов открыто за ${pd} дн.`, me.tickets, ot.tickets, 'low')}
       ${row('Приглашений подтверждено', me.invites, ot.invites)}
       ${row('Недельный стрик', me.streak, ot.streak)}
       ${row('Дней в организации', me.days, ot.days)}
@@ -3175,20 +3489,44 @@ async function searchBody(client, query) {
   const CW = await db.all("SELECT id, discord_id, name, static, status, submitted_at FROM codeword_submissions WHERE discord_id = ? OR name LIKE ? OR static LIKE ? OR discord_tag LIKE ? ORDER BY id DESC LIMIT 25", [q, like, like, like]).catch(() => []);
   const HR = await db.all("SELECT id, discord_id, discord_tag, status, created_at FROM hr_applications WHERE discord_id = ? OR discord_tag LIKE ? ORDER BY id DESC LIMIT 25", [q, like]).catch(() => []);
   const GB = await db.all("SELECT id, profile_id, author_id, text, created_at FROM guestbook WHERE text LIKE ? OR author_id = ? OR profile_id = ? ORDER BY id DESC LIMIT 25", [like, q, q]).catch(() => []);
-  const sec = (title, rowsHtml, colsN) => `<div class="card"><h2>${esc(title)}</h2><div class="tablewrap"><table>${rowsHtml || `<tr><td colspan="${colsN}">—</td></tr>`}</table></div></div>`;
+  // подсветка совпадений
+  const hl = (s) => {
+    const e = esc(s == null ? '' : String(s));
+    if (!q) return e;
+    try { return e.replace(new RegExp('(' + q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi'), '<mark>$1</mark>'); } catch (_) { return e; }
+  };
+  const sec = (id, title, rowsHtml, colsN) => `<div class="card" id="s-${id}"><h2>${esc(title)}</h2><div class="tablewrap"><table>${rowsHtml || `<tr><td colspan="${colsN}">—</td></tr>`}</table></div></div>`;
+  const secs = [
+    ['people', 'Участники (' + P.length + ')', '<tr><th>Имя</th><th>Паспорт</th></tr>' + P.map((r) => `<tr><td><a href="/u/${esc(r.discord_id)}">${hl(r.name)}</a></td><td>№ ${hl(r.static)}</td></tr>`).join(''), 2],
+    ['apps', 'Заявки (' + A.length + ')', '<tr><th>#</th><th>Имя</th><th>Паспорт</th><th>Статус</th></tr>' + A.map((r) => `<tr><td>#${r.id}</td><td>${hl(r.name || r.discord_tag)}</td><td>${hl(r.static || '—')}</td><td>${esc(ruStatus(r.status))}</td></tr>`).join(''), 4],
+    ['contracts', 'Контракты (' + CN.length + ')', '<tr><th>#</th><th>Участник</th><th>Итог</th><th>Когда</th><th>Пруф</th></tr>' + CN.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.submitted_at)}</td><td>${r.message_url ? `<a href="${esc(r.message_url)}" target="_blank" rel="noopener">ссылка</a>` : '—'}</td></tr>`).join(''), 5],
+    ['thanks', 'Благодарности (' + TH.length + ')', '<tr><th>От</th><th>Кому</th><th>За что</th><th>Когда</th></tr>' + TH.map((r) => `<tr><td>${personLink(client, r.from_id)}</td><td>${personLink(client, r.to_id)}</td><td>${hl(r.note || '—')}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4],
+    ['audit', 'Аудит (' + AU.length + ')', '<tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Детали</th></tr>' + AU.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${hl(r.actor_tag || '—')}</td><td>${hl(r.action || '')}</td><td class="mini">${hl((r.details || '').slice(0, 160))}</td></tr>`).join(''), 4],
+    ['bl', 'Чёрный список (' + B.length + ')', '<tr><th>#</th><th>Discord ID</th><th>Паспорт</th><th>Причина</th></tr>' + B.map((r) => `<tr><td>#${r.id}</td><td>${hl(r.discord_id || '—')}</td><td>${hl(r.static || '—')}</td><td>${hl(r.reason || '—')}</td></tr>`).join(''), 4],
+    ['tickets', 'Тикеты (' + T.length + ')', '<tr><th>#</th><th>Тема</th><th>Тип</th><th>Статус</th></tr>' + T.map((r) => `<tr><td><a href="/ticket/${r.id}">#${r.id}</a></td><td>${hl(r.subject || '—')}</td><td>${esc(TICKET_CAT_RU[r.category] || r.category || '—')}</td><td>${esc(ruStatus(r.status))}</td></tr>`).join(''), 4],
+    ['cw', 'Кодовые слова (' + CW.length + ')', '<tr><th>#</th><th>Кто</th><th>Имя</th><th>Паспорт</th><th>Статус</th><th>Когда</th></tr>' + CW.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${hl(r.name || '—')}</td><td>${hl(r.static || '—')}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.submitted_at)}</td></tr>`).join(''), 6],
+    ['hr', 'Заявки в HR (' + HR.length + ')', '<tr><th>#</th><th>Кто</th><th>Статус</th><th>Когда</th></tr>' + HR.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4],
+    ['gb', 'Гостевая книга (' + GB.length + ')', '<tr><th>Профиль</th><th>Автор</th><th>Текст</th><th>Когда</th></tr>' + GB.map((r) => `<tr><td><a href="/u/${esc(r.profile_id)}">профиль</a></td><td>${personLink(client, r.author_id)}</td><td>${hl((r.text || '').slice(0, 160))}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4],
+  ];
+  const counts = { people: P.length, apps: A.length, contracts: CN.length, thanks: TH.length, audit: AU.length, bl: B.length, tickets: T.length, cw: CW.length, hr: HR.length, gb: GB.length };
+  const jump = `<div class="bar" style="flex-wrap:wrap;gap:4px">${secs.filter(([id]) => counts[id]).map(([id, title]) => `<a class="pill" href="#s-${id}">${esc(title)}</a>`).join('') || '<span class="mini">ничего не найдено</span>'}</div>`;
   return `
   <h1>Поиск: «${esc(q)}»</h1>
-  <div class="card"><form method="GET" action="/search" class="form"><label>Запрос<input name="q" value="${esc(q)}" maxlength="80"></label><button class="btn" type="submit">Искать</button></form></div>
-  ${sec('Участники (' + P.length + ')', '<tr><th>Имя</th><th>Паспорт</th></tr>' + P.map((r) => `<tr><td><a href="/u/${esc(r.discord_id)}">${esc(r.name)}</a></td><td>№ ${esc(r.static)}</td></tr>`).join(''), 2)}
-  ${sec('Заявки (' + A.length + ')', '<tr><th>#</th><th>Имя</th><th>Паспорт</th><th>Статус</th></tr>' + A.map((r) => `<tr><td>#${r.id}</td><td>${esc(r.name || r.discord_tag)}</td><td>${esc(r.static || '—')}</td><td>${esc(ruStatus(r.status))}</td></tr>`).join(''), 4)}
-  ${sec('Контракты (' + CN.length + ')', '<tr><th>#</th><th>Участник</th><th>Итог</th><th>Когда</th><th>Пруф</th></tr>' + CN.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.submitted_at)}</td><td>${r.message_url ? `<a href="${esc(r.message_url)}" target="_blank" rel="noopener">ссылка</a>` : '—'}</td></tr>`).join(''), 5)}
-  ${sec('Благодарности (' + TH.length + ')', '<tr><th>От</th><th>Кому</th><th>За что</th><th>Когда</th></tr>' + TH.map((r) => `<tr><td>${personLink(client, r.from_id)}</td><td>${personLink(client, r.to_id)}</td><td>${esc(r.note || '—')}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4)}
-  ${sec('Аудит (' + AU.length + ')', '<tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Детали</th></tr>' + AU.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.actor_tag || '—')}</td><td>${esc(r.action || '')}</td><td class="mini">${renderMentions(client, esc((r.details || '').slice(0, 160)))}</td></tr>`).join(''), 4)}
-  ${sec('Чёрный список (' + B.length + ')', '<tr><th>#</th><th>Discord ID</th><th>Паспорт</th><th>Причина</th></tr>' + B.map((r) => `<tr><td>#${r.id}</td><td>${esc(r.discord_id || '—')}</td><td>${esc(r.static || '—')}</td><td>${esc(r.reason || '—')}</td></tr>`).join(''), 4)}
-  ${sec('Тикеты (' + T.length + ')', '<tr><th>#</th><th>Тема</th><th>Тип</th><th>Статус</th></tr>' + T.map((r) => `<tr><td><a href="/ticket/${r.id}">#${r.id}</a></td><td>${esc(r.subject || '—')}</td><td>${esc(TICKET_CAT_RU[r.category] || r.category || '—')}</td><td>${esc(ruStatus(r.status))}</td></tr>`).join(''), 4)}
-  ${sec('Кодовые слова (' + CW.length + ')', '<tr><th>#</th><th>Кто</th><th>Имя</th><th>Паспорт</th><th>Статус</th><th>Когда</th></tr>' + CW.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(r.name || '—')}</td><td>${esc(r.static || '—')}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.submitted_at)}</td></tr>`).join(''), 6)}
-  ${sec('Заявки в HR (' + HR.length + ')', '<tr><th>#</th><th>Кто</th><th>Статус</th><th>Когда</th></tr>' + HR.map((r) => `<tr><td>#${r.id}</td><td>${personLink(client, r.discord_id)}</td><td>${esc(ruStatus(r.status))}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4)}
-  ${sec('Гостевая книга (' + GB.length + ')', '<tr><th>Профиль</th><th>Автор</th><th>Текст</th><th>Когда</th></tr>' + GB.map((r) => `<tr><td><a href="/u/${esc(r.profile_id)}">профиль</a></td><td>${personLink(client, r.author_id)}</td><td>${esc((r.text || '').slice(0, 160))}</td><td class="muted">${fmt(r.created_at)}</td></tr>`).join(''), 4)}`;
+  <div class="card"><form method="GET" action="/search" class="form"><label>Запрос<input id="qf" name="q" value="${esc(q)}" maxlength="80"></label>
+    <div class="bar"><button class="btn" type="submit">Искать</button><button class="btn ghost sm" type="button" id="qsave">★ Сохранить запрос</button></div>
+    <div id="qsaved" class="bar" style="flex-wrap:wrap;gap:4px;margin-top:6px"></div>
+  </div>
+  ${jump}
+  ${secs.map(([id, t, rows, n]) => sec(id, t, rows, n)).join('')}
+  <script>(function(){try{
+    var sv=JSON.parse(localStorage.getItem('fc_saved_q')||'[]'); if(!Array.isArray(sv))sv=[];
+    function render(){var box=document.getElementById('qsaved');if(!box)return;
+      box.innerHTML=sv.map(function(x){return '<a class="pill" href="/search?q='+encodeURIComponent(x)+'">'+x.replace(/</g,'&lt;')+'</a>';}).join('')
+        +(sv.length?' <button class="btn ghost sm" type="button" id="qclear">очистить</button>':'');
+      var qc=document.getElementById('qclear'); if(qc)qc.onclick=function(){sv=[];localStorage.setItem('fc_saved_q','[]');render();};}
+    var b=document.getElementById('qsave'); if(b)b.onclick=function(){var v=(document.getElementById('qf')||{}).value; if(v&&sv.indexOf(v)<0){sv.unshift(v);sv=sv.slice(0,12);localStorage.setItem('fc_saved_q',JSON.stringify(sv));render();}};
+    render();
+  }catch(e){}})();</script>`;
 }
 
 async function auditBody(client, sp, pageNum, user) {
@@ -3196,6 +3534,7 @@ async function auditBody(client, sp, pageNum, user) {
   const act = (sp.get('act') || '').trim();
   const showSys = sp.get('sys') === '1';
   const days = parseInt(sp.get('days') || '14', 10) || 14;
+  const per = Math.min(200, Math.max(10, parseInt(sp.get('per'), 10) || PAGE_SIZE));
   const since = new Date(Date.now() - days * 864e5).toISOString();
   const cond = ['at >= ?'];
   const par = [since];
@@ -3205,7 +3544,10 @@ async function auditBody(client, sp, pageNum, user) {
   const where = 'WHERE ' + cond.join(' AND ');
   const totalRow = await db.get(`SELECT COUNT(*) c FROM audit_log ${where}`, par);
   const total = totalRow ? totalRow.c : 0;
-  const rows = await db.all(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...par, PAGE_SIZE, pageNum * PAGE_SIZE]);
+  const rows = await db.all(`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, [...par, per, pageNum * per]);
+  const auditPages = Math.max(1, Math.ceil(total / per));
+  const auditPager = auditPages > 1 ? `<div class="pager">${pageNum > 0 ? `<a class="btn ghost sm" href="/audit?${qs({ who, act, days, per })}&page=${pageNum - 1}">← Назад</a>` : ''}<span class="muted">стр. ${pageNum + 1} из ${auditPages}</span>${pageNum < auditPages - 1 ? `<a class="btn ghost sm" href="/audit?${qs({ who, act, days, per })}&page=${pageNum + 1}">Вперёд →</a>` : ''}</div>` : '';
+  const perSel = `<span class="mini">На странице: ${[30, 60, 120, 200].map((n) => n === per ? `<b>${n}</b>` : `<a href="/audit?${qs({ who, act, days, per: n })}">${n}</a>`).join(' · ')}</span>`;
   const trs = rows.map((r) => `<tr><td class="muted">${fmt(r.at)}</td><td>${esc(r.actor_tag || r.actor_id || '—')}</td><td>${esc(r.action || '')}</td><td>${renderMentions(client, esc((r.details || '').slice(0, 300)))}</td></tr>`).join('');
   const qkeep = qs({ who, act, days, ...(showSys ? { sys: '1' } : {}) });
   const undoable = await db.all("SELECT * FROM undo_actions WHERE done_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 10", [new Date().toISOString()]).catch(() => []);
@@ -3241,8 +3583,9 @@ async function auditBody(client, sp, pageNum, user) {
     <a class="btn ghost sm" href="/audit?act=Отказ доступа">Отказы доступа</a>
   </div></div>
   <div class="card"><h2>Записей: ${total}</h2>
+    <div class="bar" style="margin-bottom:6px">${perSel}</div>
     <div class="tablewrap"><table><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Детали</th></tr>${trs || '<tr><td colspan="4">—</td></tr>'}</table></div>
-    ${pager('/audit?' + qkeep, pageNum, total)}
+    ${auditPager}
   </div>`;
 }
 
@@ -3278,6 +3621,11 @@ async function toolsBody(client, acc, user) {
     <form method="POST" action="/tools/backup_now">${csrfField(user)}<button class="btn sm" type="submit">Сделать бэкап сейчас</button></form>
     <div class="tablewrap" style="margin-top:10px"><table><tr><th>Файл</th><th>Размер</th><th></th></tr>
       ${(() => { let bl = []; try { bl = backup.listBackups() || []; } catch (_) {} return bl.map((b) => `<tr><td>${esc(b.name || b.filename || b)}</td><td class="muted">${b.size ? (b.size / 1048576).toFixed(2) + ' МБ' : '—'}</td><td><a class="btn ghost sm" href="/export/backup/${encodeURIComponent(b.name || b.filename || b)}">скачать</a></td></tr>`).join('') || '<tr><td colspan="3">нет копий</td></tr>'; })()}
+    </table></div>
+    <h3 style="font-size:14px;margin-top:12px">Кто скачивал базу (последние 20)</h3>
+    <div class="tablewrap"><table><tr><th>Когда</th><th>Кто</th><th>Что</th></tr>
+      ${(await db.all("SELECT at, actor_tag, action, details FROM audit_log WHERE action LIKE '%качивани%БД%' OR action LIKE '%рхива .zip%' OR action LIKE '%Резервн%' ORDER BY id DESC LIMIT 20").catch(() => []))
+        .map((a) => `<tr><td class="muted">${fmt(a.at)}</td><td class="mini">${esc(a.actor_tag || '—')}</td><td class="mini">${esc(a.action || '')}${a.details ? ' — ' + esc(String(a.details).slice(0, 80)) : ''}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}
     </table></div>
   </div>
   <div class="card"><h2>Статистика за период</h2>
@@ -3354,6 +3702,7 @@ async function panelApps(client, user, pageNum = 0) {
     const comments = await db.all('SELECT * FROM application_comments WHERE application_id = ? ORDER BY id ASC', [a.id]).catch(() => []);
     const thread = comments.map((c) => `<div class="mini" style="border-left:2px solid var(--line);padding-left:8px;margin:4px 0"><b>${esc(c.author_name || c.author_id)}</b> · ${fmt(c.at)}<br>${esc(c.text)}</div>`).join('');
     cards.push(`<div class="card">
+    <label class="chk" style="float:right"><input type="checkbox" form="bulkReject" name="ids" value="${a.id}"><span class="mini">выбрать</span></label>
     <b>Заявка #${a.id}</b> — ${personLink(client, a.discord_id)} (${esc(a.discord_tag || '')}) ${accountAgeBadge(a.discord_id)}
     <div class="mini">${esc(a.name || '—')} · № ${esc(a.static || '—')} · LVL ${esc(a.lvl || '—')} · ${fmt(a.created_at)}</div>
     <div class="mini">Навыки: ${esc((a.skills || '—').slice(0, 300))}</div>
@@ -3378,7 +3727,22 @@ async function panelApps(client, user, pageNum = 0) {
     </div>
   </div>`);
   }
-  return `<div class="card"><h2>Заявки на вступление — всего ${total}</h2><p class="mini">Приём с сайта выполняет полный онбординг: роли, ник, профиль-канал, ЛС с правилами.</p>${pager('/panel?tab=apps', pageNum, total)}</div>${cards.join('') || '<div class="card">Очередь пуста.</div>'}${pager('/panel?tab=apps', pageNum, total)}`;
+  const directAdd = `<div class="card"><h2>Добавить участника напрямую (без заявки)</h2>
+    <p class="mini">Полный онбординг как при приёме заявки: роли, ник, канал-профиль, ЛС с правилами, запись в аудит Discord. Discord-аккаунт должен быть на сервере.</p>
+    <form method="POST" action="/panel/member/add_direct" class="form" onsubmit="return confirm('Добавить участника в организацию?')">${csrfField(user)}
+      <label>Discord ID<input name="discord_id" required pattern="[0-9]{5,25}" maxlength="25"></label>
+      <label>Имя Фамилия<input name="name" required maxlength="60"></label>
+      <label>№ Паспорта<input name="static" required pattern="[0-9]+" maxlength="12"></label>
+      <label>LVL<input name="lvl" type="number" value="1" min="1" max="100"></label>
+      <button class="btn" type="submit">➕ Добавить участника</button>
+    </form></div>`;
+  const bulkBar = rows.length > 1 ? `<div class="card"><h3 style="font-size:14px;margin:0 0 6px">Массовый отказ по выбранным</h3>
+    <form method="POST" action="/panel/app/reject_bulk" id="bulkReject" class="bar" style="flex-wrap:wrap;gap:6px" onsubmit="return confirm('Отклонить все выбранные заявки?')">${csrfField(user)}
+      ${presetSel ? `<label>Причина${presetSel}</label>` : ''}
+      <input name="reason" placeholder="или свой текст причины" maxlength="300" style="flex:1;min-width:160px">
+      <button class="btn sm" style="background:var(--bad)" type="submit">❌ Отклонить выбранные</button>
+    </form></div>` : '';
+  return `<div class="card"><h2>Заявки на вступление — всего ${total}</h2><p class="mini">Приём с сайта выполняет полный онбординг: роли, ник, профиль-канал, ЛС с правилами.</p>${pager('/panel?tab=apps', pageNum, total)}</div>${directAdd}${bulkBar}${cards.join('') || '<div class="card">Очередь пуста.</div>'}${pager('/panel?tab=apps', pageNum, total)}`;
 }
 
 async function rejectPresetSelect(queue) {
@@ -3745,7 +4109,14 @@ async function panelSettings(user) {
     <label>${esc(s.key)}<input name="value" value="${esc(s.value == null ? '' : s.value)}"></label>
     <button class="btn sm" type="submit">Сохранить</button>
   </form>`).join('');
+  const backupTime = (await db.getSetting('backup.time')) || '';
   return `<div class="card"><h2>Переключатели</h2>${flags.join('')}</div>
+  <div class="card"><h2>Автобэкап БД</h2>
+    <p class="mini">Время ежедневной резервной копии по МСК (формат ЧЧ:ММ). Пусто — по умолчанию 23:59. Применяется в течение часа.</p>
+    <form method="POST" action="/panel/setting/save" class="bar">${csrfField(user)}<input type="hidden" name="key" value="backup.time">
+      <input name="value" type="time" value="${esc(backupTime)}"><button class="btn sm" type="submit">Сохранить</button>
+    </form>
+  </div>
   <div class="card"><h2>Настройки (settings)</h2>${list || '<p class="mini">Пока пусто.</p>'}
     <form method="POST" action="/panel/setting/save" class="form" style="margin-top:14px">
       ${csrfField(user)}
@@ -3797,8 +4168,30 @@ const THEME_PRESETS = {
   ocean: { bg: '#0b1622', panel: '#122232', panel2: '#18314a', line: '#20415f', text: '#e6f0f7', muted: '#8fa9bd', accent: '#1fb6c9', accent2: '#5fd3e2' },
   forest: { bg: '#0e1712', panel: '#15211a', panel2: '#1d2f24', line: '#2a3f31', text: '#e8f2ea', muted: '#94ab9c', accent: '#3fae6b', accent2: '#71cf97' },
   plum: { bg: '#160f1a', panel: '#1e1626', panel2: '#2a1f36', line: '#3a2c49', text: '#f1e9f5', muted: '#a996b3', accent: '#9b59d0', accent2: '#bd8ae0' },
+  midnight: { bg: '#0a0e1a', panel: '#111629', panel2: '#182038', line: '#26304f', text: '#e6e9f5', muted: '#8b93b0', accent: '#4c6ef5', accent2: '#7d97ff' },
+  crimson: { bg: '#120c0d', panel: '#1b1214', panel2: '#26181b', line: '#3a2429', text: '#f2e8e9', muted: '#b09499', accent: '#e5484d', accent2: '#ff7a7f', bad: '#ff5c5c' },
+  sunset: { bg: '#15100b', panel: '#1f1712', panel2: '#2c2119', line: '#413021', text: '#f5ece2', muted: '#b7a08c', accent: '#f2870d', accent2: '#ffb055', warn: '#ffc247' },
+  mono: { bg: '#101010', panel: '#1a1a1a', panel2: '#242424', line: '#333333', text: '#ededed', muted: '#9a9a9a', accent: '#8a8a8a', accent2: '#bdbdbd' },
+  nord: { bg: '#2e3440', panel: '#333b4a', panel2: '#3b4252', line: '#4c566a', text: '#eceff4', muted: '#a8b1c2', accent: '#88c0d0', accent2: '#81a1c1' },
+  dracula: { bg: '#191a21', panel: '#21222c', panel2: '#282a36', line: '#3b3e52', text: '#f8f8f2', muted: '#a3a7c2', accent: '#bd93f9', accent2: '#8be9fd', ok: '#50fa7b', bad: '#ff5555', warn: '#f1fa8c' },
+  rose: { bg: '#160f13', panel: '#1f161b', panel2: '#2c1f27', line: '#402d38', text: '#f4e9ef', muted: '#b498a6', accent: '#ec4899', accent2: '#f77fb6' },
+  emerald: { bg: '#08130f', panel: '#0e1c17', panel2: '#132a22', line: '#1e3d32', text: '#e4f4ee', muted: '#8bb1a4', accent: '#10b981', accent2: '#4fd8ab' },
+  coffee: { bg: '#14100c', panel: '#1d1712', panel2: '#29201a', line: '#3c2f25', text: '#f0e7dc', muted: '#b3a08c', accent: '#c08457', accent2: '#dba97f' },
+  slate: { bg: '#0f141a', panel: '#171e26', panel2: '#1f2833', line: '#2e3a48', text: '#e8edf3', muted: '#93a1b0', accent: '#5b8def', accent2: '#89aef7' },
+  gold: { bg: '#12100a', panel: '#1b1810', panel2: '#262117', line: '#3a3324', text: '#f3efe2', muted: '#b6ab8f', accent: '#d4af37', accent2: '#e6c860' },
+  cyberpunk: { bg: '#0a0a12', panel: '#12111f', panel2: '#1a1830', line: '#2c2850', text: '#f0eeff', muted: '#9b96c4', accent: '#ff2bd6', accent2: '#22e0ff' },
+  matrix: { bg: '#050805', panel: '#0b110b', panel2: '#111a11', line: '#1e2e1e', text: '#d6ffd6', muted: '#79a879', accent: '#22c55e', accent2: '#5ef08a' },
+  lavender: { bg: '#12111a', panel: '#1a1826', panel2: '#242235', line: '#35314c', text: '#efecf7', muted: '#a9a3c0', accent: '#a78bfa', accent2: '#c4b1fd' },
+  steel: { bg: '#0e1214', panel: '#161c1f', panel2: '#1e262a', line: '#2d383d', text: '#e7edf0', muted: '#93a0a6', accent: '#5aa0b8', accent2: '#84c3d6' },
+  sakura: { bg: '#1a1416', panel: '#241a1e', panel2: '#322429', line: '#453139', text: '#f6ecef', muted: '#bd9fa9', accent: '#ff8fab', accent2: '#ffc2d1' },
 };
-const PRESET_LABELS = { default: 'стандарт', amoled: 'AMOLED', ocean: 'океан', forest: 'лес', plum: 'слива' };
+const PRESET_LABELS = {
+  default: 'стандарт', amoled: 'AMOLED', ocean: 'океан', forest: 'лес', plum: 'слива',
+  midnight: 'полночь', crimson: 'багровый', sunset: 'закат', mono: 'графит', nord: 'норд',
+  dracula: 'дракула', rose: 'роза', emerald: 'изумруд', coffee: 'кофе', slate: 'сланец',
+  gold: 'золото', cyberpunk: 'киберпанк', matrix: 'матрица', lavender: 'лаванда', steel: 'сталь',
+  sakura: 'сакура',
+};
 // Какой пресет соответствует текущим цветам сайта (или null — «свои цвета»).
 function activePreset(colors) {
   const cur = { ...THEME_DEFAULTS, ...(colors || {}) };
@@ -3871,10 +4264,12 @@ async function panelAdmin(client, user) {
         <button class="btn ghost sm" formaction="/admin/theme_reset" formnovalidate type="submit">Сбросить к стандартным</button>
       </div>
     </form>
-    <div class="bar" style="margin-top:8px"><span class="mini">Пресеты:</span>
+    <div class="bar" style="margin-top:8px;flex-wrap:wrap;gap:4px"><span class="mini" style="width:100%">Пресеты (${Object.keys(THEME_PRESETS).length}):</span>
       ${Object.keys(THEME_PRESETS).map((pn) => {
         const on = curPreset === pn;
-        return `<form method="POST" action="/admin/theme_preset" style="display:inline">${csrfField(user)}<input type="hidden" name="preset" value="${pn}"><button class="btn ${on ? '' : 'ghost '}sm" type="submit"${on ? ' style="outline:2px solid var(--accent2);outline-offset:1px"' : ''}>${on ? '✓ ' : ''}${esc(PRESET_LABELS[pn])}</button></form>`;
+        const pr = { ...THEME_DEFAULTS, ...THEME_PRESETS[pn] };
+        const sw = `<span style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px;background:${pr.accent};box-shadow:0 0 0 1px ${pr.line}"></span>`;
+        return `<form method="POST" action="/admin/theme_preset" style="display:inline">${csrfField(user)}<input type="hidden" name="preset" value="${pn}"><button class="btn ${on ? '' : 'ghost '}sm" type="submit"${on ? ' style="outline:2px solid var(--accent2);outline-offset:1px"' : ''}>${sw}${on ? '✓ ' : ''}${esc(PRESET_LABELS[pn])}</button></form>`;
       }).join('')}
     </div>
     <p class="mini">Сейчас: <b>${curPreset ? esc(PRESET_LABELS[curPreset]) : 'свои цвета'}</b>. Применяется на всех страницах через ~30 сек (кэш). Светлая тема остаётся стандартной.</p>
@@ -4168,7 +4563,7 @@ async function giveawaysPublicBody(client) {
     const cnt = await giveaways.countEntries(gv.id);
     list.push(`<div class="card">
       <h3>🎉 ${esc(gv.prize)}</h3>
-      <div class="mini">Победителей: ${gv.winners_count} · Участников: ${cnt}${gv.required_role_id ? ` · роль ${roleTag(client, gv.required_role_id)}` : ''}${gv.min_role_id ? ` · ранг не ниже ${roleTag(client, gv.min_role_id)}` : ''}</div>
+      <div class="mini">Победителей: ${gv.winners_count} · Участников: ${cnt}${gv.required_role_id ? ` · роль ${roleTag(client, gv.required_role_id)}` : ''}${gv.min_role_id ? ` · ранг не ниже ${roleTag(client, gv.min_role_id)}` : ''}${gv.min_contracts_week ? ` · ≥ ${gv.min_contracts_week} контр./нед.` : ''}${gv.weight_by_contracts ? ' · 🎟️ бонус-билеты за активность' : ''}</div>
       <div class="mini">До конца: <b class="gcd" data-end="${esc(gv.ends_at)}" style="font-variant-numeric:tabular-nums">…</b></div>
       <a class="btn sm" href="/g/${gv.id}" style="margin-top:8px">Открыть</a>
     </div>`);
@@ -4204,6 +4599,11 @@ async function giveawayPageBody(client, user, gid, acc) {
       if (await giveaways.isBlacklisted(user.id)) note = '⛔ Вы в ЧС розыгрышей.';
       else if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) note = `⛔ Нужна роль ${roleTag(client, gv.required_role_id)}.`;
       else if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) note = `⛔ Нужен ранг не ниже ${roleTag(client, gv.min_role_id)}.`;
+      else if (gv.min_contracts_week) {
+        const wr = contracts.getWeekRange(0);
+        const cw = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [user.id, wr.start.toISOString(), wr.end.toISOString()]).then((x) => (x ? x.c : 0)).catch(() => 0);
+        if (cw < gv.min_contracts_week) note = `⛔ Нужно ≥ ${gv.min_contracts_week} выполненных контрактов за эту неделю (у вас ${cw}).`;
+      }
     } catch (_) { note = 'Вас нет на Discord-сервере.'; }
   }
   const canToggle = !ended && !note;
@@ -4279,6 +4679,12 @@ async function giveawayPageBody(client, user, gid, acc) {
   </div>
   ${tiersCard}
   ${listCard}
+  ${(acc && acc.rank >= LEVELS.owner) ? `<div class="card"><h2>Выдать роль всем участникам (${cnt})</h2>
+    <p class="mini">Например, роль-«билет» на будущий розыгрыш. Выдаётся с паузами, чтобы не упереться в лимиты Discord.</p>
+    <form method="POST" action="/g/grant_role" class="bar" onsubmit="return confirm('Выдать роль всем ${cnt} участникам розыгрыша?')">${csrfField(user)}<input type="hidden" name="id" value="${gv.id}">
+      <input name="role_id" placeholder="ID роли" pattern="[0-9]{5,25}" required style="max-width:200px">
+      <button class="btn sm" type="submit">Выдать всем</button>
+    </form></div>` : ''}
   ${roulette}
   ${cdScript}
   <p><a href="/giveaways">← ко всем розыгрышам</a></p>`;
@@ -4404,11 +4810,10 @@ async function ticketPageBody(client, user, acc, tid) {
   const closed = t.status !== 'open';
   const isStaff = acc.rank >= LEVELS.hr;
   const tpls = await db.all('SELECT id, name, text FROM ticket_reply_templates ORDER BY name').catch(() => []);
-  const tplSelect = tpls.length ? `<label>Шаблон ответа
-    <select onchange="if(this.value){var ta=this.form.text;ta.value=(ta.value?ta.value+'\\n':'')+this.value;this.selectedIndex=0}">
-      <option value="">— вставить шаблон —</option>
-      ${tpls.map((tp) => `<option value="${esc(tp.text)}">${esc(tp.name)}</option>`).join('')}
-    </select></label>` : '';
+  const tplSelect = tpls.length ? `<div class="mini" style="margin-bottom:4px">Быстрые ответы:</div>
+    <div class="bar" style="flex-wrap:wrap;gap:4px;margin-bottom:6px">
+      ${tpls.map((tp) => `<button type="button" class="btn ghost sm" data-tpl="${esc(tp.text)}" onclick="var ta=this.closest('form').text;ta.value=(ta.value?ta.value+'\\n':'')+this.dataset.tpl;ta.focus()">${esc(tp.name)}</button>`).join('')}
+    </div>` : '';
   const tplManage = isStaff ? `<div class="card"><h2>Шаблоны ответов</h2>
     ${tpls.map((tp) => `<div class="bar"><span class="mini"><b>${esc(tp.name)}</b>: ${esc(tp.text.slice(0, 80))}</span>
       <form method="POST" action="/ticket/tpl_del" style="display:inline">${csrfField(user)}<input type="hidden" name="tid" value="${t.id}"><input type="hidden" name="id" value="${tp.id}"><button class="btn ghost sm" type="submit">✕</button></form></div>`).join('') || '<span class="mini">пусто</span>'}
@@ -4493,30 +4898,51 @@ async function ticketPageBody(client, user, acc, tid) {
   ${ratingCard}
   ${transcriptCard}
   ${tplManage}
-  <p><a href="/me">← в кабинет</a></p>`;
+  <p><a href="/me">← в кабинет</a></p>
+  ${closed ? '' : `<script>(function(){var st=${JSON.stringify(t.status)};function chk(){fetch('/ticket/${t.id}/status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){if(d&&d.status&&d.status!==st){location.reload();}}).catch(function(){});}setInterval(chk,25000);document.addEventListener('visibilitychange',function(){if(!document.hidden)chk();});})();</script>`}`;
 }
 
 // ---------- Контракты на проверке (HR+) ----------
-async function panelContractCheck(client, user, pageNum = 0) {
+async function panelContractCheck(client, user, pageNum = 0, sp) {
+  const flt = (sp && sp.get && (sp.get('who') || '').trim()) || '';
+  const sortOld = !(sp && sp.get && sp.get('sort') === 'new');
   const totalRow = await db.get("SELECT COUNT(*) c FROM contracts WHERE status = 'pending'").catch(() => null);
   const total = totalRow ? totalRow.c : 0;
-  const rows = await db.all("SELECT * FROM contracts WHERE status = 'pending' ORDER BY submitted_at ASC LIMIT ? OFFSET ?", [PAGE_SIZE, pageNum * PAGE_SIZE]).catch(() => []);
+  let sql = "SELECT * FROM contracts WHERE status = 'pending'";
+  const params = [];
+  if (flt) { sql += ' AND discord_id = ?'; params.push(flt); }
+  sql += ` ORDER BY submitted_at ${sortOld ? 'ASC' : 'DESC'} LIMIT ? OFFSET ?`;
+  params.push(PAGE_SIZE, pageNum * PAGE_SIZE);
+  const rows = await db.all(sql, params).catch(() => []);
+  const stuckH = (typeof config.STUCK_CONTRACT_HOURS === 'number' ? config.STUCK_CONTRACT_HOURS : 24);
   const cards = [];
   for (const cn of rows) {
     const pr = await db.get('SELECT name, static FROM participants WHERE discord_id = ?', [cn.discord_id]).catch(() => null);
+    const ageH = cn.submitted_at ? Math.floor((Date.now() - new Date(cn.submitted_at)) / 36e5) : 0;
     const links = [
-      cn.taken_message_url ? `<a href="${esc(cn.taken_message_url)}" target="_blank" rel="noopener">скрин «взял»</a>` : '',
-      cn.message_url ? `<a href="${esc(cn.message_url)}" target="_blank" rel="noopener">скрин «итог»</a>` : '',
-    ].filter(Boolean).join(' · ') || '<span class="mini">ссылок нет</span>';
+      contractProof(cn.taken_message_url, 'скрин «взял»'),
+      contractProof(cn.message_url, 'скрин «итог»'),
+    ].filter(Boolean).join(' ') || '<span class="mini">пруфов нет</span>';
     cards.push(`<div class="card">
       <b>#${cn.id}</b> — <a href="/u/${esc(cn.discord_id)}">${esc(pr ? pr.name : cn.discord_id)}</a>${pr ? ` (№ ${esc(pr.static)})` : ''}
+      <span class="badge ${ageH >= stuckH ? 'bad' : ''}">висит ${ageH} ч</span>
       <div class="mini">отправлен ${fmt(cn.submitted_at)} · ${links}</div>
       <div class="bar" style="margin-top:8px">
         ${['fulfilled', 'unfulfilled', 'rejected'].map((vd) => `<form method="POST" action="/panel/contract/review" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${cn.id}"><input type="hidden" name="verdict" value="${vd}"><button class="btn sm" ${vd === 'rejected' ? 'style="background:var(--bad)"' : ''} type="submit">${vd === 'fulfilled' ? '✅ Выполнен' : vd === 'unfulfilled' ? '❌ Не выполнен' : '🗑 Отклонить'}</button></form>`).join('')}
       </div>
     </div>`);
   }
-  return `<div class="card"><h2>Контракты на проверке — всего ${total}</h2><p class="mini">То же, что кнопки под карточкой контракта в Discord.</p>${pager('/panel?tab=contracts_check', pageNum, total)}</div>${cards.join('') || '<div class="card">Очередь пуста.</div>'}${pager('/panel?tab=contracts_check', pageNum, total)}`;
+  const idsOnPage = rows.map((r) => r.id).join(',');
+  return `<div class="card"><h2>Контракты на проверке — всего ${total}</h2>
+    <form method="GET" action="/panel" class="bar" style="margin:6px 0">
+      <input type="hidden" name="tab" value="contracts_check">
+      <input name="who" value="${esc(flt)}" placeholder="Discord ID участника" style="max-width:200px">
+      <select name="sort"><option value="old"${sortOld ? ' selected' : ''}>сначала старые</option><option value="new"${sortOld ? '' : ' selected'}>сначала новые</option></select>
+      <button class="btn ghost sm" type="submit">Показать</button>
+      ${flt ? '<a class="btn ghost sm" href="/panel?tab=contracts_check">сбросить</a>' : ''}
+    </form>
+    ${rows.length > 1 ? `<form method="POST" action="/panel/contract/review_bulk" onsubmit="return confirm('Отметить ВСЕ ${rows.length} контрактов на этой странице как выполненные?')">${csrfField(user)}<input type="hidden" name="ids" value="${idsOnPage}"><input type="hidden" name="verdict" value="fulfilled"><button class="btn ghost sm" type="submit">✅ Все на странице — выполнены</button></form>` : ''}
+    ${pager('/panel?tab=contracts_check', pageNum, total)}</div>${cards.join('') || '<div class="card">Очередь пуста.</div>'}${pager('/panel?tab=contracts_check', pageNum, total)}`;
 }
 
 // ---------- Управление гайдами FAQ (Владелец) ----------
@@ -4734,7 +5160,7 @@ async function notificationsBody(user, sp) {
     <div style="font-size:20px;flex:0 0 auto">${NOTIF_ICONS[n.kind] || '🔔'}</div>
     <div style="flex:1">
       <div>${esc(n.text)}</div>
-      <div class="mini">${fmt(n.created_at)}${n.link ? ` · <a href="${esc(n.link)}">открыть</a>` : ''}${snoozed ? ` · <span class="badge warn">отложено до ${fmt(n.snooze_until)}</span>` : ''}</div>
+      <div class="mini">${fmt(n.created_at)}${n.link ? ` · <a href="/n/${n.id}">открыть</a>` : ''}${snoozed ? ` · <span class="badge warn">отложено до ${fmt(n.snooze_until)}</span>` : ''}</div>
     </div>
     <div class="bar" style="flex:0 0 auto;margin:0">
       ${n.read_at ? '' : `<form method="POST" action="/notifications/read_one" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${n.id}"><button class="btn ghost sm" type="submit">прочитано</button></form>`}
@@ -4756,6 +5182,42 @@ async function notificationsBody(user, sp) {
 }
 
 // ---------- Карточка участника (печать / картинка) ----------
+// Карточка участника как настоящий SVG (текстовые элементы, без foreignObject) —
+// надёжный фолбэк, когда клиентский рендер PNG на мобиле не срабатывает (#58).
+async function profileCardSvg(client, targetId) {
+  const p = await db.get('SELECT * FROM participants WHERE discord_id = ?', [targetId]).catch(() => null);
+  if (!p) return null;
+  const ident = await passportsLib.computeEffectiveIdentity(targetId).catch(() => null);
+  const range = contracts.getWeekRange(0);
+  const week = await contracts.getUserWeekStats(targetId, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
+  const bs = await computeBadgesAndStreak(client, targetId);
+  const invRow = await db.get("SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed'", [targetId]).catch(() => null);
+  const passports = await passportsLib.getAllPassports(targetId).catch(() => []);
+  const name = ident ? `${ident.name} | ${ident.static}` : p.name;
+  const rank = roleName(client, (ident && ident.roleId) || p.role_id);
+  const rows = [
+    ['Вступил', fmt(p.joined_at)],
+    ['Паспорта', passports.map((pp) => `${pp.name} № ${pp.static}`).join(', ') || '—'],
+    ['Контракты за неделю', `+${week.fulfilled.length} / -${week.unfulfilled.length}`],
+    ['Всего выполнено', String(bs.fulfilled)],
+    ['Приглашений', String(invRow ? invRow.c : 0)],
+  ];
+  const W = 460; const H = 120 + rows.length * 34 + 46;
+  const t = (x, y, s, extra = '') => `<text x="${x}" y="${y}" ${extra}>${esc(String(s).slice(0, 60))}</text>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Segoe UI,Roboto,Arial,sans-serif">
+    <rect width="${W}" height="${H}" rx="18" fill="#15161a"/>
+    <rect width="${W}" height="64" rx="18" fill="#5b6cff"/>
+    <rect y="46" width="${W}" height="18" fill="#5b6cff"/>
+    ${t(W / 2, 96, name, 'text-anchor="middle" fill="#fff" font-size="21" font-weight="700"')}
+    ${t(W / 2, 118, rank, 'text-anchor="middle" fill="#9a9aa2" font-size="13"')}
+    ${rows.map(([k, v], i) => {
+      const y = 156 + i * 34;
+      return `<line x1="24" y1="${y - 22}" x2="${W - 24}" y2="${y - 22}" stroke="#2a2b31"/>${t(24, y, k, 'fill="#9a9aa2" font-size="14"')}${t(W - 24, y, v, 'text-anchor="end" fill="#e7e7ea" font-size="14" font-weight="700"')}`;
+    }).join('')}
+    ${t(24, H - 18, (bs.badges || []).slice(0, 4).join(' · ') || 'бейджей пока нет', 'fill="#8ea2ff" font-size="12"')}
+  </svg>`;
+}
+
 async function profileCardBody(client, targetId) {
   const p = await db.get('SELECT * FROM participants WHERE discord_id = ?', [targetId]).catch(() => null);
   if (!p) return '<div class="card">Участник не найден.</div>';
@@ -4790,6 +5252,7 @@ async function profileCardBody(client, targetId) {
     </div>
     <div class="bar">
       <button class="btn sm" type="button" onclick="fcCardPng(this)">🖼️ Скачать PNG</button>
+      <a class="btn ghost sm" href="/u/${esc(targetId)}/card.svg">🖼️ Скачать SVG</a>
       <button class="btn ghost sm" type="button" onclick="window.print()">🖨️ Печать / PDF</button>
     </div>
   </div>
@@ -4995,6 +5458,21 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   const g = guildOf(client);
   const uname = user.username || user.id;
 
+  // Отдельные лимиты на «дорогие» действия (помимо общего rate-limit).
+  const ACT_LIMITS = {
+    '/apply': [3, 3600e3], '/me/codeword': [8, 3600e3], '/me/hr_apply': [3, 24 * 3600e3],
+    '/form/submit': [10, 3600e3], '/me/ticket': [5, 3600e3], '/me/data_change': [5, 3600e3],
+    '/me/vacation': [5, 3600e3], '/me/appeal': [3, 24 * 3600e3], '/u/thank': [20, 3600e3],
+    '/u/guestbook_add': [15, 3600e3],
+  };
+  if (ACT_LIMITS[pathName]) {
+    const [lim, win] = ACT_LIMITS[pathName];
+    if (!rateOk('act:' + pathName + ':' + user.id, lim, win)) {
+      const back = pathName === '/apply' ? '/apply?' : pathName.startsWith('/u/') ? '/people?' : '/me?';
+      return back + qs({ err: 'Слишком часто — попробуйте позже.' });
+    }
+  }
+
   // ===== заявка на вступление =====
   if (pathName === '/apply') {
     if ((body.get('website') || '').trim()) return '/me?' + qs({ ok: 'Заявка отправлена на рассмотрение.' }); // honeypot — тихо игнорируем
@@ -5013,6 +5491,12 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const invited = (body.get('invited_by') || '').trim() || refId || '';
     if (!name || !/^[0-9]+$/.test(stat) || lvl < 1) return '/apply?' + qs({ err: 'Проверьте поля: имя, № паспорта (только цифры), LVL.' });
     if (await db.get("SELECT id FROM applications WHERE discord_id = ? AND status='pending'", [applicantId])) return '/me?' + qs({ err: 'У вас уже есть заявка на рассмотрении.' });
+    // Кулдаун переподачи после отказа — 7 дней.
+    const rej = await db.get("SELECT COALESCE(reviewed_at, created_at) t FROM applications WHERE discord_id = ? AND status = 'rejected' ORDER BY id DESC LIMIT 1", [applicantId]).catch(() => null);
+    if (rej && rej.t && Date.now() - new Date(rej.t).getTime() < 7 * 864e5) {
+      const daysLeft = Math.ceil((7 * 864e5 - (Date.now() - new Date(rej.t).getTime())) / 864e5);
+      return '/apply?' + qs({ err: `После отказа новую заявку можно подать через ${daysLeft} дн.` });
+    }
     const created = new Date().toISOString();
     const r = await db.run(
       `INSERT INTO applications (discord_id, discord_tag, name, static, lvl, skills, invited_by, status, created_at)
@@ -5120,7 +5604,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const text = (body.get('text') || '').trim().slice(0, 1000);
     if (!text || !(await db.get('SELECT id FROM applications WHERE id = ?', [appId]))) return '/panel?tab=apps&' + qs({ err: 'Пусто или заявка не найдена.' });
     await db.run('INSERT INTO application_comments (application_id, author_id, author_name, text, at) VALUES (?, ?, ?, ?, ?)', [appId, user.id, uname, text, new Date().toISOString()]);
-    return '/panel?tab=apps&' + qs({ ok: 'Комментарий добавлен.' });
+    try { await hook('appMirrorComment')(appId, uname, text); } catch (_) {}
+    return '/panel?tab=apps&' + qs({ ok: 'Комментарий добавлен (виден и в Discord).' });
   }
 
   const storeShot = (contractId, slot, s) => shotStore(user.id, contractId, slot, s);
@@ -5134,6 +5619,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (!pp) return '/me?' + qs({ err: 'Выберите паспорт из списка.' });
     const openCnt = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status IN ('taken','pending')", [user.id]).catch(() => null);
     if (openCnt && openCnt.c >= 15) return '/me?' + qs({ err: 'Слишком много незакрытых контрактов — сдайте итоги.' });
+    if (pp.profile_thread_id) {
+      const perPass = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND thread_id = ? AND status = 'taken'", [user.id, pp.profile_thread_id]).catch(() => null);
+      if (perPass && perPass.c >= 1) return '/me?' + qs({ err: `По паспорту № ${stat} уже есть взятый контракт — сдайте по нему итог.` });
+    }
     const shot = resolveShot(body, 'taken_data', 'taken_url');
     if (shot.err) return '/me?' + qs({ err: shot.err });
     if (!shot.buf && !shot.url) return '/me?' + qs({ err: 'Приложите скрин «взял» (файл или ссылку).' });
@@ -5204,7 +5693,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (g) {
       try {
         const sent = await postTo(client, config.CHANNEL_CODEWORD, {
-          content: `📰 Кодовое слово через сайт — <@${user.id}> (${esc(pp.name)}, № ${stat})\n${st.url}`,
+          content: `📰 Кодовое слово через сайт — <@${user.id}> (${esc(pp.name)}, № ${stat})\n${signedCimgUrl(st.url)}`,
           components: [new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`codeword_ok:${r.lastID}`).setLabel('✅ Подтвердить').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId(`codeword_no:${r.lastID}`).setLabel('❌ Отклонить').setStyle(ButtonStyle.Danger),
@@ -5358,11 +5847,14 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const prizeTiersRaw = (body.get('prize_tiers') || '').trim().slice(0, 800);
       const prizeTiers = giveaways.parsePrizeTiers(prizeTiersRaw).length ? prizeTiersRaw : null;
       if (!prize || winners < 1 || !durMs || !/^[0-9]+$/.test(channelId)) return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля формы (приз, победители, длительность, ID канала).' });
+      const minCw = Math.max(0, parseInt(body.get('min_contracts_week'), 10) || 0);
+      const weightByC = body.get('weight_by_contracts') === '1' ? 1 : 0;
       const endsAt = new Date(Date.now() + durMs);
       const gid = await giveaways.createGiveaway(channelId, prize, winners, user.id, endsAt.toISOString(), roleId, null, minRoleId, prizeTiers);
+      if (minCw > 0 || weightByC) await db.run('UPDATE giveaways SET min_contracts_week = ?, weight_by_contracts = ? WHERE id = ?', [minCw || null, weightByC || null, gid]).catch(() => {});
       const tiersDesc = giveaways.parsePrizeTiers(prizeTiers).map((t) => `\n${t.from === t.to ? t.from : t.from + '–' + t.to} место — **${t.text}**`).join('');
       const embed = new EmbedBuilder().setColor(0x57f287).setTitle(`🎉 ${prize}`)
-        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}${minRoleId ? `\nУсловие: роль <@&${minRoleId}> и выше` : ''}${tiersDesc}`)
+        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}${minRoleId ? `\nУсловие: роль <@&${minRoleId}> и выше` : ''}${minCw ? `\nУсловие: ≥ ${minCw} выполненных контрактов за эту неделю` : ''}${weightByC ? `\n🎟️ Бонус-билеты: шанс победы растёт с числом контрактов за неделю` : ''}${tiersDesc}`)
         .addFields(
           { name: 'Победителей', value: String(winners), inline: true },
           { name: 'Участников', value: '0', inline: true },
@@ -5447,7 +5939,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Редактор БД доступен только владельцу (havirys).' });
     const table = body.get('table');
     if (!DATA_TABLES[table]) return '/panel?tab=data&' + qs({ err: 'Неизвестная таблица.' });
-    const info = await db.all(`PRAGMA table_info(${table})`);
+    const info = await tableInfo(table);
     const snapshotRow = async (kind) => {
       try {
         const old = await db.get(`SELECT * FROM ${table} WHERE rowid = ?`, [body.get('pk')]);
@@ -5464,6 +5956,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const pk = body.get('pk');
       const setCols = info.filter((ci) => !ci.pk);
       if (!setCols.length) return '/panel?tab=data&table=' + encodeURIComponent(table) + '&' + qs({ err: 'Нет изменяемых столбцов.' });
+      const before = await db.get(`SELECT * FROM ${table} WHERE rowid = ?`, [pk]).catch(() => null);
       await snapshotRow('update');
       const sets = setCols.map((ci) => `${ci.name} = ?`).join(', ');
       const vals = setCols.map((ci) => {
@@ -5471,7 +5964,16 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         return raw === '' || raw == null ? null : raw;
       });
       await db.run(`UPDATE ${table} SET ${sets} WHERE rowid = ?`, [...vals, pk]);
-      await webAuditMeta(client, user, 'Правка БД (сайт)', `${table} rowid=${pk}: ${setCols.map((c) => c.name).join(', ')}`);
+      // Что реально изменилось: столбец: было → стало (для аудита).
+      const changes = [];
+      setCols.forEach((ci, i) => {
+        const oldV = before ? before[ci.name] : undefined;
+        const newV = vals[i];
+        const oS = oldV == null ? '∅' : String(oldV).slice(0, 60);
+        const nS = newV == null ? '∅' : String(newV).slice(0, 60);
+        if (oS !== nS) changes.push(`${ci.name}: «${oS}» → «${nS}»`);
+      });
+      await webAuditMeta(client, user, 'Правка БД (сайт)', `${table} rowid=${pk}: ${changes.join('; ') || 'без изменений'}`);
       return '/panel/row?' + qs({ table, pk, ok: 'Строка сохранена. Откат — на странице «Аудит» в течение 5 мин.' });
     }
     if (pathName === '/panel/row/delete') {
@@ -5724,6 +6226,47 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   }
 
   // ===== приём/отказ заявки на вступление (HR+) =====
+  if (pathName === '/panel/member/add_direct') {
+    if (!(await panelActionAllowed(client, user, acc, 'apps'))) return '/panel?tab=apps&' + qs({ err: 'Недостаточно прав.' });
+    if (!g) return '/panel?tab=apps&' + qs({ err: 'Бот недоступен.' });
+    const did = (body.get('discord_id') || '').trim();
+    const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
+    const stat = (body.get('static') || '').trim();
+    const lvl = parseInt(body.get('lvl'), 10) || 1;
+    if (!/^[0-9]{5,25}$/.test(did) || !name || !/^[0-9]+$/.test(stat)) return '/panel?tab=apps&' + qs({ err: 'Проверьте поля.' });
+    if (!(await memberOfGuild(client, did))) return '/panel?tab=apps&' + qs({ err: 'Этого Discord нет на сервере.' });
+    if (await db.get('SELECT id FROM participants WHERE discord_id = ?', [did])) return '/panel?tab=apps&' + qs({ err: 'Уже участник.' });
+    if (await db.get('SELECT id FROM blacklist WHERE discord_id = ? OR static = ?', [did, stat])) return '/panel?tab=apps&' + qs({ err: 'Discord или паспорт в ЧС.' });
+    if (await passportsLib.isStaticTaken(stat)) return '/panel?tab=apps&' + qs({ err: 'Такой № паспорта занят.' });
+    const gm = g.members.cache.get(did);
+    const tag = gm ? gm.user.tag : did;
+    const now = new Date().toISOString();
+    await db.run(
+      `INSERT INTO participants (discord_id, discord_tag, name, static, lvl, skills, online, role_id, joined_at) VALUES (?, ?, ?, ?, ?, '', '', ?, ?)`,
+      [did, tag, name, stat, lvl, config.ROLE_APPLY, now],
+    );
+    try { await acceptances.recordAcceptance(user.id, did, name, stat, now); } catch (_) {}
+    try { await hook('addParticipantDirect')(did, name, stat, lvl, user.id); } catch (e) { console.error('[web] addParticipantDirect:', e.message); }
+    await webAudit(client, user, 'Участник добавлен напрямую (сайт)', `<@${did}> — ${name} № ${stat}`);
+    return '/panel?tab=apps&' + qs({ ok: 'Участник добавлен.' });
+  }
+
+  if (pathName === '/panel/app/reject_bulk') {
+    if (!(await panelActionAllowed(client, user, acc, 'apps'))) return '/panel?tab=apps&' + qs({ err: 'Недостаточно прав.' });
+    const reason = (body.get('preset') || '').trim() || (body.get('reason') || '').trim() || 'Без указания причины';
+    const ids = body.getAll('ids').map((x) => parseInt(x, 10)).filter(Boolean).slice(0, 100);
+    let done = 0;
+    for (const id of ids) {
+      const app = await db.get('SELECT * FROM applications WHERE id = ?', [id]).catch(() => null);
+      if (!app || app.status !== 'pending') continue;
+      await db.run("UPDATE applications SET status='rejected', rejected_by=?, reject_reason=?, reviewed_at=? WHERE id=?", [user.id, reason, new Date().toISOString(), id]);
+      try { await hook('appMirrorRejected')(id, user.id); } catch (_) {}
+      done++;
+    }
+    await webAudit(client, user, 'Массовый отказ по заявкам (сайт)', `${done} шт — ${reason}`);
+    return '/panel?tab=apps&' + qs({ ok: `Отклонено: ${done}.` });
+  }
+
   if (pathName === '/panel/app/accept' || pathName === '/panel/app/reject') {
     if (!(await panelActionAllowed(client, user, acc, 'apps'))) return '/panel?tab=apps&' + qs({ err: 'Недостаточно прав.' });
     const id = parseInt(body.get('id'), 10) || 0;
@@ -5733,8 +6276,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName === '/panel/app/reject') {
       const reason = (body.get('preset') || '').trim() || (body.get('reason') || '').trim() || 'Без указания причины';
       await db.run("UPDATE applications SET status='rejected', rejected_by=?, reject_reason=?, reviewed_at=? WHERE id=?", [user.id, reason, new Date().toISOString(), id]);
-      await dmTo(client, app.discord_id, `❌ Ваша заявка на вступление отклонена. Причина: ${reason}`);
-      await pushNotify(app.discord_id, 'apply', `Заявка на вступление отклонена. Причина: ${reason}`, '/apply').catch(() => {});
+      // полная синхронизация Discord-стороны (карточка «Отклонено», ЛС, аудит)
+      try { await hook('appMirrorRejected')(id, user.id); } catch (_) {}
       await webAudit(client, user, 'Заявка отклонена (сайт)', `#${id} <@${app.discord_id}> — ${reason}`);
       return '/panel?tab=apps&' + qs({ ok: 'Заявка отклонена.' });
     }
@@ -5754,7 +6297,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
        VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)`,
       [app.discord_id, app.discord_tag, name, stat, lvl, app.skills || '', config.ROLE_APPLY, now],
     );
-    await db.run("UPDATE applications SET status='accepted', accepted_by=?, reviewed_at=? WHERE id=?", [user.id, now, id]);
+    // финальные значения — обратно в заявку, чтобы карточка в Discord их показала
+    await db.run("UPDATE applications SET status='accepted', accepted_by=?, reviewed_at=?, name=?, static=?, lvl=? WHERE id=?", [user.id, now, name, stat, lvl, id]);
     try { await acceptances.recordAcceptance(user.id, app.discord_id, name, stat, now); } catch (_) {}
     try {
       const m = await g.members.fetch(app.discord_id);
@@ -5768,20 +6312,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const inv = await invitations.resolveInviter(app.invited_by);
       if (inv) await invitations.recordInvitation(inv.discord_id, app.discord_id, name, stat, now).catch(() => {});
     }
-    await dmTo(client, app.discord_id, '✅ Ваша заявка на вступление принята! Добро пожаловать в организацию.');
-    if (channelUrl) await dmTo(client, app.discord_id, `📸 Ваш профиль для отчётов по контрактам: ${channelUrl}`);
-    try {
-      const rulesText = await hook('getCurrentText')('rules', '');
-      if (rulesText) await dmTo(client, app.discord_id, { embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle('📕 Свод правил организации').setDescription(String(rulesText).slice(0, 4000))] });
-    } catch (_) {}
     await hook('safeUpdateMembersList')(g);
-    if (app.message_id) {
-      try {
-        const ch = await g.channels.fetch(config.CHANNEL_APPLY_REVIEW);
-        const msg = await ch.messages.fetch(app.message_id);
-        await msg.edit({ components: [] });
-      } catch (_) {}
-    }
+    // полная синхронизация Discord-стороны: карточка «Принято», все ЛС (правила,
+    // инструкция по профилю), запись в аудит Discord — как при принятии в Discord
+    try { await hook('appMirrorAccepted')(id, user.id, channelUrl); } catch (_) {}
     await webAudit(client, user, 'Заявка принята (сайт)', `#${id} <@${app.discord_id}> — ${name} № ${stat}`);
     return '/panel?tab=apps&' + qs({ ok: 'Участник принят.' });
   }
@@ -6184,6 +6718,24 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   }
 
   // ===== участие в розыгрыше с сайта =====
+  if (pathName === '/g/grant_role') {
+    if (acc.rank < LEVELS.owner) return '/giveaways?' + qs({ err: 'Только Владелец.' });
+    const gid = parseInt(body.get('id'), 10) || 0;
+    const roleId = (body.get('role_id') || '').trim();
+    if (!/^[0-9]{5,25}$/.test(roleId)) return `/g/${gid}?` + qs({ err: 'Укажите ID роли.' });
+    if (!g || !g.roles.cache.get(roleId)) return `/g/${gid}?` + qs({ err: 'Роль не найдена на сервере.' });
+    const ents = await giveaways.getEntries(gid).catch(() => []);
+    (async () => {
+      let ok = 0;
+      for (const uid of ents) {
+        try { const m = await g.members.fetch(uid); await m.roles.add(roleId); ok++; } catch (_) {}
+        await new Promise((r) => setTimeout(r, 350));
+      }
+      await webAudit(client, user, 'Выдача роли участникам розыгрыша (сайт)', `#${gid} → роль ${roleId}: ${ok}/${ents.length}`).catch(() => {});
+    })();
+    return `/g/${gid}?` + qs({ ok: `Выдача роли запущена для ${ents.length} участников (идёт в фоне).` });
+  }
+
   if (pathName === '/g/enter') {
     if (acc.rank < LEVELS.member) return '/me?' + qs({ err: 'Участвовать в розыгрышах могут только участники организации.' });
     const gid = parseInt(body.get('id'), 10) || 0;
@@ -6197,6 +6749,11 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       try { m = await g.members.fetch(user.id); } catch (_) { return `/g/${gid}?` + qs({ err: 'Вас нет на Discord-сервере.' }); }
       if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) return `/g/${gid}?` + qs({ err: 'Нужна нужная роль.' });
       if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) return `/g/${gid}?` + qs({ err: 'Ранг ниже минимального.' });
+      if (gv.min_contracts_week) {
+        const r = contracts.getWeekRange(0);
+        const cw = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [user.id, r.start.toISOString(), r.end.toISOString()]).then((x) => (x ? x.c : 0)).catch(() => 0);
+        if (cw < gv.min_contracts_week) return `/g/${gid}?` + qs({ err: `Нужно ≥ ${gv.min_contracts_week} выполненных контрактов за эту неделю (у вас ${cw}).` });
+      }
       await giveaways.addEntry(gid, user.id);
     } else {
       await giveaways.removeEntry(gid, user.id);
@@ -6392,6 +6949,17 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const cat = Object.keys(TICKET_CAT_RU).filter((k) => k !== 'appeal').includes(body.get('category')) ? body.get('category') : null;
       await db.run(`UPDATE tickets SET priority = ?, tags = ?${cat ? ', category = ?' : ''} WHERE id = ?`,
         cat ? [pri === 'normal' ? null : pri, tags || null, cat, tid] : [pri === 'normal' ? null : pri, tags || null, tid]);
+      // Эмодзи-префикс в названии канала по первой известной метке (или приоритету).
+      if (g && t.channel_id && t.status === 'open') {
+        try {
+          const EMO = { 'оплата': '💰', 'срочно': '🔴', 'срочный': '🔴', 'баг': '🐞', 'жалоба': '⚠️', 'важно': '❗' };
+          let want = (tags.split(',').map((x) => EMO[x]).find(Boolean)) || (pri === 'high' ? '🔴' : '');
+          const ch = await g.channels.fetch(t.channel_id);
+          let nm = ch.name.replace(/^(?:💰|🔴|🐞|⚠️|❗)-?/u, '');
+          const next = (want ? want + '-' : '') + nm;
+          if (next !== ch.name && next.length <= 100) await ch.setName(next.slice(0, 100)).catch(() => {});
+        } catch (_) {}
+      }
       await webAudit(client, user, 'Тикет: приоритет/категория/метки (сайт)', `#${tid} → ${pri}${cat ? ' /' + cat : ''}${tags ? ' [' + tags + ']' : ''}`);
       return back + qs({ ok: 'Сохранено.' });
     }
@@ -6455,6 +7023,26 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     }
     await webAudit(client, user, 'Контракт проверен (сайт)', `#${id} → ${verdict}`);
     return '/panel?tab=contracts_check&' + qs({ ok: 'Готово.' });
+  }
+
+  // массовая простановка вердикта (обычно «выполнен») по списку id
+  if (pathName === '/panel/contract/review_bulk') {
+    if (!(await panelActionAllowed(client, user, acc, 'contracts_check'))) return '/panel?tab=contracts_check&' + qs({ err: 'Недостаточно прав.' });
+    const verdict = ['fulfilled', 'unfulfilled', 'rejected'].includes(body.get('verdict')) ? body.get('verdict') : 'fulfilled';
+    const ids = (body.get('ids') || '').split(',').map((x) => parseInt(x, 10)).filter(Boolean).slice(0, 100);
+    let done = 0;
+    for (const id of ids) {
+      const cn = await contracts.getContractById(id).catch(() => null);
+      if (!cn || cn.status !== 'pending') continue;
+      await contracts.reviewContract(id, verdict, user.id).catch(() => {});
+      if (cn.thread_id && (verdict === 'fulfilled' || verdict === 'unfulfilled')) {
+        try { await hook('checkContractPromotion')(g, cn.thread_id); } catch (_) {}
+      }
+      done++;
+    }
+    try { await contractsDisplay.safeUpdateContractsStats(g); } catch (_) {}
+    await webAudit(client, user, 'Контракты проверены массово (сайт)', `${done} шт → ${verdict}`);
+    return '/panel?tab=contracts_check&' + qs({ ok: `Проверено: ${done}.` });
   }
 
   // ===== гайды FAQ (Владелец) =====
@@ -6789,16 +7377,18 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const sid = (body.get('subject_id') || (st === 'role' ? body.get('subject_role') : body.get('subject_user')) || body.get('discord_id') || '').trim();
       if (!/^[0-9]{5,25}$/.test(sid)) return '/panel?tab=grants&' + qs({ err: st === 'role' ? 'Выберите роль.' : 'Неверный Discord ID.' });
       const tabs = body.getAll('tab').filter((t) => GRANTABLE_TABS.has(t));
+      const expRaw = (body.get('expires_at') || '').trim();
+      const expIso = /^\d{4}-\d{2}-\d{2}$/.test(expRaw) ? new Date(expRaw + 'T23:59:59').toISOString() : null;
       await db.run("DELETE FROM panel_grants WHERE discord_id = ? AND COALESCE(subject_type,'user') = ?", [sid, st]);
       for (const t of tabs) {
-        await db.run('INSERT INTO panel_grants (discord_id, subject_type, tab, granted_by, granted_at) VALUES (?, ?, ?, ?, ?)', [sid, st, t, user.id, new Date().toISOString()]);
+        await db.run('INSERT INTO panel_grants (discord_id, subject_type, tab, granted_by, granted_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)', [sid, st, t, user.id, new Date().toISOString(), expIso]);
       }
       // грант по участнику — сбрасываем только его; по роли — весь кэш
       // (участников с ролью дёшево не перечислить).
       if (st === 'role') _grantsCache.clear();
       else _grantsCache.delete(sid);
-      await webAuditMeta(client, user, 'Доступы к панели (сайт)', `${st === 'role' ? 'роль' : ''} ${sid} → ${tabs.join(', ') || 'убраны все'}`);
-      return '/panel?tab=grants&' + qs({ ok: tabs.length ? `Выдано разделов: ${tabs.length}.` : 'Доступы убраны.' });
+      await webAuditMeta(client, user, 'Доступы к панели (сайт)', `${st === 'role' ? 'роль' : ''} ${sid} → ${tabs.join(', ') || 'убраны все'}${expIso ? ' (до ' + expRaw + ')' : ''}`);
+      return `/panel?tab=grants&edit=${st}:${sid}&` + qs({ ok: tabs.length ? `Выдано разделов: ${tabs.length}.` : 'Доступы убраны.' });
     }
     if (pathName === '/admin/page/save' || pathName === '/admin/page/revert') {
       const snapshotPage = async (sl) => {
@@ -6830,14 +7420,19 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const title = (body.get('title') || '').slice(0, 120);
       const contentTxt = (body.get('content') || '').slice(0, 20000);
       const nav = body.get('nav') === '1' ? 1 : 0;
-      const published = body.get('published') === '1' ? 1 : 0;
+      let published = body.get('published') === '1' ? 1 : 0;
+      const paRaw = (body.get('publish_at') || '').trim();
+      let publishAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(paRaw) ? new Date(paRaw).toISOString() : null;
+      // Время в будущем → держим черновиком до авто-публикации.
+      if (publishAt && Date.parse(publishAt) > Date.now()) published = 0;
+      else publishAt = null;
       const now = new Date().toISOString();
       await snapshotPage(orig && orig !== slug ? orig : slug);
       if (orig && orig !== slug) await db.run('DELETE FROM site_pages WHERE slug = ?', [orig]);
       await db.run(
-        `INSERT INTO site_pages (slug, title, content, nav, published, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, published = excluded.published, updated_at = excluded.updated_at`,
-        [slug, title, contentTxt, nav, published, now],
+        `INSERT INTO site_pages (slug, title, content, nav, published, publish_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, published = excluded.published, publish_at = excluded.publish_at, updated_at = excluded.updated_at`,
+        [slug, title, contentTxt, nav, published, publishAt, now],
       );
       await loadSite(true);
       await webAuditMeta(client, user, 'Сохранена доп. страница (сайт)', `/p/${slug}`);
@@ -6896,7 +7491,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName.startsWith('/admin/landing/')) {
       const KINDS = ['text', 'buttons', 'cards', 'stats'];
       if (pathName === '/admin/landing/settings') {
-        for (const k of ['hide_stats', 'hide_giveaways', 'hide_agitation', 'banner_on']) {
+        for (const k of ['hide_stats', 'hide_giveaways', 'hide_agitation', 'banner_on', 'discord_widget']) {
           await db.setSetting('site.' + k, body.get(k) === '1' ? '1' : '');
         }
         await db.setSetting('site.banner_text', (body.get('banner_text') || '').slice(0, 400));
@@ -7053,13 +7648,16 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== уведомления: прочитать всё / одно / отложить / настройки =====
   if (pathName === '/notifications/read_all') {
     await db.run('UPDATE notifications SET read_at = ? WHERE discord_id = ? AND read_at IS NULL', [new Date().toISOString(), user.id]);
+    invalidateUnread(user.id);
     return '/notifications?' + qs({ ok: 'Отмечено.' });
   }
   if (pathName === '/notifications/read_one') {
     await db.run('UPDATE notifications SET read_at = ? WHERE id = ? AND discord_id = ?', [new Date().toISOString(), parseInt(body.get('id'), 10) || 0, user.id]);
+    invalidateUnread(user.id);
     return '/notifications?' + qs({ ok: 'Отмечено.' });
   }
   if (pathName === '/notifications/snooze') {
+    invalidateUnread(user.id);
     await db.run('UPDATE notifications SET snooze_until = ? WHERE id = ? AND discord_id = ?', [new Date(Date.now() + 3 * 864e5).toISOString(), parseInt(body.get('id'), 10) || 0, user.id]);
     return '/notifications?' + qs({ ok: 'Отложено на 3 дня.' });
   }
@@ -7168,6 +7766,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 // ---------- Сервер ----------
 function start(client, hooks = {}) {
   HOOKS = hooks || {};
+  _mdClient = client;
   const port = process.env.PORT || 3000;
 
   const server = http.createServer(async (req, res) => {
@@ -7206,7 +7805,7 @@ function start(client, hooks = {}) {
 
       // Заморозка: участник с frozen=1 не может пользоваться сайтом (кроме выхода).
       // Статус кэшируется на 30 сек, чтобы не бить в БД на каждый запрос.
-      if (user && user.id !== OWNER_ID && path !== '/logout' && path !== '/manifest.webmanifest'
+      if (user && user.id !== OWNER_ID && path !== '/logout' && path !== '/manifest.webmanifest' && path !== '/sw.js'
           && !path.startsWith('/asset/') && !path.startsWith('/cimg/') && path !== '/healthz') {
         let fc = _frozenCache.get(user.id);
         if (!fc || Date.now() - fc.at > 30000) {
@@ -7235,6 +7834,12 @@ function start(client, hooks = {}) {
         }));
       }
 
+      // Минимальный service worker — нужен, чтобы браузер предложил «Установить приложение».
+      if (path === '/sw.js') {
+        return done(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
+          "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});self.addEventListener('fetch',function(){});");
+      }
+
       // ----- POST: все действия записи -----
       if (path === '/md/preview' && req.method === 'POST') {
         if (!user) return done(401, { 'Content-Type': 'text/plain' }, '');
@@ -7255,7 +7860,7 @@ function start(client, hooks = {}) {
         const backP = path === '/register' ? '/register?' : path === '/forgot' ? '/forgot?' : '/login/local?';
         if (!rateOk('auth:' + clientIp, 12, 60000)) return redirect(backP + qs({ err: 'Слишком много попыток — подождите минуту.' }));
         const b = await readBody(req);
-        if (!anonCsrfOk(clientIp, b.get('_csrf'))) return redirect(backP + qs({ err: 'Форма устарела — обновите страницу.' }));
+        if (!anonCsrfOk(null, b.get('_csrf'))) return redirect(backP + qs({ err: 'Форма устарела — обновите страницу.' }));
 
         if (path === '/register') {
           const login = (b.get('login') || '').trim();
@@ -7333,13 +7938,15 @@ function start(client, hooks = {}) {
       }
 
       if (path.startsWith('/cimg/') && req.method === 'GET') {
-        if (!user) return done(401, { 'Content-Type': 'text/plain' }, 'auth');
         const cid = parseInt(path.slice(6), 10) || 0;
+        const tokenOk = cimgTokenOk(cid, u.searchParams.get('t'));
+        if (!tokenOk && !user) return done(401, { 'Content-Type': 'text/plain' }, 'auth');
         const im = await db.get('SELECT id, owner_id, mime, data, file FROM contract_uploads WHERE id = ?', [cid]).catch(() => null);
         if (!im) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
-        if (im.owner_id !== user.id) {
+        if (!tokenOk && im.owner_id !== user.id) {
+          // скрины контрактов не секретны внутри организации — доступны участникам+
           const a2 = await accessFor(client, user.id).catch(() => ({ rank: 0 }));
-          if (a2.rank < LEVELS.hr) return done(403, { 'Content-Type': 'text/plain' }, 'forbidden');
+          if (a2.rank < LEVELS.member) return done(403, { 'Content-Type': 'text/plain' }, 'forbidden');
         }
         const etag = `"c${cid}"`;
         if ((req.headers['if-none-match'] || '') === etag) return done(304, { ETag: etag, 'Cache-Control': 'private, max-age=3600' }, '');
@@ -7403,7 +8010,7 @@ function start(client, hooks = {}) {
         return html(200, L({ title: 'Вход по паролю', user: null, level: 'guest', body: flash + `
           <h1>Вход по логину и паролю</h1>
           <div class="card" style="max-width:420px">
-            <form method="POST" action="/login/local" class="form">${anonCsrfField(clientIp)}
+            <form method="POST" action="/login/local" class="form">${anonCsrfField()}
               <label>Логин или почта<input name="login" required maxlength="120" autofocus></label>
               <label>Пароль<input name="password" type="password" required maxlength="200"></label>
               <button class="btn" type="submit">Войти</button>
@@ -7418,7 +8025,7 @@ function start(client, hooks = {}) {
           <h1>Регистрация без Discord</h1>
           <div class="card" style="max-width:420px">
             <p class="mini">Аккаунт по логину и паролю — для тех, у кого нет Discord. Чтобы подать заявку на вступление, позже нужно будет привязать Discord (аккаунт должен быть на сервере).</p>
-            <form method="POST" action="/register" class="form">${anonCsrfField(clientIp)}
+            <form method="POST" action="/register" class="form">${anonCsrfField()}
               <label>Логин (3–32, латиница/цифры/._-)<input name="login" required maxlength="32" pattern="[a-zA-Z0-9_.-]{3,32}"></label>
               <label>Почта<input name="email" type="email" required maxlength="120"></label>
               <label>Пароль (минимум 8 символов)<input name="password" type="password" required minlength="8" maxlength="200"></label>
@@ -7434,7 +8041,7 @@ function start(client, hooks = {}) {
           <h1>Сброс пароля</h1>
           <div class="card" style="max-width:420px">
             <p class="mini">Писем мы не шлём. Заявка уйдёт руководству — с вами свяжутся в Discord и сбросят пароль вручную.</p>
-            <form method="POST" action="/forgot" class="form">${anonCsrfField(clientIp)}
+            <form method="POST" action="/forgot" class="form">${anonCsrfField()}
               <label>Ваш логин<input name="login" maxlength="60"></label>
               <label>Почта аккаунта<input name="email" type="email" maxlength="120"></label>
               <label>Как с вами связаться / комментарий<textarea name="note" rows="3" maxlength="500"></textarea></label>
@@ -7601,6 +8208,32 @@ function start(client, hooks = {}) {
         return html(200, L({ title: 'Заявка на вступление', user, level, body: flash + applyBody(user, getCookie(req.headers.cookie, 'fc_ref')) }));
       }
 
+      if (path === '/me/export.json' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const id = user.id;
+        const pick = async (sql, p = []) => db.all(sql, p).catch(() => []);
+        const out = {
+          exported_at: new Date().toISOString(),
+          discord_id: id,
+          participant: await db.get('SELECT * FROM participants WHERE discord_id = ?', [id]).catch(() => null),
+          passports: await pick('SELECT * FROM extra_passports WHERE discord_id = ?', [id]),
+          applications: await pick('SELECT * FROM applications WHERE discord_id = ?', [id]),
+          contracts: await pick('SELECT id, thread_id, status, submitted_at, taken_submitted_at, message_url FROM contracts WHERE discord_id = ?', [id]),
+          vacations: await pick('SELECT * FROM vacations WHERE discord_id = ?', [id]),
+          kicks: await pick('SELECT * FROM kicks WHERE discord_id = ?', [id]),
+          invitations: await pick('SELECT * FROM invitations WHERE inviter_discord_id = ?', [id]),
+          thanks_received: await pick('SELECT from_id, note, created_at FROM thanks WHERE to_id = ?', [id]),
+          badges: await pick('SELECT badge_key, awarded_at FROM badge_awards WHERE discord_id = ?', [id]),
+          tickets: await pick('SELECT id, subject, category, status, rating, created_at, closed_at FROM tickets WHERE opener_id = ?', [id]),
+          notifications: await pick('SELECT kind, text, link, created_at, read_at FROM notifications WHERE discord_id = ? ORDER BY id DESC LIMIT 500', [id]),
+          web_logins: await pick('SELECT ip, ua, at FROM web_logins WHERE discord_id = ? ORDER BY id DESC LIMIT 100', [id]),
+        };
+        return done(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Content-Disposition': `attachment; filename="my-data-${id}.json"`,
+        }, JSON.stringify(out, null, 2));
+      }
+
       if (path === '/me') {
         if (!user) return redirect('/login');
         let level = 'guest';
@@ -7616,7 +8249,7 @@ function start(client, hooks = {}) {
             <a class="btn" href="/">На главную</a>
             <a class="btn sm" href="/logout" style="background:var(--bad);margin-left:8px">Выйти из аккаунта</a>`;
         }
-        return html(200, L({ title: 'Личный кабинет', user, level, body: flash + bodyHtml }));
+        return html(200, L({ title: 'Личный кабинет', user, level, wide: true, body: flash + bodyHtml }));
       }
 
       if (path === '/people' && req.method === 'GET') {
@@ -7631,11 +8264,33 @@ function start(client, hooks = {}) {
         const acc = await accessFor(client, user.id);
         if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Доступ только для участников</h1><a class="btn" href="/apply">Подать заявку</a>' }));
         const uparts = decodeURIComponent(path.slice(3)).split('/');
+        if (uparts[1] === 'card.svg') {
+          if (uparts[0] !== user.id && acc.rank < LEVELS.hr) return done(403, { 'Content-Type': 'text/plain' }, 'forbidden');
+          const svg = await profileCardSvg(client, uparts[0]);
+          if (!svg) return done(404, { 'Content-Type': 'text/plain' }, 'not found');
+          return done(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Content-Disposition': `attachment; filename="card-${uparts[0]}.svg"` }, svg);
+        }
         if (uparts[1] === 'card') {
           if (uparts[0] !== user.id && acc.rank < LEVELS.hr) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Только свой профиль или HR+</h1>' }));
           return html(200, L({ title: 'Карточка', user, level: acc.level, body: flash + await profileCardBody(client, uparts[0]) }));
         }
         return html(200, L({ title: 'Профиль', user, level: acc.level, wide: true, body: flash + await profileBody(client, user, acc, uparts[0]) }));
+      }
+
+      if (path === '/panel/page_diff' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (user.id !== OWNER_ID) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Только havirys</h1>' }));
+        const slug = (u.searchParams.get('slug') || '').trim().toLowerCase();
+        const vid = parseInt(u.searchParams.get('vid'), 10) || 0;
+        const ver = await db.get('SELECT * FROM site_page_versions WHERE id = ? AND slug = ?', [vid, slug]).catch(() => null);
+        const cur = await db.get('SELECT content FROM site_pages WHERE slug = ?', [slug]).catch(() => null);
+        if (!ver || !cur) return html(404, L({ title: 'Нет данных', user, level: acc.level, body: '<h1>Версия или страница не найдена</h1>' }));
+        return html(200, L({ title: 'Различия', user, level: acc.level, wide: true, body: flash + `
+          <h1>Различия: <code>/p/${esc(slug)}</code></h1>
+          <p class="mini">Слева — версия от ${fmt(ver.saved_at)}, справа — текущая. Зелёное — добавлено, красное — убрано.</p>
+          <div class="card">${lineDiffHtml(ver.content || '', cur.content || '')}</div>
+          <p><a href="/panel?tab=pages">← к страницам</a></p>` }));
       }
 
       if (path === '/panel/row' && req.method === 'GET') {
@@ -7682,7 +8337,7 @@ function start(client, hooks = {}) {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
         if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для участников организации</h1><a class="btn" href="/me">Мой профиль</a>' }));
-        return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim()) }));
+        return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim(), u.searchParams.get('days')) }));
       }
 
       if (path === '/bug' && req.method === 'GET') {
@@ -7745,6 +8400,17 @@ function start(client, hooks = {}) {
         return html(200, L({ title: 'Уведомления', user, level: acc.level, body: flash + await notificationsBody(user, u.searchParams) }));
       }
 
+      // Переход по уведомлению — помечаем прочитанным и ведём на ссылку.
+      if (/^\/n\/\d+$/.test(path) && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const nid = parseInt(path.slice(3), 10) || 0;
+        const n = await db.get('SELECT link FROM notifications WHERE id = ? AND discord_id = ?', [nid, user.id]).catch(() => null);
+        await db.run('UPDATE notifications SET read_at = COALESCE(read_at, ?) WHERE id = ? AND discord_id = ?', [new Date().toISOString(), nid, user.id]).catch(() => {});
+        invalidateUnread(user.id);
+        const dest = n && n.link && /^\/[a-z0-9/_?=&.-]*$/i.test(n.link) ? n.link : '/notifications';
+        return redirect(dest);
+      }
+
       if (path === '/commands' && req.method === 'GET') {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
@@ -7775,6 +8441,13 @@ function start(client, hooks = {}) {
         return done(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'private, max-age=300' }, trr.html);
       }
 
+      if (/^\/ticket\/\d+\/status$/.test(path) && req.method === 'GET') {
+        if (!user) return done(401, { 'Content-Type': 'application/json' }, '{}');
+        const tid = parseInt(path.split('/')[2], 10) || 0;
+        const t = await db.get('SELECT status, rating FROM tickets WHERE id = ?', [tid]).catch(() => null);
+        return done(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' }, JSON.stringify(t || {}));
+      }
+
       if (path.startsWith('/ticket/') && req.method === 'GET') {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
@@ -7789,13 +8462,30 @@ function start(client, hooks = {}) {
         if (acc.rank < LEVELS.hr) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Нет доступа');
         const sendCsv = (name, text) => done(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${name}"` }, text);
 
+        if (path === '/export/chart.csv') {
+          const type = u.searchParams.get('type') || '';
+          if (type === 'weekly_contracts') {
+            const out = [];
+            for (let w = 11; w >= 0; w--) {
+              const r = contracts.getWeekRange(w);
+              const cnt = await db.get("SELECT COUNT(*) c FROM contracts WHERE status='fulfilled' AND submitted_at BETWEEN ? AND ?", [r.start.toISOString(), r.end.toISOString()]).then((x) => (x ? x.c : 0)).catch(() => 0);
+              out.push({ week: contracts.formatWeekLabel(r).replace(/\s*—.*/, ''), fulfilled: cnt });
+            }
+            return sendCsv('weekly_contracts.csv', toCsv(out, [{ key: 'week', label: 'Неделя' }, { key: 'fulfilled', label: 'Выполнено' }]));
+          }
+          return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Неизвестный график');
+        }
+
         if (path.startsWith('/export/table/') && path.endsWith('.csv')) {
           if (user.id !== OWNER_ID) return done(403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Только havirys');
           const tbl = path.slice('/export/table/'.length, -'.csv'.length);
           if (!DATA_TABLES[tbl]) return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Неизвестная таблица');
           const rows = await db.all(`SELECT * FROM ${tbl} LIMIT 50000`).catch(() => []);
-          const cols = rows.length ? Object.keys(rows[0]).map((k) => ({ key: k, label: k })) : [{ key: 'empty', label: 'empty' }];
-          await webAuditMeta(client, user, 'Экспорт таблицы CSV (сайт)', `${tbl} (${rows.length} строк)`);
+          let cols = rows.length ? Object.keys(rows[0]).map((k) => ({ key: k, label: k })) : [{ key: 'empty', label: 'empty' }];
+          const want = (u.searchParams.get('cols') || '').split(',').map((s) => s.trim()).filter(Boolean);
+          if (want.length) cols = cols.filter((c) => want.includes(c.key));
+          if (!cols.length) cols = [{ key: 'empty', label: 'empty' }];
+          await webAuditMeta(client, user, 'Экспорт таблицы CSV (сайт)', `${tbl} (${rows.length} строк${want.length ? ', колонки: ' + want.join(',') : ''})`);
           return sendCsv(`${tbl}.csv`, toCsv(rows, cols));
         }
 
@@ -7947,4 +8637,13 @@ ${inner}
   return server;
 }
 
-module.exports = { start, createMagicLink };
+// Сбросить кэш прав/грантов для участника — зовётся ботом при смене ранга,
+// разморозке, выдаче грантов и т.п., чтобы права на сайте обновились сразу.
+function invalidateAccess(discordId) {
+  const id = String(discordId || '');
+  if (!id) return;
+  accessCache.delete(id);
+  _grantsCache.delete(id);
+  _frozenCache.delete(id);
+}
+module.exports = { start, createMagicLink, invalidateAccess };
