@@ -376,11 +376,21 @@ th.selcol,td.selcol{width:36px;text-align:center;padding-left:6px;padding-right:
 .beditbar b{font-size:14px}
 .beditsp{flex:0 0 8px}
 .beditwrap{display:flex;gap:12px;align-items:flex-start}
-.bcanvas{flex:1;min-width:0;height:72vh;border:1px solid var(--line);border-radius:12px;background:var(--bg);overflow:hidden;touch-action:none;cursor:grab;background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
+.bcanvas{position:relative;flex:1;min-width:0;height:74vh;border:1px solid var(--line);border-radius:12px;background:var(--bg);overflow:hidden;touch-action:none;cursor:grab;background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
 .bcanvas:active{cursor:grabbing}
 .beditsvg{width:100%;height:100%;display:block}
 .benode{cursor:move}
 .benode.sel rect{stroke-width:2}
+.bhandle{fill:#fff;stroke:var(--accent);stroke-width:1.5;cursor:nwse-resize}
+.bctx{position:absolute;z-index:20;display:flex;gap:4px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:5px 7px;box-shadow:0 10px 28px rgba(0,0,0,.45)}
+.bctx[hidden]{display:none}
+.bctx button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px;min-width:26px;height:26px;font-size:12.5px;cursor:pointer;padding:0 4px;display:inline-flex;align-items:center;justify-content:center}
+.bctx button:hover{border-color:var(--accent)}
+.bctx .sw{min-width:20px;width:20px;height:20px;border-radius:5px;border:1px solid rgba(0,0,0,.3);padding:0}
+.bctx .sw.on{outline:2px solid var(--accent2);outline-offset:1px}
+.bctx .sep{width:1px;height:20px;background:var(--line);margin:0 2px}
+.bedit{position:absolute;z-index:25;box-sizing:border-box;border:2px solid var(--accent);border-radius:12px;padding:10px 13px;outline:none;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--panel2);color:var(--text);line-height:1.34}
+.bedit[hidden]{display:none}
 .binspect{width:240px;flex:0 0 240px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px}
 .binspect textarea,.binspect input,.binspect select{width:100%}
 .bview{width:100%;height:70vh;touch-action:none;cursor:grab;background:var(--bg);background-image:radial-gradient(var(--line) 1px,transparent 1px);background-size:22px 22px}
@@ -1394,7 +1404,7 @@ async function meBody(client, user) {
   const did = user.id;
   const acc = await accessFor(client, did);
   const p = await db.get('SELECT * FROM participants WHERE discord_id = ?', [did]);
-  const av = await resolveAvatar(client, did, 128);
+  const av = await avatarDataUri(client, did, 128);
   const roleTags = acc.roleNames.length ? acc.roleNames.map((n) => `<span class="pill">${esc(n)}</span>`).join('') : '<span class="muted">нет ролей на сервере</span>';
   const myTicket = await db.get("SELECT id, subject FROM tickets WHERE opener_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [did]).catch(() => null);
   const ticketCard = myTicket ? `<div class="card"><h2>Мой открытый тикет</h2><a class="btn sm" href="/ticket/${myTicket.id}">🎫 ${esc(myTicket.subject || 'Тикет')} — открыть переписку</a></div>` : '';
@@ -2758,6 +2768,28 @@ async function resolveAvatar(client, id, size = 128) {
   const wu = await db.get('SELECT avatar FROM web_users WHERE discord_id = ?', [id]).catch(() => null);
   return avatarUrl(id, wu && wu.avatar, s);
 }
+// Аватар в виде data:-URI (сервер скачивает картинку с CDN Discord и кодирует
+// её в base64). Нужно там, где <img> попадает в клиентский рендер PNG/SVG:
+// внешние картинки в foreignObject/canvas браузер не грузит, и аватар «ломается».
+const _avUriCache = new Map(); // url -> { at, uri }
+async function avatarDataUri(client, id, size = 128) {
+  let url = '';
+  try { url = await resolveAvatar(client, id, size); } catch (_) {}
+  if (!url || url.startsWith('data:')) return url || '';
+  const hit = _avUriCache.get(url);
+  if (hit && Date.now() - hit.at < 3600e3) return hit.uri;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return url;
+    const ct = (res.headers.get('content-type') || 'image/png').split(';')[0];
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length || buf.length > 2_000_000) return url;
+    const uri = `data:${ct};base64,${buf.toString('base64')}`;
+    _avUriCache.set(url, { at: Date.now(), uri });
+    if (_avUriCache.size > 400) _avUriCache.clear();
+    return uri;
+  } catch (_) { return url; }
+}
 
 // ---------- Просмотр участников ----------
 async function peopleBody(client, acc, query, pageNum, user) {
@@ -2830,7 +2862,7 @@ async function peopleBody(client, acc, query, pageNum, user) {
 async function profileBody(client, viewer, acc, targetId) {
   if (!/^\d{5,25}$/.test(targetId || '')) return '<div class="card">Неверный ID.</div><p><a href="/people">← к списку</a></p>';
   const p = await db.get('SELECT * FROM participants WHERE discord_id = ?', [targetId]);
-  const av = await resolveAvatar(client, targetId, 128);
+  const av = await avatarDataUri(client, targetId, 128);
   const bl = await db.all('SELECT * FROM blacklist WHERE discord_id = ?', [targetId]);
   const blBox = bl.length
     ? `<div class="card" style="border-color:#5c2626"><span class="badge bad">В чёрном списке</span> ${esc(bl.map((b) => (b.reason || '—') + (b.until ? ' (до ' + fmt(b.until) + ')' : '')).join('; '))}</div>`
@@ -4587,13 +4619,18 @@ function boardParse(str) {
   let o;
   try { o = JSON.parse(str || '{}'); } catch (_) { o = {}; }
   if (!o || typeof o !== 'object') o = {};
-  const nodes = (Array.isArray(o.nodes) ? o.nodes : []).slice(0, 500).map((n, i) => ({
+  const hex6 = (v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v)) ? v.toLowerCase() : null;
+  const nodes = (Array.isArray(o.nodes) ? o.nodes : []).slice(0, 800).map((n, i) => ({
     id: String((n && n.id) || ('n' + i)).slice(0, 40),
     x: Math.round(Number(n && n.x) || 0),
     y: Math.round(Number(n && n.y) || 0),
-    w: Math.max(60, Math.min(600, Math.round(Number(n && n.w) || 180))),
-    h: Math.max(32, Math.min(400, Math.round(Number(n && n.h) || 56))),
-    text: String((n && n.text) || '').slice(0, 400),
+    w: Math.max(80, Math.min(1200, Math.round(Number(n && n.w) || 200))),
+    h: Math.max(36, Math.min(1200, Math.round(Number(n && n.h) || 56))),
+    text: String((n && n.text) || '').slice(0, 2000),
+    color: hex6(n && n.color),
+    fontSize: Math.max(9, Math.min(48, Math.round(Number(n && n.fontSize) || 14))),
+    align: (n && n.align === 'left') ? 'left' : 'center',
+    autoH: (n && n.autoH === false) ? false : true,
     parent: (n && n.parent) ? String(n.parent).slice(0, 40) : null,
     ref: (n && n.ref && n.ref.id)
       ? { type: n.ref.type === 'role' ? 'role' : 'user', id: String(n.ref.id).replace(/[^0-9]/g, '').slice(0, 25) }
@@ -4651,7 +4688,8 @@ function boardOrgLayout(model) {
   return model;
 }
 
-const BOARD_LINE_H = 17;
+// Явный sans-стек: при рендере SVG в PNG вне страницы font-family:inherit даёт serif.
+const BOARD_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Helvetica,Arial,'Noto Sans','DejaVu Sans',sans-serif";
 // Эмодзи / стрелки / пиктограммы / CJK — рендерятся примерно вдвое шире буквы.
 function boardCharW(ch) {
   const c = ch.codePointAt(0);
@@ -4674,11 +4712,12 @@ function boardWrap(text, maxW) {
   }
   return out.length ? out.slice(0, 16) : [''];
 }
-// Ширина строки в «весовых единицах» под блок шириной w px.
-function boardMaxW(w) { return Math.max(6, Math.floor((w - 20) / 7.2)); }
+// Высота строки и «весовой лимит» строки — с учётом кегля.
+function boardLineH(fs) { return Math.round((fs || 14) * 1.34); }
+function boardMaxW(w, fs) { return Math.max(4, Math.floor((w - 24) / ((fs || 14) * 0.56))); }
 // Нужная высота блока, чтобы весь текст поместился.
-function boardFitH(text, w) {
-  return Math.max(40, boardWrap(text, boardMaxW(w)).length * BOARD_LINE_H + 20);
+function boardFitH(text, w, fs) {
+  return Math.max(Math.round((fs || 14) * 2.4), boardWrap(text, boardMaxW(w, fs)).length * boardLineH(fs) + 20);
 }
 
 // SSR-рендер доски в <svg> (страница просмотра и стартовый холст редактора).
@@ -4687,10 +4726,15 @@ function boardSvg(model, opts) {
   const m = (opts.layout && model.nodes.some((n) => n.parent))
     ? boardOrgLayout({ nodes: model.nodes.map((n) => ({ ...n })), edges: [] })
     : model;
-  // высоту считаем по тексту (блок всегда вмещает содержимое)
+  // высоту считаем по тексту (блок всегда вмещает содержимое), если не задана вручную
   const nodes = m.nodes.map((n) => {
-    const lines = boardWrap(n.text, boardMaxW(n.w));
-    return { ...n, _lines: lines, _h: Math.max(n.h || 40, lines.length * BOARD_LINE_H + 20) };
+    const fs = n.fontSize || 14;
+    const head = /^#\s/.test(n.text || '');
+    const text = head ? n.text.replace(/^#\s+/, '') : (n.text || '');
+    const lines = boardWrap(text, boardMaxW(n.w, fs));
+    const fitH = lines.length * boardLineH(fs) + 20;
+    const _h = (n.autoH === false) ? Math.max(n.h || 40, 36) : Math.max(fitH, Math.round(fs * 2.4));
+    return { ...n, _fs: fs, _head: head, _text: text, _lines: lines, _h };
   });
   const edges = m.edges;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -4706,18 +4750,28 @@ function boardSvg(model, opts) {
     return `<path d="M${ax} ${ay} C ${ax} ${my}, ${bx} ${my}, ${bx} ${by - 8}" fill="none" stroke="var(--muted)" stroke-width="1.75" marker-end="url(#bar)"/>`;
   }).join('');
   const nEls = nodes.map((n) => {
-    const ty = n.y + n._h / 2 - (n._lines.length - 1) * (BOARD_LINE_H / 2);
-    const cx = n.x + n.w / 2;
-    const tsp = n._lines.map((ln, i) => i === 0
-      ? `<tspan x="${cx}" dy="0" font-weight="700" fill="var(--accent2)">${esc(ln)}</tspan>`
-      : `<tspan x="${cx}" dy="${BOARD_LINE_H}">${esc(ln)}</tspan>`).join('');
+    const lh = boardLineH(n._fs);
+    const left = n.align === 'left';
+    const tx = left ? n.x + 14 : n.x + n.w / 2;
+    const ty = left ? n.y + 14 + n._fs : n.y + n._h / 2 - (n._lines.length - 1) * (lh / 2);
+    const anchor = left ? 'start' : 'middle';
+    const baseFill = n.color ? '#20242c' : 'var(--text)';
+    const headFill = n.color ? '#20242c' : 'var(--accent2)';
+    const tsp = n._lines.map((ln, i) => (i === 0 && n._head)
+      ? `<tspan x="${tx}" dy="0" font-weight="700" fill="${headFill}">${esc(ln)}</tspan>`
+      : `<tspan x="${tx}" dy="${i ? lh : 0}">${esc(ln)}</tspan>`).join('');
+    const fill = n.color || 'var(--panel2)';
+    const stroke = n.color ? 'rgba(0,0,0,.18)' : 'var(--line)';
+    const clip = `bclip_${esc(n.id)}`;
     return `<g data-id="${esc(n.id)}">
-      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n._h}" rx="12" fill="var(--panel2)" stroke="var(--line)" stroke-width="1.25" filter="url(#bsh)"/>
-      <text x="${cx}" y="${ty}" text-anchor="middle" dominant-baseline="middle" font-size="13" font-family="inherit" fill="var(--text)">${tsp}</text>
-      ${n.ref ? `<circle cx="${n.x + n.w - 12}" cy="${n.y + 12}" r="3.5" fill="var(--accent2)"></circle>` : ''}
+      <clipPath id="${clip}"><rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n._h}" rx="12"/></clipPath>
+      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n._h}" rx="12" fill="${fill}" stroke="${stroke}" stroke-width="1.25" filter="url(#bsh)"/>
+      ${(!n.color && !n._head) ? `<rect x="${n.x}" y="${n.y + 10}" width="4" height="${Math.max(0, n._h - 20)}" rx="2" fill="var(--accent)" fill-opacity=".65"/>` : ''}
+      <text clip-path="url(#${clip})" x="${tx}" y="${ty}" text-anchor="${anchor}" ${left ? '' : 'dominant-baseline="middle"'} font-size="${n._fs}" fill="${baseFill}">${tsp}</text>
+      ${n.ref ? `<circle cx="${n.x + n.w - 12}" cy="${n.y + 12}" r="3.5" fill="${n.color ? '#20242c' : 'var(--accent2)'}"></circle>` : ''}
     </g>`;
   }).join('');
-  return `<svg class="bsvg" xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet">
+  return `<svg class="bsvg" xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet" font-family="${esc(BOARD_FONT)}">
     <defs>
       <marker id="bar" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker>
       <filter id="bsh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/></filter>
@@ -4803,10 +4857,13 @@ function boardEditBody(board, user) {
       <a class="btn ghost sm" href="/board/${board.id}/versions">версии</a>
     </div>
     <div class="beditwrap">
-      <div id="bcanvas" class="bcanvas"></div>
+      <div id="bcanvas" class="bcanvas">
+        <div id="bctx" class="bctx" hidden></div>
+        <div id="bedit" class="bedit" contenteditable="true" spellcheck="false" hidden></div>
+      </div>
       <div id="binspect" class="binspect" hidden>
         <div class="mini">Выбранный блок</div>
-        <textarea id="bi_text" rows="3" placeholder="текст блока"></textarea>
+        <textarea id="bi_text" rows="3" placeholder="текст блока (или дв. клик по блоку)"></textarea>
         <label class="mini" id="bi_parentrow" hidden>Подчинён<select id="bi_parent"></select></label>
         <label class="mini">Ссылка на Discord — ID участника/роли<input id="bi_ref" maxlength="25" inputmode="numeric" placeholder="напр. 652927337016328212"></label>
         <label class="mini">Тип ссылки<select id="bi_reftype"><option value="user">участник</option><option value="role">роль</option></select></label>
@@ -4816,7 +4873,7 @@ function boardEditBody(board, user) {
         </div>
       </div>
     </div>
-    <p class="mini">Двойной клик по холсту — новый блок. Тащить блок — двигать (в оргрежиме — тащить на другой блок, чтобы подчинить). «↳ связь» — соединить/разорвать два блока. Клик по стрелке — убрать связь. Колесо — масштаб. Del — удалить блок. Ctrl+S — сохранить.</p>
+    <p class="mini">Двойной клик по блоку — редактировать текст. Тащить угол/край выделенного — менять размер. Плашка над блоком — цвет, кегль, выравнивание. Двойной клик по пустому месту — новый блок. «↳ связь» — соединить/разорвать. Колесо — масштаб. Del — удалить блок. Ctrl+S — сохранить.</p>
     <form method="POST" action="/board/${board.id}/save" id="bform" style="display:none">${csrfField(user)}</form>
     <script>window.__BOARD__=${payload};</script>
     <script src="/board-editor.js"></script>`;
@@ -5158,15 +5215,20 @@ var canvas=document.getElementById('bcanvas');
 var inspect=document.getElementById('binspect');
 var statusEl=document.getElementById('bstatus');
 var bar=document.querySelector('.beditbar');
+var bctx=document.getElementById('bctx');
+var bedit=document.getElementById('bedit');
 if(!canvas){ return; }
 
 var dirty=false, mode='select', connectFrom=null, sel=null;
 var undoStack=[], redoStack=[];
 var view={ x:20, y:20, k:1 };
-var pan=null, ndrag=null, textTimer=null;
+var pan=null, ndrag=null, resize=null, editing=null, editSnap=null;
+var COLORS=['#fff9b1','#d5f692','#a6ccf5','#f7c6d9','#e2c3f7','#ffd8a8','#ffb3b3','#c8e6c9'];
+var FONT="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Helvetica,Arial,'Noto Sans','DejaVu Sans',sans-serif";
 
 var svg=document.createElementNS(NS,'svg');
 svg.setAttribute('class','beditsvg');
+svg.setAttribute('font-family',FONT);
 var defs=document.createElementNS(NS,'defs');
 defs.innerHTML='<marker id="bea" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker><filter id="besh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/></filter>';
 var gEdges=document.createElementNS(NS,'g');
@@ -5180,6 +5242,7 @@ function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,
 function oneline(s){ return String(s||'').replace(/\\s+/g,' ').trim().slice(0,40)||'(без текста)'; }
 function setStatus(t){ if(statusEl) statusEl.textContent=t||''; }
 function markDirty(){ dirty=true; setStatus('не сохранено'); }
+function cssv(name,fb){ var v=getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return v||fb; }
 
 function screenToWorld(sx,sy){
   var r=canvas.getBoundingClientRect();
@@ -5188,12 +5251,13 @@ function screenToWorld(sx,sy){
 function applyView(){
   var t='translate('+view.x+','+view.y+') scale('+view.k+')';
   gEdges.setAttribute('transform',t); gNodes.setAttribute('transform',t);
+  placeCtx();
 }
 
 function snapshot(){ return JSON.stringify(model); }
-function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length>60) undoStack.shift(); redoStack.length=0; markDirty(); }
-function undo(){ if(!undoStack.length) return; redoStack.push(snapshot()); model=JSON.parse(undoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
-function redo(){ if(!redoStack.length) return; undoStack.push(snapshot()); model=JSON.parse(redoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
+function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length>80) undoStack.shift(); redoStack.length=0; markDirty(); }
+function undo(){ if(!undoStack.length) return; commitEdit(); redoStack.push(snapshot()); model=JSON.parse(undoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
+function redo(){ if(!redoStack.length) return; commitEdit(); undoStack.push(snapshot()); model=JSON.parse(redoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
 
 function isDescendant(id, ancestorId){
   var n=byId(id), guard=0;
@@ -5201,32 +5265,11 @@ function isDescendant(id, ancestorId){
   return false;
 }
 
-function orgLayout(){
-  var byid={}; model.nodes.forEach(function(n){ byid[n.id]=n; });
-  model.nodes.forEach(function(n){
-    var chain={}; chain[n.id]=1; var p=n.parent;
-    while(p){ if(chain[p]){ n.parent=null; break; } chain[p]=1; p=byid[p]?byid[p].parent:null; }
-  });
-  var kids={}; model.nodes.forEach(function(n){ kids[n.id]=[]; });
-  var roots=[];
-  model.nodes.forEach(function(n){ if(n.parent&&kids[n.parent]) kids[n.parent].push(n.id); else roots.push(n.id); });
-  var NW=230,GX=34,GY=150,TOP=40, cursor=40;
-  function place(id,depth){
-    var n=byid[id]; n.w=NW; n.h=Math.max(52,fitH(n.text,NW)); n.y=TOP+depth*GY;
-    var ch=kids[id]||[];
-    if(!ch.length){ n.x=cursor; cursor+=NW+GX; return; }
-    var first=null,last=null;
-    ch.forEach(function(c){ place(c,depth+1); if(first===null)first=byid[c].x; last=byid[c].x; });
-    n.x=Math.round((first+last)/2);
-  }
-  roots.forEach(function(r){ place(r,0); cursor+=GX; });
-  model.edges=model.nodes.filter(function(n){ return n.parent; }).map(function(n){ return { id:'e_'+n.parent+'_'+n.id, from:n.parent, to:n.id }; });
-}
-
-var LH=17;
+// ---- перенос строк и высота с учётом кегля ----
 function chW(ch){ var c=ch.codePointAt(0); return (c>=0x1F000||(c>=0x2190&&c<=0x2BFF)||(c>=0x2600&&c<=0x27BF)||(c>=0x3000&&c<=0x9FFF)||c===0x2022)?2:1; }
 function strW(s){ var w=0,a=String(s||''); for(var i=0;i<a.length;i++) w+=chW(a[i]); return w; }
-function maxW(w){ return Math.max(6, Math.floor((w-20)/7.2)); }
+function lineH(fs){ return Math.round((fs||14)*1.34); }
+function maxW(w,fs){ return Math.max(4, Math.floor((w-24)/((fs||14)*0.56))); }
 function wrap(text,mw){
   var out=[];
   String(text||'').split('\\n').forEach(function(raw){
@@ -5240,67 +5283,213 @@ function wrap(text,mw){
     });
     if(line) out.push(line);
   });
-  return out.length?out.slice(0,16):[''];
+  return out.length?out.slice(0,40):[''];
 }
-function fitH(text,w){ return Math.max(40, wrap(text, maxW(w)).length*LH+20); }
+function fitH(text,w,fs){ return Math.max(Math.round((fs||14)*2.4), wrap(text,maxW(w,fs)).length*lineH(fs)+20); }
+
+function orgLayout(){
+  var byid={}; model.nodes.forEach(function(n){ byid[n.id]=n; });
+  model.nodes.forEach(function(n){
+    var chain={}; chain[n.id]=1; var p=n.parent;
+    while(p){ if(chain[p]){ n.parent=null; break; } chain[p]=1; p=byid[p]?byid[p].parent:null; }
+  });
+  var kids={}; model.nodes.forEach(function(n){ kids[n.id]=[]; });
+  var roots=[];
+  model.nodes.forEach(function(n){ if(n.parent&&kids[n.parent]) kids[n.parent].push(n.id); else roots.push(n.id); });
+  var NW=240,GX=34,GY=155,TOP=40, cursor=40;
+  function place(id,depth){
+    var n=byid[id]; n.w=NW; n.h=Math.max(54,fitH(n.text,NW,n.fontSize)); n.y=TOP+depth*GY;
+    var ch=kids[id]||[];
+    if(!ch.length){ n.x=cursor; cursor+=NW+GX; return; }
+    var first=null,last=null;
+    ch.forEach(function(c){ place(c,depth+1); if(first===null)first=byid[c].x; last=byid[c].x; });
+    n.x=Math.round((first+last)/2);
+  }
+  roots.forEach(function(r){ place(r,0); cursor+=GX; });
+  model.edges=model.nodes.filter(function(n){ return n.parent; }).map(function(n){ return { id:'e_'+n.parent+'_'+n.id, from:n.parent, to:n.id }; });
+}
+
+function measure(n){
+  var fs=n.fontSize||14;
+  var head=/^#\\s/.test(n.text||'');
+  var txt=head?n.text.replace(/^#\\s+/,''):(n.text||'');
+  var lines=wrap(txt, maxW(n.w,fs));
+  var dh=(n.autoH===false)?Math.max(n.h||40,40):Math.max(lines.length*lineH(fs)+20, Math.round(fs*2.4));
+  n._fs=fs; n._head=head; n._lines=lines; n._dh=dh;
+}
 
 function render(skipInspect){
   if(kind==='orgchart') orgLayout();
+  model.nodes.forEach(measure);
   gEdges.textContent=''; gNodes.textContent='';
   model.edges.forEach(function(e){
     var a=byId(e.from), b=byId(e.to); if(!a||!b) return;
-    var ax=a.x+a.w/2, ay=a.y+a.h, bx=b.x+b.w/2, by=b.y, my=(ay+by)/2;
-    var p=document.createElementNS(NS,'path');
-    p.setAttribute('d','M'+ax+' '+ay+' C '+ax+' '+my+', '+bx+' '+my+', '+bx+' '+(by-7));
-    p.setAttribute('fill','none'); p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-width','1.5');
-    p.setAttribute('marker-end','url(#bea)');
+    var ax=a.x+a.w/2, ay=a.y+(a._dh||a.h), bx=b.x+b.w/2, by=b.y, my=(ay+by)/2;
+    var d='M'+ax+' '+ay+' C '+ax+' '+my+', '+bx+' '+my+', '+bx+' '+(by-8);
     if(kind!=='orgchart'){
-      // невидимая широкая «дорожка» под линией — по ней ловим клик, чтобы удалить связь
-      p.setAttribute('class','beedge'); p.style.cursor='pointer'; p.setAttribute('data-eid',e.id);
-      p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-opacity','0'); p.setAttribute('stroke-width','18');
-      p.setAttribute('pointer-events','stroke'); p.removeAttribute('marker-end');
-      var vt=document.createElementNS(NS,'title'); vt.textContent='клик — удалить связь'; p.appendChild(vt);
-      var vis=document.createElementNS(NS,'path'); vis.setAttribute('d',p.getAttribute('d')); vis.setAttribute('fill','none'); vis.setAttribute('stroke','var(--muted)'); vis.setAttribute('stroke-width','1.5'); vis.setAttribute('marker-end','url(#bea)'); vis.style.pointerEvents='none';
-      gEdges.appendChild(vis);
+      var hit=document.createElementNS(NS,'path');
+      hit.setAttribute('d',d); hit.setAttribute('class','beedge'); hit.style.cursor='pointer'; hit.setAttribute('data-eid',e.id);
+      hit.setAttribute('fill','none'); hit.setAttribute('stroke','var(--muted)'); hit.setAttribute('stroke-opacity','0');
+      hit.setAttribute('stroke-width','18'); hit.setAttribute('pointer-events','stroke');
+      var vt=document.createElementNS(NS,'title'); vt.textContent='клик — удалить связь'; hit.appendChild(vt);
+      var vis=document.createElementNS(NS,'path');
+      vis.setAttribute('d',d); vis.setAttribute('fill','none'); vis.setAttribute('stroke','var(--muted)'); vis.setAttribute('stroke-width','1.75'); vis.setAttribute('marker-end','url(#bea)'); vis.style.pointerEvents='none';
+      gEdges.appendChild(vis); gEdges.appendChild(hit);
+    } else {
+      var p=document.createElementNS(NS,'path');
+      p.setAttribute('d',d); p.setAttribute('fill','none'); p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-width','1.75'); p.setAttribute('marker-end','url(#bea)');
+      gEdges.appendChild(p);
     }
-    gEdges.appendChild(p);
   });
   model.nodes.forEach(function(n){
-    var lines=wrap(n.text, maxW(n.w));
-    n.h=Math.max(40, lines.length*LH+20); // высота всегда по тексту
+    var dh=n._dh, fs=n._fs, head=n._head, lines=n._lines, left=(n.align==='left');
     var g=document.createElementNS(NS,'g'); g.setAttribute('class','benode'+(sel===n.id?' sel':'')); g.setAttribute('data-id',n.id);
     var rect=document.createElementNS(NS,'rect');
-    rect.setAttribute('x',n.x); rect.setAttribute('y',n.y); rect.setAttribute('width',n.w); rect.setAttribute('height',n.h);
-    rect.setAttribute('rx','12'); rect.setAttribute('fill','var(--panel2)');
-    rect.setAttribute('stroke', sel===n.id?'var(--accent)':'var(--line)');
+    rect.setAttribute('x',n.x); rect.setAttribute('y',n.y); rect.setAttribute('width',n.w); rect.setAttribute('height',dh); rect.setAttribute('rx','12');
+    rect.setAttribute('fill', n.color||'var(--panel2)');
+    rect.setAttribute('stroke', sel===n.id?'var(--accent)':(n.color?'rgba(0,0,0,.18)':'var(--line)'));
     rect.setAttribute('stroke-width', sel===n.id?'2':'1.25');
     rect.setAttribute('filter','url(#besh)');
     g.appendChild(rect);
-    var cx=n.x+n.w/2;
+    if(!n.color && !head){
+      var strip=document.createElementNS(NS,'rect');
+      strip.setAttribute('x',n.x); strip.setAttribute('y',n.y+10); strip.setAttribute('width',4); strip.setAttribute('height',Math.max(0,dh-20));
+      strip.setAttribute('rx',2); strip.setAttribute('fill','var(--accent)'); strip.setAttribute('fill-opacity','.65');
+      g.appendChild(strip);
+    }
+    var clip=document.createElementNS(NS,'clipPath'); clip.setAttribute('id','bec_'+n.id);
+    var cr=document.createElementNS(NS,'rect'); cr.setAttribute('x',n.x); cr.setAttribute('y',n.y); cr.setAttribute('width',n.w); cr.setAttribute('height',dh); cr.setAttribute('rx','12');
+    clip.appendChild(cr); g.appendChild(clip);
+    var tx=left?n.x+14:n.x+n.w/2;
+    var lh=lineH(fs);
+    var ty=left?(n.y+14+fs):(n.y+dh/2-(lines.length-1)*(lh/2));
     var t=document.createElementNS(NS,'text');
-    var ty=n.y+n.h/2-(lines.length-1)*(LH/2);
-    t.setAttribute('x',cx); t.setAttribute('y',ty); t.setAttribute('text-anchor','middle');
-    t.setAttribute('dominant-baseline','middle'); t.setAttribute('font-size','13'); t.setAttribute('font-family','inherit'); t.setAttribute('fill','var(--text)');
+    t.setAttribute('x',tx); t.setAttribute('y',ty); t.setAttribute('text-anchor',left?'start':'middle');
+    if(!left) t.setAttribute('dominant-baseline','middle');
+    t.setAttribute('font-size',fs); t.setAttribute('fill', n.color?'#20242c':'var(--text)');
+    t.setAttribute('clip-path','url(#bec_'+n.id+')');
     lines.forEach(function(ln,i){
-      var ts=document.createElementNS(NS,'tspan'); ts.setAttribute('x',cx); ts.setAttribute('dy',i?LH:0); ts.textContent=ln;
-      if(i===0){ ts.setAttribute('font-weight','700'); ts.setAttribute('fill','var(--accent2)'); }
+      var ts=document.createElementNS(NS,'tspan'); ts.setAttribute('x',tx); ts.setAttribute('dy',i?lh:0); ts.textContent=ln;
+      if(i===0&&head){ ts.setAttribute('font-weight','700'); ts.setAttribute('fill',n.color?'#20242c':'var(--accent2)'); }
       t.appendChild(ts);
     });
     g.appendChild(t);
     if(n.ref&&n.ref.id){
       var c=document.createElementNS(NS,'circle');
-      c.setAttribute('cx',n.x+n.w-11); c.setAttribute('cy',n.y+11); c.setAttribute('r','3.5'); c.setAttribute('fill','var(--accent2)');
+      c.setAttribute('cx',n.x+n.w-12); c.setAttribute('cy',n.y+12); c.setAttribute('r','3.5'); c.setAttribute('fill',n.color?'#20242c':'var(--accent2)');
       g.appendChild(c);
     }
     gNodes.appendChild(g);
   });
+  if(sel && !editing && mode!=='connect'){
+    var sn=byId(sel);
+    if(sn){
+      var hs=Math.max(6, 9/view.k), dh2=sn._dh||sn.h;
+      var pts=[['nw',sn.x,sn.y],['n',sn.x+sn.w/2,sn.y],['ne',sn.x+sn.w,sn.y],['e',sn.x+sn.w,sn.y+dh2/2],['se',sn.x+sn.w,sn.y+dh2],['s',sn.x+sn.w/2,sn.y+dh2],['sw',sn.x,sn.y+dh2],['w',sn.x,sn.y+dh2/2]];
+      pts.forEach(function(pt){
+        var hr=document.createElementNS(NS,'rect');
+        hr.setAttribute('x',pt[1]-hs/2); hr.setAttribute('y',pt[2]-hs/2); hr.setAttribute('width',hs); hr.setAttribute('height',hs);
+        hr.setAttribute('rx',hs*0.25); hr.setAttribute('class','bhandle'); hr.setAttribute('data-h',pt[0]);
+        gNodes.appendChild(hr);
+      });
+    }
+  }
   applyView();
+  placeCtx();
   if(!skipInspect) syncInspect();
+}
+
+// ---- плашка над блоком (цвет / кегль / выравнивание) ----
+function buildCtx(){
+  if(!bctx || bctx._built) return;
+  var h='';
+  for(var i=0;i<COLORS.length;i++) h+='<button class="sw" data-c="'+COLORS[i]+'" style="background:'+COLORS[i]+'"></button>';
+  h+='<button class="sw" data-c="" style="background:var(--panel2)" title="без цвета">×</button>';
+  h+='<span class="sep"></span><button data-a="fsm" title="мельче">A−</button><button data-a="fsp" title="крупнее">A+</button>';
+  h+='<span class="sep"></span><button data-a="all" title="по левому краю">⯇</button><button data-a="alc" title="по центру">≡</button>';
+  h+='<span class="sep"></span><button data-a="edit" title="править текст">✎</button><button data-a="dup" title="дублировать">⧉</button><button data-a="del" title="удалить" style="color:var(--bad)">🗑</button>';
+  bctx.innerHTML=h; bctx._built=true;
+  bctx.addEventListener('pointerdown',function(e){ e.stopPropagation(); });
+  bctx.addEventListener('click',function(e){
+    var b=e.target.closest?e.target.closest('button'):null; if(!b) return;
+    var n=sel&&byId(sel); if(!n) return;
+    if(b.hasAttribute('data-c')){ pushUndo(); n.color=b.getAttribute('data-c')||null; render(); return; }
+    var a=b.getAttribute('data-a');
+    if(a==='edit'){ startEdit(sel); return; }
+    if(a==='dup'){ dupSel(); return; }
+    if(a==='del'){ delSelected(); return; }
+    pushUndo();
+    if(a==='fsm') n.fontSize=Math.max(9,(n.fontSize||14)-2);
+    else if(a==='fsp') n.fontSize=Math.min(48,(n.fontSize||14)+2);
+    else if(a==='all') n.align='left';
+    else if(a==='alc') n.align='center';
+    render();
+  });
+}
+function placeCtx(){
+  if(!bctx) return;
+  var n=(sel && !editing && mode!=='connect')?byId(sel):null;
+  if(!n){ bctx.hidden=true; return; }
+  buildCtx();
+  bctx.hidden=false;
+  // отметить активный цвет
+  var sws=bctx.querySelectorAll('.sw');
+  for(var i=0;i<sws.length;i++){ sws[i].className='sw'+((sws[i].getAttribute('data-c')||null)===(n.color||null)?' on':''); }
+  var sx=n.x*view.k+view.x, sy=n.y*view.k+view.y, sw=n.w*view.k;
+  var cw=bctx.offsetWidth||300, ch=bctx.offsetHeight||36;
+  var r=canvas.getBoundingClientRect();
+  var left=Math.max(6, Math.min(r.width-cw-6, sx+sw/2-cw/2));
+  var top=sy-ch-10;
+  if(top<6) top=sy+(n._dh||n.h)*view.k+10;
+  bctx.style.left=left+'px'; bctx.style.top=top+'px';
+}
+
+// ---- редактирование текста прямо в блоке ----
+function startEdit(id){
+  var n=byId(id); if(!n) return;
+  commitEdit();
+  sel=id; editing=id; editSnap=snapshot();
+  render(true);
+  if(!bedit) return;
+  var sx=n.x*view.k+view.x, sy=n.y*view.k+view.y;
+  bedit.hidden=false;
+  bedit.style.left=sx+'px'; bedit.style.top=sy+'px';
+  bedit.style.width=(n.w*view.k)+'px';
+  bedit.style.minHeight=((n._dh||n.h)*view.k)+'px';
+  bedit.style.fontSize=((n.fontSize||14)*view.k)+'px';
+  bedit.style.fontFamily=FONT;
+  bedit.style.textAlign=(n.align==='left')?'left':'center';
+  bedit.style.background=n.color||cssv('--panel2','#1e2025');
+  bedit.style.color=n.color?'#20242c':cssv('--text','#e9e9ee');
+  bedit.innerText=n.text||'';
+  bedit.focus();
+  try{ var rg=document.createRange(); rg.selectNodeContents(bedit); var s=window.getSelection(); s.removeAllRanges(); s.addRange(rg); }catch(_){}
+  placeCtx();
+}
+function commitEdit(){
+  if(!editing || !bedit) { editing=null; return; }
+  var n=byId(editing);
+  var v=bedit.innerText.replace(/\\r/g,'').slice(0,2000);
+  if(n && v!==n.text){
+    if(editSnap){ undoStack.push(editSnap); if(undoStack.length>80) undoStack.shift(); redoStack.length=0; }
+    n.text=v; markDirty();
+  }
+  editing=null; editSnap=null; bedit.hidden=true;
+  render();
+}
+if(bedit){
+  bedit.addEventListener('blur',commitEdit);
+  bedit.addEventListener('pointerdown',function(e){ e.stopPropagation(); });
+  bedit.addEventListener('keydown',function(e){
+    if(e.key==='Escape'){ e.preventDefault(); commitEdit(); }
+    else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){ e.preventDefault(); commitEdit(); save(); }
+    else if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); commitEdit(); }
+  });
 }
 
 function syncInspect(){
   var n=sel?byId(sel):null;
-  if(!n){ inspect.hidden=true; return; }
+  if(!n || editing){ inspect.hidden=true; return; }
   inspect.hidden=false;
   var ti=document.getElementById('bi_text');
   if(document.activeElement!==ti) ti.value=n.text||'';
@@ -5319,14 +5508,22 @@ function syncInspect(){
   document.getElementById('bi_reftype').value=(n.ref&&n.ref.type)||'user';
 }
 
-function addNodeAt(wx,wy){
+function addNodeAt(wx,wy,edit){
   pushUndo();
-  var n={ id:uid('n'), x:Math.round(wx/8)*8, y:Math.round(wy/8)*8, w:180, h:56, text:'Текст', parent:null, ref:null };
+  var n={ id:uid('n'), x:Math.round(wx/8)*8, y:Math.round(wy/8)*8, w:200, h:56, text:'Текст', color:null, fontSize:14, align:'center', autoH:true, parent:null, ref:null };
   model.nodes.push(n); sel=n.id; render();
-  setTimeout(function(){ var ti=document.getElementById('bi_text'); if(ti){ ti.focus(); ti.select(); } },0);
+  if(edit!==false) setTimeout(function(){ startEdit(n.id); },0);
+}
+function dupSel(){
+  var n=sel&&byId(sel); if(!n) return;
+  pushUndo();
+  var c=JSON.parse(JSON.stringify(n)); c.id=uid('n'); c.x=(n.x||0)+24; c.y=(n.y||0)+24;
+  if(kind!=='orgchart') c.parent=null;
+  model.nodes.push(c); sel=c.id; render();
 }
 function delSelected(){
   if(!sel) return;
+  commitEdit();
   pushUndo();
   model.nodes=model.nodes.filter(function(n){ return n.id!==sel; });
   model.nodes.forEach(function(n){ if(n.parent===sel) n.parent=null; });
@@ -5335,7 +5532,6 @@ function delSelected(){
 }
 function addEdge(from,to){
   if(from===to) return;
-  // если связь между этими блоками уже есть (в любую сторону) — переключатель: убираем
   var dup=model.edges.filter(function(e){ return (e.from===from&&e.to===to)||(e.from===to&&e.to===from); });
   pushUndo();
   if(dup.length){
@@ -5349,12 +5545,13 @@ function addEdge(from,to){
 }
 function fit(){
   var r=canvas.getBoundingClientRect(), pad=40;
+  model.nodes.forEach(measure);
   if(!model.nodes.length){ view={x:pad,y:pad,k:1}; applyView(); return; }
   var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
+  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+(n._dh||n.h)); });
   var bw=Math.max(1,maxX-minX), bh=Math.max(1,maxY-minY);
   var k=Math.min((r.width-pad*2)/bw,(r.height-pad*2)/bh,2);
-  k=Math.max(0.2,Math.min(2,k||1));
+  k=Math.max(0.15,Math.min(2,k||1));
   view.k=k;
   view.x=(r.width-bw*k)/2-minX*k;
   view.y=(r.height-bh*k)/2-minY*k;
@@ -5362,24 +5559,24 @@ function fit(){
 }
 
 var SAVE_ERR={ csrf:'сессия формы устарела — обновите страницу', forbidden:'нет доступа', notfound:'доска не найдена', too_big:'слишком большая доска', bad_json:'ошибка данных — не сохранено', bad_shape:'ошибка данных — не сохранено' };
-// Рендер доски в PNG-Blob (общий код для «Экспорт PNG» и снимка при сохранении).
 function renderBoardPng(cb){
+  commitEdit();
+  var keepSel=sel; sel=null; render(true); // без выделения и ручек в PNG
   var bb=computeBBox(), pad=30, W=Math.max(1,bb.w+pad*2), H=Math.max(1,bb.h+pad*2);
-  var cs=getComputedStyle(document.documentElement);
-  function cv(name,fb){ var v=cs.getPropertyValue(name).trim(); return v||fb; }
   var clone=svg.cloneNode(true);
+  sel=keepSel; render(true);
   clone.setAttribute('xmlns',NS);
   clone.setAttribute('width',W); clone.setAttribute('height',H);
   clone.setAttribute('viewBox',(bb.x-pad)+' '+(bb.y-pad)+' '+W+' '+H);
   for(var i=0;i<clone.childNodes.length;i++){ var ch=clone.childNodes[i]; if(ch.tagName==='g') ch.removeAttribute('transform'); }
   var s=new XMLSerializer().serializeToString(clone);
-  s=s.replace(/var\\(--(bg|panel|panel2|line|text|muted|accent|accent2|ok|bad|warn)\\)/g,function(_m,k){ return cv('--'+k,'#888'); });
+  s=s.replace(/var\\(--(bg|panel|panel2|line|text|muted|accent|accent2|ok|bad|warn)\\)/g,function(_m,k){ return cssv('--'+k,'#888'); });
   var src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent('<?xml version="1.0"?>'+s)));
   var img=new Image();
   img.onload=function(){
     var scl=2, cnv=document.createElement('canvas'); cnv.width=W*scl; cnv.height=H*scl;
-    var ctx=cnv.getContext('2d'); ctx.fillStyle=cv('--bg','#0f1013'); ctx.fillRect(0,0,cnv.width,cnv.height);
-    ctx.drawImage(img,0,0,cnv.width,cnv.height);
+    var cx=cnv.getContext('2d'); cx.fillStyle=cssv('--bg','#0f1013'); cx.fillRect(0,0,cnv.width,cnv.height);
+    cx.drawImage(img,0,0,cnv.width,cnv.height);
     cnv.toBlob(function(blob){ cb(blob||null); });
   };
   img.onerror=function(){ cb(null); };
@@ -5405,6 +5602,7 @@ function postSave(pngDataUrl){
     .catch(function(){ if(btn) btn.disabled=false; setStatus('ошибка сети — не сохранено'); });
 }
 function save(){
+  commitEdit();
   var btn=document.getElementById('bsave'); if(btn) btn.disabled=true; setStatus('сохранение…');
   if(JSON.stringify(model).length>2500000){ if(btn) btn.disabled=false; setStatus('доска слишком большая — не сохранено'); return; }
   try{
@@ -5414,10 +5612,10 @@ function save(){
     });
   }catch(e){ postSave(null); }
 }
-
 function computeBBox(){
+  model.nodes.forEach(measure);
   var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
+  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+(n._dh||n.h)); });
   if(!model.nodes.length){ minX=0;minY=0;maxX=400;maxY=200; }
   return { x:minX, y:minY, w:maxX-minX, h:maxY-minY };
 }
@@ -5433,23 +5631,28 @@ function exportPng(){
 }
 
 canvas.addEventListener('wheel',function(e){
+  if(e.target.closest && e.target.closest('#bctx,#bedit')) return;
   e.preventDefault();
+  if(editing) commitEdit();
   var r=canvas.getBoundingClientRect();
   var wx=(e.clientX-r.left-view.x)/view.k, wy=(e.clientY-r.top-view.y)/view.k;
-  var k2=view.k*(e.deltaY>0?0.9:1.1); k2=Math.max(0.2,Math.min(3,k2));
+  var k2=view.k*(e.deltaY>0?0.9:1.1); k2=Math.max(0.15,Math.min(3,k2));
   view.x=(e.clientX-r.left)-wx*k2; view.y=(e.clientY-r.top)-wy*k2; view.k=k2;
   applyView();
 },{passive:false});
 
 canvas.addEventListener('pointerdown',function(e){
-  var eEl=e.target && e.target.closest ? e.target.closest('.beedge') : null;
-  var edge=eEl ? eEl.getAttribute('data-eid') : (e.target && e.target.getAttribute && e.target.getAttribute('data-eid'));
-  if(edge){
-    pushUndo();
-    model.edges=model.edges.filter(function(x){ return x.id!==edge; });
-    render(); setStatus('связь удалена (Ctrl+Z — вернуть)');
+  if(e.target.closest && e.target.closest('#bctx,#bedit')) return;
+  var hDir=e.target.getAttribute && e.target.getAttribute('data-h');
+  if(hDir && sel){
+    var rn=byId(sel);
+    if(rn){ pushUndo(); resize={ id:sel, dir:hDir, x0:e.clientX, y0:e.clientY, ow:rn.w, oh:(rn._dh||rn.h), ox:rn.x, oy:rn.y }; try{ canvas.setPointerCapture(e.pointerId); }catch(_){} }
     return;
   }
+  if(editing) commitEdit();
+  var eEl=e.target && e.target.closest ? e.target.closest('.beedge') : null;
+  var edge=eEl ? eEl.getAttribute('data-eid') : (e.target && e.target.getAttribute && e.target.getAttribute('data-eid'));
+  if(edge){ pushUndo(); model.edges=model.edges.filter(function(x){ return x.id!==edge; }); render(); setStatus('связь удалена (Ctrl+Z — вернуть)'); return; }
   var g=e.target.closest ? e.target.closest('.benode') : null;
   if(mode==='connect'){
     if(g){
@@ -5473,6 +5676,16 @@ canvas.addEventListener('pointerdown',function(e){
 });
 canvas.addEventListener('pointermove',function(e){
   if(pan){ view.x=pan.x+(e.clientX-pan.px); view.y=pan.y+(e.clientY-pan.py); applyView(); return; }
+  if(resize){
+    var rn=byId(resize.id); if(!rn) return;
+    var dx=(e.clientX-resize.x0)/view.k, dy=(e.clientY-resize.y0)/view.k, d=resize.dir;
+    if(d.indexOf('e')>=0) rn.w=Math.max(90,Math.round(resize.ow+dx));
+    if(d.indexOf('w')>=0){ var nw=Math.max(90,Math.round(resize.ow-dx)); rn.x=Math.round(resize.ox+(resize.ow-nw)); rn.w=nw; }
+    if(d.indexOf('s')>=0){ rn.autoH=false; rn.h=Math.max(40,Math.round(resize.oh+dy)); }
+    if(d==='n'||d==='nw'||d==='ne'){ rn.autoH=false; var nh=Math.max(40,Math.round(resize.oh-dy)); rn.y=Math.round(resize.oy+(resize.oh-nh)); rn.h=nh; }
+    render(true);
+    return;
+  }
   if(ndrag){
     var n=byId(ndrag.id); if(!n) return;
     if(!ndrag.moved){ pushUndo(); ndrag.moved=true; }
@@ -5488,23 +5701,22 @@ canvas.addEventListener('pointermove',function(e){
     }
   }
 });
-function endDrag(e){
+function endDrag(){
   if(ndrag && kind==='orgchart' && ndrag.moved && ndrag.org){
     var n=byId(ndrag.id);
-    if(n){
-      if(ndrag.org==='__root__') n.parent=null;
-      else if(!isDescendant(ndrag.org, n.id)) n.parent=ndrag.org;
-    }
+    if(n){ if(ndrag.org==='__root__') n.parent=null; else if(!isDescendant(ndrag.org, n.id)) n.parent=ndrag.org; }
     render(); setStatus('не сохранено');
-  } else if(ndrag && !ndrag.moved){
+  } else if((ndrag && !ndrag.moved) || resize){
     render();
   }
-  pan=null; ndrag=null;
+  pan=null; ndrag=null; resize=null;
 }
 canvas.addEventListener('pointerup',endDrag);
 canvas.addEventListener('pointercancel',endDrag);
 canvas.addEventListener('dblclick',function(e){
-  if(e.target.closest && e.target.closest('.benode')) return;
+  if(e.target.closest && e.target.closest('#bctx,#bedit')) return;
+  var g=e.target.closest?e.target.closest('.benode'):null;
+  if(g){ startEdit(g.getAttribute('data-id')); return; }
   var w=screenToWorld(e.clientX,e.clientY);
   addNodeAt(w.x,w.y);
 });
@@ -5515,8 +5727,10 @@ if(bar) bar.addEventListener('click',function(e){
   if(a==='add'){ var r=canvas.getBoundingClientRect(); var w=screenToWorld(r.left+r.width/2,r.top+r.height/2); addNodeAt(w.x,w.y); }
   else if(a==='connect'){
     if(kind==='orgchart'){ setStatus('в оргрежиме связи задаются полем «Подчинён»'); return; }
+    commitEdit();
     mode=(mode==='connect')?'select':'connect'; connectFrom=null;
     setStatus(mode==='connect'?'связь: выберите два блока — соединить или разорвать':'');
+    render();
   }
   else if(a==='undo'){ undo(); }
   else if(a==='redo'){ redo(); }
@@ -5525,9 +5739,10 @@ if(bar) bar.addEventListener('click',function(e){
   else if(a==='png'){ exportPng(); }
 });
 
+var textTimer=null;
 document.getElementById('bi_text').addEventListener('input',function(){
   var n=sel&&byId(sel); if(!n) return;
-  n.text=this.value.slice(0,400); markDirty();
+  n.text=this.value.slice(0,2000); markDirty();
   clearTimeout(textTimer); textTimer=setTimeout(function(){ render(true); },220);
 });
 document.getElementById('bi_parent').addEventListener('change',function(){
@@ -5542,23 +5757,23 @@ function applyRef(){
 }
 document.getElementById('bi_ref').addEventListener('change',applyRef);
 document.getElementById('bi_reftype').addEventListener('change',applyRef);
-document.getElementById('bi_dup').addEventListener('click',function(){
-  var n=sel&&byId(sel); if(!n) return;
-  pushUndo();
-  var c=JSON.parse(JSON.stringify(n)); c.id=uid('n'); c.x=(n.x||0)+24; c.y=(n.y||0)+24;
-  if(kind!=='orgchart') c.parent=null;
-  model.nodes.push(c); sel=c.id; render();
-});
+document.getElementById('bi_dup').addEventListener('click',dupSel);
 document.getElementById('bi_del').addEventListener('click',delSelected);
 
 document.addEventListener('keydown',function(e){
+  if(editing){
+    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){ e.preventDefault(); commitEdit(); save(); }
+    return;
+  }
   var tag=(e.target&&e.target.tagName)||'';
   if(/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
   var k=e.key.toLowerCase();
   if((e.key==='Delete'||e.key==='Backspace')&&sel){ e.preventDefault(); delSelected(); }
+  else if((e.key==='Enter'||e.key==='F2')&&sel){ e.preventDefault(); startEdit(sel); }
   else if((e.ctrlKey||e.metaKey)&&k==='z'){ e.preventDefault(); if(e.shiftKey) redo(); else undo(); }
   else if((e.ctrlKey||e.metaKey)&&k==='y'){ e.preventDefault(); redo(); }
   else if((e.ctrlKey||e.metaKey)&&k==='s'){ e.preventDefault(); save(); }
+  else if((e.ctrlKey||e.metaKey)&&k==='d'&&sel){ e.preventDefault(); dupSel(); }
 });
 window.addEventListener('beforeunload',function(e){ if(dirty){ e.preventDefault(); e.returnValue=''; } });
 setInterval(function(){
@@ -5569,12 +5784,10 @@ setInterval(function(){
 try{
   var raw=localStorage.getItem('fc_board_'+boardId);
   if(raw){
-    var d=JSON.parse(raw);
-    if(d && d.model && d.v===serverVersion && window.confirm('Есть несохранённый черновик этой доски в браузере. Восстановить его?')){
-      model=d.model; dirty=true;
-    } else {
-      localStorage.removeItem('fc_board_'+boardId);
-    }
+    var dr=JSON.parse(raw);
+    if(dr && dr.model && dr.v===serverVersion && window.confirm('Есть несохранённый черновик этой доски в браузере. Восстановить его?')){
+      model=dr.model; dirty=true;
+    } else { localStorage.removeItem('fc_board_'+boardId); }
   }
 }catch(e){}
 
@@ -6327,6 +6540,7 @@ async function profileCardSvg(client, targetId) {
   const passports = await passportsLib.getAllPassports(targetId).catch(() => []);
   const name = ident ? `${ident.name} | ${ident.static}` : p.name;
   const rank = roleName(client, (ident && ident.roleId) || p.role_id);
+  const av = await avatarDataUri(client, targetId, 128);
   const rows = [
     ['Вступил', fmt(p.joined_at)],
     ['Паспорта', passports.map((pp) => `${pp.name} № ${pp.static}`).join(', ') || '—'],
@@ -6334,16 +6548,19 @@ async function profileCardSvg(client, targetId) {
     ['Всего выполнено', String(bs.fulfilled)],
     ['Приглашений', String(invRow ? invRow.c : 0)],
   ];
-  const W = 460; const H = 120 + rows.length * 34 + 46;
+  const W = 460; const AV = 74; const H = 150 + rows.length * 34 + 46;
   const t = (x, y, s, extra = '') => `<text x="${x}" y="${y}" ${extra}>${esc(String(s).slice(0, 60))}</text>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="Segoe UI,Roboto,Arial,sans-serif">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Helvetica,Arial,'Noto Sans','DejaVu Sans',sans-serif">
+    <defs><clipPath id="pcAv"><circle cx="${W / 2}" cy="64" r="${AV / 2}"/></clipPath></defs>
     <rect width="${W}" height="${H}" rx="18" fill="#15161a"/>
     <rect width="${W}" height="64" rx="18" fill="#5b6cff"/>
     <rect y="46" width="${W}" height="18" fill="#5b6cff"/>
-    ${t(W / 2, 96, name, 'text-anchor="middle" fill="#fff" font-size="21" font-weight="700"')}
-    ${t(W / 2, 118, rank, 'text-anchor="middle" fill="#9a9aa2" font-size="13"')}
+    <circle cx="${W / 2}" cy="64" r="${AV / 2 + 4}" fill="#15161a"/>
+    ${av ? `<image href="${esc(av)}" x="${W / 2 - AV / 2}" y="${64 - AV / 2}" width="${AV}" height="${AV}" clip-path="url(#pcAv)" preserveAspectRatio="xMidYMid slice"/>` : `<circle cx="${W / 2}" cy="64" r="${AV / 2}" fill="#2a2b31"/>`}
+    ${t(W / 2, 126, name, 'text-anchor="middle" fill="#fff" font-size="21" font-weight="700"')}
+    ${t(W / 2, 148, rank, 'text-anchor="middle" fill="#9a9aa2" font-size="13"')}
     ${rows.map(([k, v], i) => {
-      const y = 156 + i * 34;
+      const y = 186 + i * 34;
       return `<line x1="24" y1="${y - 22}" x2="${W - 24}" y2="${y - 22}" stroke="#2a2b31"/>${t(24, y, k, 'fill="#9a9aa2" font-size="14"')}${t(W - 24, y, v, 'text-anchor="end" fill="#e7e7ea" font-size="14" font-weight="700"')}`;
     }).join('')}
     ${t(24, H - 18, (bs.badges || []).slice(0, 4).join(' · ') || 'бейджей пока нет', 'fill="#8ea2ff" font-size="12"')}
@@ -6353,7 +6570,7 @@ async function profileCardSvg(client, targetId) {
 async function profileCardBody(client, targetId) {
   const p = await db.get('SELECT * FROM participants WHERE discord_id = ?', [targetId]).catch(() => null);
   if (!p) return '<div class="card">Участник не найден.</div>';
-  const av = await resolveAvatar(client, targetId, 256);
+  const av = await avatarDataUri(client, targetId, 256);
   const passports = await passportsLib.getAllPassports(targetId).catch(() => []);
   const ident = await passportsLib.computeEffectiveIdentity(targetId).catch(() => null);
   const range = contracts.getWeekRange(0);
@@ -6365,7 +6582,8 @@ async function profileCardBody(client, targetId) {
   <style>
     @media print{.noprint{display:none!important} body{background:#fff}}
     .pcardwrap{display:flex;justify-content:center;margin:16px 0}
-    .pcard{width:420px;max-width:100%;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.3)}
+    .pcard{width:420px;max-width:100%;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:var(--panel);box-shadow:0 14px 40px rgba(0,0,0,.3);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,Helvetica,Arial,sans-serif}
+    .pcard *{font-family:inherit}
     .pcard .band{height:80px;background:linear-gradient(120deg,var(--accent),var(--accent2))}
     .pcard .pc-av{width:96px;height:96px;border-radius:50%;border:4px solid var(--panel);object-fit:cover;display:block;margin:-52px auto 0;background:var(--panel2)}
     .pcard .pc-name{text-align:center;font-size:20px;font-weight:800;margin-top:10px;color:var(--text)}
@@ -6413,7 +6631,7 @@ async function profileCardBody(client, targetId) {
       var clone=node.cloneNode(true); clone.setAttribute('xmlns','http://www.w3.org/1999/xhtml');
       var html=new XMLSerializer().serializeToString(clone);
       var bg=getComputedStyle(document.body).backgroundColor||'#0f1013';
-      var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'"><style>'+css+'</style><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="background:'+bg+'">'+html+'</div></foreignObject></svg>';
+      var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'"><style>'+css+' foreignObject *{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Ubuntu,Helvetica,Arial,sans-serif}</style><foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="background:'+bg+';font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif">'+html+'</div></foreignObject></svg>';
       var img=new Image();
       img.onload=function(){
         var c=document.createElement('canvas'); c.width=w*2; c.height=h*2;

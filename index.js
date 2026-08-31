@@ -98,12 +98,28 @@ function getRoleIndex(roleId) {
   return config.ROLE_IDS.indexOf(roleId);
 }
 
+// Коды ответа Discord, которые НЕ являются ошибкой бота: токен взаимодействия
+// протух (бот не ответил за 3 сек — обычно из-за сетевого лага/переподключения),
+// сообщение/взаимодействие уже неактуально, ответ уже отправлен.
+const BENIGN_API_CODES = new Set([10062, 10008, 40060, 10003, 50027]);
+function isBenignDiscordError(err) {
+  return !!(err && (BENIGN_API_CODES.has(err.code) || /Unknown interaction|Unknown Message|already been (sent|acknowledged)|Invalid Webhook Token/i.test(err.message || '')));
+}
+
 async function safeReply(interaction, content) {
   const payload = typeof content === 'string' ? { content, flags: MessageFlags.Ephemeral } : { flags: MessageFlags.Ephemeral, ...content };
-  if (interaction.deferred || interaction.replied) {
-    return interaction.followUp(payload);
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.followUp(payload);
+    }
+    return await interaction.reply(payload);
+  } catch (err) {
+    if (isBenignDiscordError(err)) {
+      console.warn(`safeReply: взаимодействие уже неактуально (${err.code || err.message}) — пропускаю.`);
+      return null;
+    }
+    throw err;
   }
-  return interaction.reply(payload);
 }
 
 // Переключатели /settings_toggle — по умолчанию всё включено, пока явно не выключили
@@ -9148,35 +9164,88 @@ client.on('interactionCreate', async (interaction) => {
 
 // ---------- Глобальные обработчики ошибок ----------
 
+// Диагностика разрывов вебсокета. Часто повторяющийся цикл reconnect↔resume
+// почти всегда означает ЛИБО второй экземпляр бота на том же токене (гейтвей
+// выбивает сессии друг друга), ЛИБО нехватку CPU/RAM на хостинге (event loop
+// не успевает слать heartbeat — discord.js сам роняет «зомби»-соединение).
+let _wsDisconnects = 0;
+let _lastWsCode = null;
 client.on('shardDisconnect', (event, shardId) => {
-  // В момент разрыва соединения слать сообщение в Discord бессмысленно —
-  // связи как раз и нет. Логируем в консоль, а факт восстановления
-  // подтверждаем через shardResume ниже.
-  console.warn(`Шард ${shardId} отключился от Discord (код ${event.code}).`);
+  _wsDisconnects++;
+  _lastWsCode = event && event.code;
+  const hint = event && event.code === 4004 ? ' — НЕВЕРНЫЙ ТОКЕН'
+    : event && (event.code === 4013 || event.code === 4014) ? ' — проблема с интентами'
+      : event && event.code === 1000 ? ' — штатное закрытие (обычно рестарт/второй экземпляр)'
+        : ' — разрыв сети/зомби-соединение';
+  console.warn(`Шард ${shardId} отключился от Discord (код ${event && event.code}${hint}). Разрывов с запуска: ${_wsDisconnects}.`);
 });
 
 client.on('shardReconnecting', (shardId) => {
-  console.warn(`Шард ${shardId} переподключается к Discord...`);
+  // reconnect БЕЗ предшествующего shardDisconnect = discord.js сам решил, что
+  // соединение «зомби» (не пришёл heartbeat ACK) — признак голодания event loop
+  // или второго экземпляра.
+  console.warn(`Шард ${shardId} переподключается к Discord${_lastWsCode == null ? ' (зомби-соединение: не было явного разрыва — вероятно вторая копия бота или упор в лимит CPU/RAM)' : ' (после разрыва, код ' + _lastWsCode + ')'}...`);
+  _lastWsCode = null;
 });
 
+client.on('shardError', (err, shardId) => {
+  console.error(`Ошибка вебсокета шарда ${shardId}:`, err && err.message);
+  auditError('❌ Ошибка вебсокета Discord', `Шард ${shardId}: ${err && err.message}`);
+});
+
+// Логи хостинга не бесконечны, поэтому все ошибки дублируем в аудит-канал
+// (там они не пропадают). Одинаковые ошибки схлопываем — не чаще раза в 10
+// минут на уникальный текст, с пометкой сколько раз повторилось.
+const _auditErrSeen = new Map(); // подпись -> { at, count }
+async function auditError(title, body) {
+  const text = String(body == null ? '' : body);
+  const sig = (title + '|' + text.slice(0, 140)).slice(0, 220);
+  const now = Date.now();
+  const prev = _auditErrSeen.get(sig);
+  if (prev && now - prev.at < 10 * 60 * 1000) { prev.count++; return; }
+  const note = (prev && prev.count > 1) ? `\n(до этого повторялось ${prev.count} раз за ~10 мин)` : '';
+  _auditErrSeen.set(sig, { at: now, count: 1 });
+  if (_auditErrSeen.size > 300) _auditErrSeen.clear();
+  try {
+    if (!process.env.GUILD_ID) return;
+    const g = await client.guilds.fetch(process.env.GUILD_ID);
+    await logSystem(g, title, (text.slice(0, 1700) || '—') + note);
+  } catch (_) {}
+}
+
+// Разрыв/восстановление вебсокета с Discord (shardResume = сессия ВОЗОБНОВЛЕНА,
+// события не потеряны, бот не перезапускался). Частые resume = нестабильная сеть
+// хостинга, а не баг бота. Чтобы не спамить в аудит — уведомляем не чаще раза
+// в 30 минут и не в первые 90 секунд после старта, и показываем аптайм процесса
+// (растёт от сообщения к сообщению = процесс живой, дело в сети; сбрасывается =
+// хостинг перезапускает контейнер).
+let _lastResumeNotifyAt = 0;
+let _resumeCountSinceStart = 0;
 client.on('shardResume', async (shardId) => {
-  console.log(`Шард ${shardId} восстановил соединение с Discord.`);
+  _resumeCountSinceStart++;
+  const up = process.uptime();
+  console.log(`Шард ${shardId} возобновил сессию с Discord (resume #${_resumeCountSinceStart}, аптайм ${Math.round(up)}с).`);
+  if (up < 90) return; // спурьёзный resume сразу после подключения
+  if (Date.now() - _lastResumeNotifyAt < 30 * 60 * 1000) return; // не чаще раза в 30 мин
+  _lastResumeNotifyAt = Date.now();
   try {
     if (!process.env.GUILD_ID) return;
     const resumeGuild = await client.guilds.fetch(process.env.GUILD_ID);
-    await logSystem(resumeGuild, '🟢 Соединение восстановлено', `Бот снова на связи (шард ${shardId}).`);
+    const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60);
+    await logSystem(
+      resumeGuild,
+      '🟢 Соединение с Discord восстановлено',
+      `Шард ${shardId}: сессия возобновлена (данные не потеряны).\nАптайм процесса: ${h} ч ${m} мин · возобновлений с запуска: ${_resumeCountSinceStart}.`,
+    );
   } catch (err) {
     console.error('Не удалось отправить уведомление о восстановлении связи:', err.message);
   }
 });
 
-client.on('error', async (err) => {
+client.on('error', (err) => {
   console.error('Ошибка клиента Discord:', err);
-  try {
-    if (!process.env.GUILD_ID) return;
-    const errGuild = await client.guilds.fetch(process.env.GUILD_ID);
-    await logSystem(errGuild, '❌ Ошибка клиента Discord', err.message);
-  } catch (_) {}
+  const benign = isBenignDiscordError(err) ? ' (обычно безобидно: протухший токен взаимодействия при лаге сети)' : '';
+  auditError('❌ Ошибка клиента Discord', (err && err.message ? err.message : String(err)) + benign);
 });
 
 async function notifyShutdown(reason) {
@@ -9212,20 +9281,13 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
   console.error('uncaughtException:', err);
-  if (process.env.GUILD_ID) {
-    client.guilds.fetch(process.env.GUILD_ID)
-      .then((crashGuild) => logSystem(crashGuild, '⚠️ Неперехваченная ошибка (uncaughtException)', `${err.message}\n\`\`\`${String(err.stack || '').slice(0, 1500)}\`\`\``))
-      .catch(() => {});
-  }
+  auditError('⚠️ Неперехваченная ошибка (uncaughtException)', `${err && err.message}\n\`\`\`${String(err && err.stack || '').slice(0, 1400)}\`\`\``);
 });
 
 process.on('unhandledRejection', (err) => {
   console.error('unhandledRejection:', err);
-  if (process.env.GUILD_ID) {
-    client.guilds.fetch(process.env.GUILD_ID)
-      .then((rejectionGuild) => logSystem(rejectionGuild, '⚠️ Необработанный reject (unhandledRejection)', `${err && err.message ? err.message : String(err)}`))
-      .catch(() => {});
-  }
+  const benign = isBenignDiscordError(err) ? ' (обычно безобидно: протухший токен взаимодействия/сообщения)' : '';
+  auditError('⚠️ Необработанный reject (unhandledRejection)', (err && err.message ? err.message : String(err)) + benign);
 });
 
 // ---------- Запуск ----------

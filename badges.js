@@ -154,8 +154,9 @@ async function ensureRole(guild, key, roleMap) {
   if (roleMap && roleMap[key]) return roleMap[key];
   const meta = ROLE_META[key] || { name: LABELS[key] || key, color: 0x99aab5 };
   try {
+    // discord.js v14.16+: "color" в create() устарел — используем "colors".
     const role = await guild.roles.create({
-      name: meta.name, color: meta.color, hoist: false, mentionable: false,
+      name: meta.name, colors: { primaryColor: meta.color }, hoist: false, mentionable: false,
       reason: 'Авто-роль за достижение (бейдж)',
     });
     await db.run(
