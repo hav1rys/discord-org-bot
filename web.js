@@ -5,6 +5,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const dj = require('discord.js');
 const db = require('./db');
 const config = require('./config');
@@ -116,8 +117,17 @@ function ruStatus(s) {
 // ---------- Доступ (уровень по ролям на сервере) ----------
 const LEVELS = { guest: 0, member: 1, hr: 2, deputy: 3, owner: 4 };
 const accessCache = new Map(); // discordId -> { at, data }
+// «Просмотр как» — havirys может временно увидеть сайт глазами другого уровня
+// доступа (гость/участник/HR/зам/владелец), не выходя из своего аккаунта.
+// Область действия — только текущий HTTP-запрос (AsyncLocalStorage), поэтому
+// параллельные запросы других людей эта подмена не затрагивает; результат
+// НИКОГДА не кладём в accessCache, чтобы включённый/выключенный режим не «протёк».
+const viewAsALS = new AsyncLocalStorage();
+const VIEW_AS_LEVELS = ['guest', 'member', 'hr', 'deputy', 'owner'];
 
 async function accessFor(client, discordId) {
+  const forced = viewAsALS.getStore();
+  if (forced && discordId === OWNER_ID) return { level: forced, rank: LEVELS[forced], roleNames: [] };
   const cached = accessCache.get(discordId);
   if (cached && Date.now() - cached.at < 30000) return cached.data;
 
@@ -183,6 +193,22 @@ function renderMentions(client, s) {
   return String(s)
     .replace(/(?:<|&lt;)@&(?:amp;)?(\d+)(?:>|&gt;)/g, (m, rid) => roleTag(client, rid))
     .replace(/(?:<|&lt;)@!?(\d+)(?:>|&gt;)/g, (m, uid) => personLink(client, uid));
+}
+// Мини-рендер эмбеда Discord в HTML — используется там, где раньше в
+// сообщениях тикета показывалась просто заглушка «[embed]» и было не видно,
+// что бот на самом деле прислал (например, текст баг-репорта).
+function embedToHtml(client, e) {
+  if (!e) return '';
+  const color = (typeof e.color === 'number' && e.color >= 0) ? `#${e.color.toString(16).padStart(6, '0')}` : 'var(--line)';
+  const title = e.title ? `<div style="font-weight:700;margin-bottom:3px">${renderMentions(client, esc(e.title))}</div>` : '';
+  const desc = e.description ? `<div style="white-space:pre-wrap;margin-bottom:4px">${renderMentions(client, esc(e.description))}</div>` : '';
+  const fields = (e.fields || []).map((f) => `<div style="margin:2px 0"><b>${esc(f.name)}:</b> ${renderMentions(client, esc(f.value))}</div>`).join('');
+  const img = (e.image && e.image.url) ? `<img src="${esc(e.image.url)}" alt="" style="max-width:320px;max-height:220px;border-radius:8px;margin-top:6px;display:block">` : '';
+  const thumb = (!img && e.thumbnail && e.thumbnail.url) ? `<img src="${esc(e.thumbnail.url)}" alt="" style="max-width:80px;border-radius:8px;margin-top:6px;display:block">` : '';
+  const footer = e.footer && e.footer.text ? `<div class="mini" style="margin-top:4px">${esc(e.footer.text)}</div>` : '';
+  const body = title + desc + fields + img + thumb + footer;
+  if (!body) return '';
+  return `<div style="border-left:3px solid ${esc(color)};background:var(--panel2);border-radius:0 8px 8px 0;padding:8px 12px;margin:6px 0;font-size:13.5px">${body}</div>`;
 }
 // Дата регистрации Discord-аккаунта из snowflake-ID (эпоха Discord — 2015-01-01).
 function discordAccountCreated(id) {
@@ -961,6 +987,23 @@ function navItems(level, panelGrant) {
   return nav.filter(Boolean);
 }
 
+const VIEW_AS_LABELS = { guest: 'гость', member: 'участник', hr: 'HR-менеджер', deputy: 'заместитель', owner: 'владелец' };
+// Кнопка «👁 Просмотр как» — только у havirys. Меняет уровень доступа, которым
+// видит сайт САМ havirys (через accessFor + AsyncLocalStorage), не трогая
+// данные и права остальных. Список — на /viewas?level=<level> (сброс — без level).
+function viewAsControl(user) {
+  if (!user || user.id !== OWNER_ID) return '';
+  const cur = user._viewAsLevel || '';
+  const opts = [['', 'обычный (havirys)'], ...VIEW_AS_LEVELS.map((v) => [v, VIEW_AS_LABELS[v]])];
+  const items = opts.map(([v, l]) => `<a class="btn ${v === cur ? '' : 'ghost'} sm" style="display:block;margin:3px 0;text-align:left" href="/viewas?level=${esc(v)}">${v === cur ? '✓ ' : ''}${esc(l)}</a>`).join('');
+  return `<div class="themebox">
+    <button class="tglbtn" type="button" onclick="var p=this.nextElementSibling;var h=p.hasAttribute('hidden');if(h)p.removeAttribute('hidden');else p.setAttribute('hidden','');" title="Просмотр сайта как другой уровень доступа">👁${cur ? ` <b style="color:var(--warn)">${esc(VIEW_AS_LABELS[cur] || cur)}</b>` : ''}</button>
+    <div class="themepop" hidden style="width:210px">
+      <div class="mini" style="margin-bottom:6px">Смотреть сайт как:</div>
+      ${items}
+    </div>
+  </div>`;
+}
 function topbar(user, level, notif, panelGrant) {
   const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
   if (!user) {
@@ -973,7 +1016,7 @@ function topbar(user, level, notif, panelGrant) {
   return `<div class="top">
     <button id="navtoggle" type="button" aria-label="Меню" aria-expanded="false" onclick="var n=document.querySelector('.top .left.nav');if(n){var o=n.classList.toggle('open');this.setAttribute('aria-expanded',o?'true':'false');}">☰</button>
     <div class="left nav">${navItems(level, panelGrant).join('')}</div>
-    <div class="right">${bug}${bell}${themeToggle()}${brand}</div>
+    <div class="right">${viewAsControl(user)}${bug}${bell}${themeToggle()}${brand}</div>
   </div>`;
 }
 function bannerHtml() {
@@ -1004,6 +1047,7 @@ ${favicon ? `<link rel="icon" href="${favicon}">` : ''}
 <meta name="theme-color" content="${(SITE.color && SITE.color.bg) || '#0f1013'}">
 <style>${STYLE}${override}</style>${customCss}<script>${CLIENT_SCRIPT}</script></head><body>
 ${topbar(opts.user, opts.level || 'guest', opts.notif || 0, opts.panelGrant)}
+${opts.user && opts.user._viewAsLevel ? `<div style="background:var(--warn);color:#1a1a1a;text-align:center;padding:7px 12px;font-weight:700;font-size:13.5px">👁 Вы смотрите сайт как «${esc(VIEW_AS_LABELS[opts.user._viewAsLevel] || opts.user._viewAsLevel)}» · <a href="/viewas?level=" style="color:#1a1a1a;text-decoration:underline">вернуться к своему виду</a></div>` : ''}
 ${bannerHtml()}
 <div class="wrap${opts.wide ? ' wide' : ''}">${opts.body}
 <div class="foot">${foot}</div>
@@ -1296,6 +1340,136 @@ async function panelGrants(client, user, sp) {
   </div>`;
 }
 
+// ---------- Конструктор страниц (блоки друг под другом, как в Tilda) ----------
+// Работает поверх site_pages.blocks (JSON). Пока пусто — страница остаётся
+// на старом markdown-редакторе (content); блоки появляются, когда havirys
+// впервые откроет /panel/page_builder для этой страницы (автоконвертация).
+const PAGE_BLOCK_LABELS = { heading: 'Заголовок', text: 'Текст', image: 'Картинка', button: 'Кнопка', divider: 'Разделитель', spacer: 'Отступ', gallery: 'Галерея' };
+const PAGE_BLOCK_TYPES = Object.keys(PAGE_BLOCK_LABELS);
+function newPageBlockId() { return 'b' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+// Разрешаем только http(s), протокол-относительные, корневые и почта/телефон —
+// чтобы в href/src нельзя было протащить javascript: и подобное.
+function safePageUrl(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  if (/^(https?:)?\/\//i.test(s) || /^\//.test(s) || /^(mailto|tel):/i.test(s)) return s.slice(0, 500);
+  return '';
+}
+function parsePageBlocks(raw) {
+  let arr;
+  try { arr = JSON.parse(raw || '[]'); } catch (_) { arr = []; }
+  if (!Array.isArray(arr)) arr = [];
+  return arr.slice(0, 80).map((b) => {
+    const type = PAGE_BLOCK_TYPES.includes(b && b.type) ? b.type : 'text';
+    const id = String((b && b.id) || newPageBlockId()).replace(/[^a-z0-9]/gi, '').slice(0, 24) || newPageBlockId();
+    if (type === 'heading') return { id, type, text: String((b && b.text) || '').slice(0, 200), level: [1, 2, 3].includes(Number(b && b.level)) ? Number(b.level) : 2 };
+    if (type === 'text') return { id, type, md: String((b && b.md) || '').slice(0, 8000) };
+    if (type === 'image') return { id, type, url: safePageUrl(b && b.url), caption: String((b && b.caption) || '').slice(0, 200), width: ['normal', 'wide', 'full'].includes(b && b.width) ? b.width : 'normal' };
+    if (type === 'button') return { id, type, label: String((b && b.label) || '').slice(0, 60) || 'Кнопка', href: safePageUrl(b && b.href), style: (b && b.style === 'ghost') ? 'ghost' : 'primary' };
+    if (type === 'spacer') return { id, type, size: ['sm', 'md', 'lg'].includes(b && b.size) ? b.size : 'md' };
+    if (type === 'gallery') {
+      const items = Array.isArray(b && b.items) ? b.items : [];
+      return { id, type, items: items.slice(0, 24).map((it) => ({ url: safePageUrl(it && it.url), caption: String((it && it.caption) || '').slice(0, 200) })).filter((it) => it.url) };
+    }
+    return { id, type: 'divider' };
+  });
+}
+function pageBlockToHtml(b) {
+  if (b.type === 'heading') { const tag = 'h' + (b.level || 2); return `<${tag} style="margin-top:22px">${esc(b.text || '')}</${tag}>`; }
+  if (b.type === 'text') return `<div class="md">${mdToHtml(b.md || '')}</div>`;
+  if (b.type === 'image') {
+    const w = b.width === 'full' ? '100%' : b.width === 'wide' ? '720px' : '480px';
+    if (!b.url) return '<p class="mini">картинка не задана</p>';
+    return `<figure style="margin:16px 0;text-align:center">
+      <img src="${esc(b.url)}" alt="${esc(b.caption || '')}" style="max-width:${w};width:100%;border-radius:12px">
+      ${b.caption ? `<figcaption class="mini" style="margin-top:6px">${esc(b.caption)}</figcaption>` : ''}
+    </figure>`;
+  }
+  if (b.type === 'button') {
+    const cls = b.style === 'ghost' ? 'btn ghost' : 'btn';
+    return `<div style="margin:16px 0;text-align:center"><a class="${cls}" href="${esc(b.href || '#')}">${esc(b.label || 'Кнопка')}</a></div>`;
+  }
+  if (b.type === 'divider') return `<hr style="border:none;border-top:1px solid var(--line);margin:20px 0">`;
+  if (b.type === 'spacer') { const h = b.size === 'lg' ? '56px' : b.size === 'sm' ? '16px' : '32px'; return `<div style="height:${h}"></div>`; }
+  if (b.type === 'gallery') {
+    const items = b.items || [];
+    if (!items.length) return '<p class="mini">картинок пока нет</p>';
+    return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:16px 0">
+      ${items.map((it) => `<figure style="margin:0"><img src="${esc(it.url)}" alt="${esc(it.caption || '')}" style="width:100%;border-radius:10px;aspect-ratio:4/3;object-fit:cover">${it.caption ? `<figcaption class="mini" style="margin-top:4px">${esc(it.caption)}</figcaption>` : ''}</figure>`).join('')}
+    </div>`;
+  }
+  return '';
+}
+function pageBlocksToHtml(blocks) { return (blocks || []).map(pageBlockToHtml).join(''); }
+
+function pageBlockEditFields(b) {
+  if (b.type === 'heading') return `
+    <label>Текст заголовка<input name="text" value="${esc(b.text)}" maxlength="200" required></label>
+    <label>Размер<select name="level">
+      <option value="1"${b.level === 1 ? ' selected' : ''}>Крупный (H1)</option>
+      <option value="2"${b.level === 2 ? ' selected' : ''}>Средний (H2)</option>
+      <option value="3"${b.level === 3 ? ' selected' : ''}>Малый (H3)</option>
+    </select></label>`;
+  if (b.type === 'text') return `<label>Текст (форматирование как в Discord)<textarea name="md" data-md rows="6" maxlength="8000">${esc(b.md)}</textarea></label>`;
+  if (b.type === 'image') return `
+    <label>Ссылка на картинку<input name="url" value="${esc(b.url)}" maxlength="500" placeholder="/asset/12 или https://…"></label>
+    <label>Подпись<input name="caption" value="${esc(b.caption)}" maxlength="200"></label>
+    <label>Ширина<select name="width">
+      <option value="normal"${b.width === 'normal' ? ' selected' : ''}>обычная</option>
+      <option value="wide"${b.width === 'wide' ? ' selected' : ''}>широкая</option>
+      <option value="full"${b.width === 'full' ? ' selected' : ''}>на всю ширину</option>
+    </select></label>
+    <p class="mini">Свою картинку можно загрузить ниже на странице «Страницы» → «Картинки для страниц» и вставить сюда её ссылку вида <code>/asset/ID</code>.</p>`;
+  if (b.type === 'button') return `
+    <label>Текст кнопки<input name="label" value="${esc(b.label)}" maxlength="60" required></label>
+    <label>Ссылка<input name="href" value="${esc(b.href)}" maxlength="500" placeholder="/apply или https://…"></label>
+    <label>Вид<select name="style">
+      <option value="primary"${b.style === 'primary' ? ' selected' : ''}>яркая</option>
+      <option value="ghost"${b.style === 'ghost' ? ' selected' : ''}>контурная</option>
+    </select></label>`;
+  if (b.type === 'spacer') return `<label>Высота отступа<select name="size">
+      <option value="sm"${b.size === 'sm' ? ' selected' : ''}>малая</option>
+      <option value="md"${b.size === 'md' ? ' selected' : ''}>средняя</option>
+      <option value="lg"${b.size === 'lg' ? ' selected' : ''}>большая</option>
+    </select></label>`;
+  if (b.type === 'gallery') return `<label>Картинки — по одной в строке: <code>ссылка | подпись</code><textarea name="items" rows="4" maxlength="4000">${esc((b.items || []).map((it) => it.url + (it.caption ? ' | ' + it.caption : '')).join('\n'))}</textarea></label>`;
+  return '<p class="mini">Разделитель — просто горизонтальная линия, настроек нет.</p>';
+}
+
+function pageBuilderBody(user, pg) {
+  const blocks = parsePageBlocks(pg.blocks);
+  const csrf = csrfField(user);
+  const rows = blocks.map((b, i) => {
+    const hid = `${csrf}<input type="hidden" name="slug" value="${esc(pg.slug)}"><input type="hidden" name="id" value="${esc(b.id)}">`;
+    const preview = (b.type !== 'text' && b.type !== 'divider')
+      ? `<div class="card" style="background:var(--panel2);margin:0 0 10px">${pageBlockToHtml(b)}</div>` : '';
+    return `<div class="card" style="padding:14px 16px">
+      <div class="bar" style="justify-content:space-between;margin:0 0 8px">
+        <b>${esc(PAGE_BLOCK_LABELS[b.type] || b.type)}</b>
+        <div class="bar" style="margin:0">
+          <form method="POST" action="/admin/page_block/move" style="display:inline">${hid}<button class="btn ghost sm" name="dir" value="up" type="submit" ${i === 0 ? 'disabled' : ''}>▲</button></form>
+          <form method="POST" action="/admin/page_block/move" style="display:inline">${hid}<button class="btn ghost sm" name="dir" value="down" type="submit" ${i === blocks.length - 1 ? 'disabled' : ''}>▼</button></form>
+          <form method="POST" action="/admin/page_block/dup" style="display:inline">${hid}<button class="btn ghost sm" type="submit">⧉</button></form>
+          <form method="POST" action="/admin/page_block/del" style="display:inline" onsubmit="return confirm('Удалить блок?')">${hid}<button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
+        </div>
+      </div>
+      ${preview}
+      <form method="POST" action="/admin/page_block/save" class="form">${hid}
+        ${pageBlockEditFields(b)}
+        ${b.type !== 'divider' ? '<button class="btn sm" type="submit">Сохранить блок</button>' : ''}
+      </form>
+    </div>`;
+  }).join('');
+  const addRow = PAGE_BLOCK_TYPES.map((t) => `<form method="POST" action="/admin/page_block/add" style="display:inline">${csrf}<input type="hidden" name="slug" value="${esc(pg.slug)}"><input type="hidden" name="type" value="${t}"><button class="btn ghost sm" type="submit">+ ${esc(PAGE_BLOCK_LABELS[t])}</button></form>`).join(' ');
+  return `<h1>🧱 Конструктор страницы — ${esc(pg.title || pg.slug)}</h1>
+  <p><a href="/panel?tab=pages">← к списку страниц</a> · <a href="/p/${esc(pg.slug)}" target="_blank" rel="noopener">Открыть страницу ↗</a></p>
+  <div class="card">
+    <p class="mini">Блоки идут друг под другом сверху вниз. У текстового блока — предпросмотр формата прямо под ним; у остальных — сверху формы. Каждый блок сохраняется своей кнопкой.</p>
+    <div class="bar">${addRow}</div>
+  </div>
+  ${rows || '<div class="card muted">Блоков пока нет — добавьте первый выше.</div>'}`;
+}
+
 async function panelPages(client, user) {
   const pages = await db.all('SELECT * FROM site_pages ORDER BY slug').catch(() => []);
   const assets = await db.all('SELECT id, filename, mime, size, uploaded_at FROM page_assets ORDER BY id DESC LIMIT 100').catch(() => []);
@@ -1328,6 +1502,7 @@ async function panelPages(client, user) {
     <form method="POST" action="/admin/page/save" class="form">${csrfField(user)}<input type="hidden" name="orig" value="${esc(p.slug)}">
       <label>Адрес (slug) — открывается по /p/slug<input name="slug" value="${esc(p.slug)}" pattern="[a-z0-9-]{1,40}" required></label>
       <label>Заголовок<input name="title" value="${esc(p.title || '')}" maxlength="120"></label>
+      ${p.blocks ? '<p class="mini" style="color:var(--warn)">⚠ У страницы уже есть блоки конструктора — на сайте показываются ОНИ, а не текст ниже. Правь через 🧱 Конструктор.</p>' : ''}
       <label>Содержимое (форматирование как в Discord)<textarea name="content" data-md rows="8" maxlength="20000">${esc(p.content || '')}</textarea></label>
       <label class="chk"><input type="checkbox" name="nav" value="1" ${p.nav ? 'checked' : ''}><span>Показывать пункт в меню шапки</span></label>
       <label class="chk"><input type="checkbox" name="published" value="1" ${(p.published == null || p.published) ? 'checked' : ''}><span>Опубликована (снять — черновик, видит только havirys)</span></label>
@@ -1337,6 +1512,7 @@ async function panelPages(client, user) {
         ${p.publish_at && !p.published ? `<span class="badge">публикация ${fmt(p.publish_at)}</span>` : ''}
         <button class="btn sm" type="submit">Сохранить</button>
         <a class="btn ghost sm" href="/p/${esc(p.slug)}" target="_blank">Открыть</a>
+        <a class="btn ghost sm" href="/panel/page_builder?slug=${esc(p.slug)}">🧱 Конструктор${p.blocks ? '' : ' (перенести из текста)'}</a>
         <button class="btn ghost sm" formaction="/admin/page/del" style="background:var(--bad)" type="submit" onclick="return confirm('Удалить страницу?')">Удалить</button>
       </div>
     </form>
@@ -1549,7 +1725,7 @@ const PANEL_TABS = [
   ['texts', 'Тексты'],
   ['forms', 'Формы'],
   ['faq_manage', 'Гайды FAQ'],
-  ['reasons', 'Причины отказа'],
+  ['reasons', 'Шаблоны'],
   ['broadcast', 'Рассылка'],
   ['settings', 'Настройки'],
   ['perms', 'Права команд'],
@@ -1662,7 +1838,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'landing') body = await panelLanding(user);
   else if (tab === 'pages') body = await panelPages(client, user);
   else if (tab === 'grants') body = await panelGrants(client, user, sp);
-  else if (tab === 'accounts') body = await panelAccounts(client, user);
+  else if (tab === 'accounts') body = await panelAccounts(client, user, sp);
   else if (tab === 'data') body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
@@ -4137,9 +4313,25 @@ async function formPublicBody(client, user, f) {
     <p><a href="/me">← в кабинет</a></p>`;
 }
 
-async function panelAccounts(client, user) {
+async function panelAccounts(client, user, sp) {
   const rows = await db.all("SELECT discord_id, login, email, linked_discord_id, oauth_discord_id, first_login, login_count FROM web_users WHERE is_local = 1 ORDER BY first_login DESC LIMIT 300").catch(() => []);
   const reqs = await db.all("SELECT * FROM password_reset_requests WHERE status = 'pending' ORDER BY id DESC LIMIT 100").catch(() => []);
+  // Постоянный (не исчезающий тостом) блок с временным паролем сразу после сброса.
+  const resetTemp = sp && sp.get && sp.get('reset_temp');
+  const resetId = sp && sp.get && sp.get('reset_id');
+  let resetBox = '';
+  if (resetTemp && resetId) {
+    const who = rows.find((r) => r.discord_id === resetId);
+    resetBox = `<div class="card" style="border-color:var(--accent2)">
+      <h2>🔑 Временный пароль ${who ? `для «${esc(who.login || resetId)}»` : ''}</h2>
+      <p class="mini">Передайте это пользователю — при первом входе стоит сменить пароль на свой (Мой аккаунт → сменить пароль). Этот блок больше нигде не сохранён — закройте страницу, только когда передадите.</p>
+      <div class="bar">
+        <code style="font-size:16px;font-weight:700;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 14px;user-select:all">${esc(resetTemp)}</code>
+        <button type="button" class="btn ghost sm" onclick="navigator.clipboard&&navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{this.textContent='Скопировано ✓';})">Копировать</button>
+        <a class="btn ghost sm" href="/panel?tab=accounts">Понятно, скрыть</a>
+      </div>
+    </div>`;
+  }
   const list = rows.map((r) => {
     const linked = r.linked_discord_id
       ? `${personLink(client, r.linked_discord_id)} <span class="mini">${esc(r.linked_discord_id)}</span>`
@@ -4161,6 +4353,7 @@ async function panelAccounts(client, user) {
     </tr>`;
   }).join('');
   return `
+  ${resetBox}
   <div class="card"><h2>Локальные аккаунты (${rows.length})</h2>
     <p class="mini">Вход по логину/паролю без Discord. «Привязать к участнику» — по Discord ID или № паспорта: тогда человек на сайте работает от имени этого участника.</p>
     <div class="tablewrap"><table><tr><th>Логин / почта</th><th>Привязан к участнику</th><th>Свой Discord</th><th>Создан</th><th></th></tr>
@@ -4183,13 +4376,20 @@ async function panelBroadcast(user) {
   return `<div class="card"><h2>Рассылка</h2>
     <form method="POST" action="/panel/broadcast" class="form" onsubmit="return confirm('Отправить сообщение?')">
       ${csrfField(user)}
-      <label>Куда<select name="mode"><option value="channel">В канал (по ID)</option><option value="dm_all">В ЛС всем участникам</option></select></label>
-      <label>ID канала (для режима «в канал»)<input name="channel_id" pattern="[0-9]*" maxlength="25"></label>
+      <label>Куда
+        <select name="mode" onchange="var f=this.form;f.querySelector('[data-w=channel]').style.display=this.value==='channel'?'':'none';f.querySelector('[data-w=one]').style.display=this.value==='dm_one'?'':'none';">
+          <option value="channel">В канал (по ID)</option>
+          <option value="dm_all">В ЛС всем участникам</option>
+          <option value="dm_one">В ЛС конкретному участнику</option>
+        </select>
+      </label>
+      <div data-w="channel"><label>ID канала (для режима «в канал»)<input name="channel_id" pattern="[0-9]*" maxlength="25"></label></div>
+      <div data-w="one" style="display:none"><label>Discord ID участника (для режима «конкретному»)<input name="dm_target" pattern="[0-9]*" maxlength="25" placeholder="напр. 652927337016328212"></label></div>
       ${tpls.length ? `<label>Вставить шаблон<select onchange="var t=this.selectedOptions[0].dataset.text;if(t)this.form.text.value=t"><option value="">—</option>${opts}</select></label>` : ''}
       <label>Текст<textarea name="text" rows="5" required maxlength="1800"></textarea></label>
       <button class="btn" type="submit">Отправить</button>
     </form>
-    <p class="mini">Подстановки для режима «в ЛС»: <code>{имя}</code> <code>{паспорт}</code> <code>{ранг}</code>. В ЛС рассылка идёт с паузами; у кого закрыты ЛС — пропускаются.</p>
+    <p class="mini">Подстановки для режимов «в ЛС»: <code>{имя}</code> <code>{паспорт}</code> <code>{ранг}</code>. Массовая рассылка идёт с паузами; у кого закрыты ЛС — пропускаются.</p>
   </div>
   <div class="card"><h2>Шаблоны рассылок</h2>
     <form method="POST" action="/panel/broadcast/tpl_save" class="form">${csrfField(user)}
@@ -6084,7 +6284,10 @@ async function buildTicketTranscriptHtml(client, t) {
     const when = esc(fmt(new Date(m.createdTimestamp).toISOString()));
     const body = renderMentions(client, esc(m.content || '')).replace(/\n/g, '<br>');
     const atts = [...m.attachments.values()].map((a) => `<div class="att"><a href="${esc(a.url)}" target="_blank" rel="noopener">📎 ${esc(a.name || 'вложение')}</a></div>`).join('');
-    const emb = m.embeds && m.embeds.length ? `<div class="att muted">[вложенных эмбедов: ${m.embeds.length}]</div>` : '';
+    // Тот же embedToHtml, но с жёсткими цветами транскрипта — это отдельный
+    // статичный HTML-документ без переменных темы сайта (var(--...)).
+    const emb = (m.embeds || []).map((e) => embedToHtml(client, e)
+      .replace(/var\(--panel2\)/g, '#1b1c22').replace(/var\(--line\)/g, '#2a2b31')).join('');
     return `<div class="msg"><div class="meta"><b>${who}</b> · ${when}</div><div class="body">${body || '<span class="muted">—</span>'}${atts}${emb}</div></div>`;
   }).join('\n');
   const title = `Транскрипт тикета #${t.id} — ${esc(t.subject || 'без темы')}`;
@@ -6119,10 +6322,13 @@ async function ticketPageBody(client, user, acc, tid) {
       const arr = [...coll.values()].reverse();
       msgsHtml = arr.map((m) => {
         const att = [...m.attachments.values()].map((a) => `<a href="${esc(a.url)}" target="_blank" rel="noopener">[вложение]</a>`).join(' ');
-        const bodyHtml = renderMentions(client, esc(m.content || '')) + (att ? ' ' + att : '') + (m.embeds.length ? ' <span class="mini">[embed]</span>' : '');
+        const bodyHtml = renderMentions(client, esc(m.content || '')) + (att ? ' ' + att : '');
+        // Раньше эмбед показывался как голая заглушка «[embed]» — то есть текст
+        // самого бота (например, содержимое баг-репорта) не было видно вообще.
+        const embHtml = (m.embeds || []).map((e) => embedToHtml(client, e)).join('');
         return `<div style="border-left:2px solid var(--line);padding-left:10px;margin:8px 0">
           <b>${esc(m.member ? m.member.displayName : m.author.username)}</b> <span class="mini">${fmt(new Date(m.createdTimestamp).toISOString())}</span><br>
-          <span style="white-space:pre-wrap">${bodyHtml || '<span class="mini">—</span>'}</span></div>`;
+          <span style="white-space:pre-wrap">${bodyHtml || '<span class="mini">—</span>'}</span>${embHtml}</div>`;
       }).join('') || '<span class="muted">Пока пусто.</span>';
     } catch (_) {}
   }
@@ -6321,7 +6527,20 @@ async function panelFaqManage(user) {
 // ---------- Шаблоны причин отказа (Владелец) ----------
 const REASON_QUEUES = [['application', 'Заявки на вступление'], ['kick', 'Заявки на увольнение'], ['vacation', 'Заявки на отпуск']];
 async function panelReasons(user) {
-  const parts = [];
+  const parts = [`<h1>Шаблоны</h1><p class="muted">Готовые тексты для отказов, ответов в тикетах и рассылок — чтобы не печатать одно и то же каждый раз.</p>`];
+  const tpls = await db.all('SELECT * FROM ticket_reply_templates ORDER BY name').catch(() => []);
+  const tplRows = tpls.map((t) => `<tr><td><b>${esc(t.name)}</b></td><td class="mini">${esc((t.text || '').slice(0, 160))}</td>
+    <td><form method="POST" action="/panel/tickettpl/del" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${t.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form></td></tr>`).join('');
+  parts.push(`<div class="card"><h2>Шаблоны ответов в тикетах (${tpls.length})</h2>
+    <p class="mini">Показываются кнопками быстрой вставки на странице тикета.</p>
+    <div class="tablewrap"><table><tr><th>Название</th><th>Текст</th><th></th></tr>${tplRows || '<tr><td colspan="3">Пока пусто.</td></tr>'}</table></div>
+    <form method="POST" action="/panel/tickettpl/add" class="form" style="margin-top:10px">${csrfField(user)}
+      <label>Название<input name="name" maxlength="60" required></label>
+      <label>Текст<textarea name="text" rows="3" maxlength="1000" required></textarea></label>
+      <button class="btn sm" type="submit">Добавить</button>
+    </form>
+  </div>
+  <p class="mini">Шаблоны рассылок — в разделе <a href="/panel?tab=broadcast">«Рассылка»</a>.</p>`);
   for (const [q, title] of REASON_QUEUES) {
     const rows = await db.all('SELECT * FROM reject_reason_templates WHERE queue = ? ORDER BY position, id', [q]).catch(() => []);
     const list = rows.map((r, i) => `<tr><td>${esc(r.text)}</td><td style="white-space:nowrap">
@@ -7984,7 +8203,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await db.run('UPDATE web_users SET pass_hash = ?, pass_salt = ?, sess_ver = COALESCE(sess_ver,0)+1 WHERE discord_id = ? AND is_local = 1', [rec.hash, rec.salt, lid]);
       _sessVerCache.delete(lid);
       await webAuditMeta(client, user, 'Сброшен пароль локального аккаунта', lid);
-      return '/panel?tab=accounts&' + qs({ ok: `Временный пароль: ${temp} — передайте пользователю, пусть сменит.` });
+      // Тост с паролем сам исчезает через ~4 сек — этого мало, чтобы скопировать
+      // случайную строку. Показываем ещё и постоянным блоком (см. panelAccounts),
+      // который не пропадает, пока не нажмёшь «понятно».
+      return '/panel?tab=accounts&' + qs({ ok: 'Пароль сброшен — см. блок ниже.', reset_temp: temp, reset_id: lid });
     }
     if (pathName === '/panel/accounts/reset_done') {
       await db.run("UPDATE password_reset_requests SET status = 'done', resolved_by = ?, resolved_at = ? WHERE id = ?", [user.id, new Date().toISOString(), parseInt(body.get('id'), 10) || 0]);
@@ -8006,6 +8228,18 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const sent = await postTo(client, cid, { content: text });
       if (!sent) return '/panel?tab=broadcast&' + qs({ err: 'Не удалось отправить (проверьте ID).' });
       await webAudit(client, user, 'Рассылка в канал (сайт)', `<#${cid}>: ${text.slice(0, 200)}`);
+      return '/panel?tab=broadcast&' + qs({ ok: 'Отправлено.' });
+    }
+    if (mode === 'dm_one') {
+      const did = (body.get('dm_target') || '').trim();
+      if (!/^[0-9]{5,25}$/.test(did)) return '/panel?tab=broadcast&' + qs({ err: 'Укажите Discord ID участника (или № паспорта — сначала найдите ID на его странице /u/…).' });
+      const pr = await db.get('SELECT name, static, role_id FROM participants WHERE discord_id = ?', [did]).catch(() => null);
+      const msg = pr
+        ? text.replace(/\{имя\}/g, pr.name || '').replace(/\{паспорт\}/g, pr.static || '').replace(/\{ранг\}/g, roleName(client, pr.role_id))
+        : text;
+      const sentOk = await dmTo(client, did, { content: msg });
+      if (!sentOk) return '/panel?tab=broadcast&' + qs({ err: 'Не удалось отправить — закрыты ЛС, неверный ID или человека нет на сервере.' });
+      await webAudit(client, user, 'Рассылка в ЛС одному (сайт)', `<@${did}>: ${text.slice(0, 200)}`);
       return '/panel?tab=broadcast&' + qs({ ok: 'Отправлено.' });
     }
     const people = await db.all('SELECT discord_id, name, static, role_id FROM participants');
@@ -8358,22 +8592,26 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   }
 
   // ===== шаблоны ответов в тикетах (HR+) =====
-  if (pathName === '/ticket/tpl_add' || pathName === '/ticket/tpl_del') {
+  if (pathName === '/ticket/tpl_add' || pathName === '/ticket/tpl_del' || pathName === '/panel/tickettpl/add' || pathName === '/panel/tickettpl/del') {
     if (acc.rank < LEVELS.hr) return '/me?' + qs({ err: 'Недостаточно прав.' });
     const tid = parseInt(body.get('tid'), 10) || 0;
-    if (pathName === '/ticket/tpl_add') {
+    const isAdd = pathName === '/ticket/tpl_add' || pathName === '/panel/tickettpl/add';
+    if (isAdd) {
       const name = (body.get('name') || '').trim().slice(0, 60);
       const text = (body.get('text') || '').trim().slice(0, 1500);
       if (name && text) await db.run('INSERT INTO ticket_reply_templates (name, text, created_at) VALUES (?, ?, ?)', [name, text, new Date().toISOString()]);
     } else {
       await db.run('DELETE FROM ticket_reply_templates WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
     }
-    return `/ticket/${tid}?` + qs({ ok: 'Готово.' });
+    // Из карточки тикета — назад в тикет; из вкладки «Шаблоны» панели — обратно туда.
+    return (tid ? `/ticket/${tid}?` : '/panel?tab=reasons&') + qs({ ok: 'Готово.' });
   }
 
-  // ===== приоритет / назначение / закрытие / переоткрытие тикета (HR+) =====
+  // ===== приоритет / назначение / закрытие / переоткрытие тикета =====
+  // Закрыть/переоткрыть свой тикет может и автор (как в Discord), остальное — HR+.
   if (['/ticket/meta', '/ticket/assign', '/ticket/close', '/ticket/reopen', '/ticket/close_reason_add', '/ticket/close_reason_del'].includes(pathName)) {
-    if (acc.rank < LEVELS.hr) return '/me?' + qs({ err: 'Недостаточно прав.' });
+    const isOpenerAction = (pathName === '/ticket/close' || pathName === '/ticket/reopen');
+    if (acc.rank < LEVELS.hr && !isOpenerAction) return '/me?' + qs({ err: 'Недостаточно прав.' });
     const tid = parseInt(body.get('id') || body.get('tid'), 10) || 0;
     const back = `/ticket/${tid}?`;
     if (pathName === '/ticket/close_reason_add') {
@@ -8387,6 +8625,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     }
     const t = await db.get('SELECT * FROM tickets WHERE id = ?', [tid]);
     if (!t) return '/me?' + qs({ err: 'Тикет не найден.' });
+    if (isOpenerAction && acc.rank < LEVELS.hr && t.opener_id !== user.id) return '/me?' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/ticket/meta') {
       const pri = ['normal', 'high', 'low'].includes(body.get('priority')) ? body.get('priority') : 'normal';
       const tags = (body.get('tags') || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 10).join(',');
@@ -8855,8 +9094,8 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const snapshotPage = async (sl) => {
         const cur = await db.get('SELECT * FROM site_pages WHERE slug = ?', [sl]).catch(() => null);
         if (cur) {
-          await db.run('INSERT INTO site_page_versions (slug, title, content, nav, saved_at, saved_by) VALUES (?, ?, ?, ?, ?, ?)',
-            [sl, cur.title || '', cur.content || '', cur.nav || 0, new Date().toISOString(), user.id]).catch(() => {});
+          await db.run('INSERT INTO site_page_versions (slug, title, content, blocks, nav, saved_at, saved_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [sl, cur.title || '', cur.content || '', cur.blocks || null, cur.nav || 0, new Date().toISOString(), user.id]).catch(() => {});
           // храним не больше 20 версий на страницу
           await db.run("DELETE FROM site_page_versions WHERE slug = ? AND id NOT IN (SELECT id FROM site_page_versions WHERE slug = ? ORDER BY id DESC LIMIT 20)", [sl, sl]).catch(() => {});
         }
@@ -8867,9 +9106,9 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         if (!ver) return '/panel?tab=pages&' + qs({ err: 'Версия не найдена.' });
         await snapshotPage(ver.slug);
         await db.run(
-          `INSERT INTO site_pages (slug, title, content, nav, updated_at) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, nav = excluded.nav, updated_at = excluded.updated_at`,
-          [ver.slug, ver.title || '', ver.content || '', ver.nav || 0, new Date().toISOString()],
+          `INSERT INTO site_pages (slug, title, content, blocks, nav, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(slug) DO UPDATE SET title = excluded.title, content = excluded.content, blocks = excluded.blocks, nav = excluded.nav, updated_at = excluded.updated_at`,
+          [ver.slug, ver.title || '', ver.content || '', ver.blocks || null, ver.nav || 0, new Date().toISOString()],
         );
         await loadSite(true);
         await webAuditMeta(client, user, 'Откат доп. страницы к версии (сайт)', `/p/${ver.slug} → v#${vid}`);
@@ -8905,6 +9144,70 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await loadSite(true);
       await webAuditMeta(client, user, 'Удалена доп. страница (сайт)', `/p/${slug}`);
       return '/panel?tab=pages&' + qs({ ok: 'Страница удалена.' });
+    }
+    // ===== конструктор страниц: правка одного блока =====
+    if (pathName.startsWith('/admin/page_block/')) {
+      const slug = (body.get('slug') || '').trim().toLowerCase();
+      const pg = await db.get('SELECT * FROM site_pages WHERE slug = ?', [slug]).catch(() => null);
+      if (!pg) return '/panel?tab=pages&' + qs({ err: 'Страница не найдена.' });
+      const blocks = parsePageBlocks(pg.blocks);
+      const bid = (body.get('id') || '').trim();
+      const back = `/panel/page_builder?slug=${encodeURIComponent(slug)}&`;
+      const snapshot = async () => {
+        await db.run('INSERT INTO site_page_versions (slug, title, content, blocks, nav, saved_at, saved_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [slug, pg.title || '', pg.content || '', pg.blocks || null, pg.nav || 0, new Date().toISOString(), user.id]).catch(() => {});
+        await db.run("DELETE FROM site_page_versions WHERE slug = ? AND id NOT IN (SELECT id FROM site_page_versions WHERE slug = ? ORDER BY id DESC LIMIT 20)", [slug, slug]).catch(() => {});
+      };
+      const persist = async (nextBlocks) => {
+        await snapshot();
+        await db.run('UPDATE site_pages SET blocks = ?, updated_at = ? WHERE slug = ?', [JSON.stringify(nextBlocks), new Date().toISOString(), slug]);
+        await loadSite(true);
+      };
+      if (pathName === '/admin/page_block/add') {
+        const type = PAGE_BLOCK_TYPES.includes(body.get('type')) ? body.get('type') : 'text';
+        blocks.push(parsePageBlocks(JSON.stringify([{ type }]))[0]);
+        await persist(blocks);
+        await webAuditMeta(client, user, 'Блок добавлен на страницу (сайт)', `/p/${slug} +${type}`);
+        return back + qs({ ok: 'Блок добавлен.' });
+      }
+      const idx = blocks.findIndex((b) => b.id === bid);
+      if (idx < 0) return back + qs({ err: 'Блок не найден (страница могла обновиться в другой вкладке).' });
+      if (pathName === '/admin/page_block/save') {
+        const b = blocks[idx];
+        const patch = { id: b.id, type: b.type };
+        if (b.type === 'heading') { patch.text = body.get('text'); patch.level = body.get('level'); }
+        else if (b.type === 'text') { patch.md = body.get('md'); }
+        else if (b.type === 'image') { patch.url = body.get('url'); patch.caption = body.get('caption'); patch.width = body.get('width'); }
+        else if (b.type === 'button') { patch.label = body.get('label'); patch.href = body.get('href'); patch.style = body.get('style'); }
+        else if (b.type === 'spacer') { patch.size = body.get('size'); }
+        else if (b.type === 'gallery') {
+          patch.items = (body.get('items') || '').split('\n').map((l) => l.trim()).filter(Boolean)
+            .map((l) => { const parts = l.split('|'); const url = (parts.shift() || '').trim(); return { url, caption: parts.join('|').trim() }; });
+        }
+        blocks[idx] = parsePageBlocks(JSON.stringify([patch]))[0];
+        await persist(blocks);
+        await webAuditMeta(client, user, 'Блок страницы изменён (сайт)', `/p/${slug} #${bid}`);
+        return back + qs({ ok: 'Блок сохранён.' });
+      }
+      if (pathName === '/admin/page_block/move') {
+        const dir = body.get('dir') === 'up' ? -1 : 1;
+        const j = idx + dir;
+        if (j >= 0 && j < blocks.length) { const t = blocks[idx]; blocks[idx] = blocks[j]; blocks[j] = t; await persist(blocks); }
+        return back + qs({ ok: 'Порядок изменён.' });
+      }
+      if (pathName === '/admin/page_block/dup') {
+        const copy = { ...blocks[idx], id: newPageBlockId() };
+        blocks.splice(idx + 1, 0, copy);
+        await persist(blocks);
+        return back + qs({ ok: 'Блок продублирован.' });
+      }
+      if (pathName === '/admin/page_block/del') {
+        blocks.splice(idx, 1);
+        await persist(blocks);
+        await webAuditMeta(client, user, 'Блок страницы удалён (сайт)', `/p/${slug} #${bid}`);
+        return back + qs({ ok: 'Блок удалён.' });
+      }
+      return back;
     }
     if (pathName === '/admin/asset/upload') {
       const data = (body.get('data') || '').trim();
@@ -9255,6 +9558,16 @@ function start(client, hooks = {}) {
           }
         } catch (_) {}
       }
+      // «Просмотр как» (havirys-only): подменяет уровень доступа ТОЛЬКО для
+      // проверок над самим havirys (см. guard в accessFor) — область действия
+      // ограничена этим запросом через AsyncLocalStorage, ничего не пишется в БД.
+      let viewAsLevel = null;
+      if (user && user.id === OWNER_ID) {
+        const vm = /(?:^|;\s*)fc_viewas=([a-z]+)/.exec(req.headers.cookie || '');
+        if (vm && VIEW_AS_LEVELS.includes(vm[1])) viewAsLevel = vm[1];
+        user._viewAsLevel = viewAsLevel;
+      }
+      viewAsALS.enterWith(viewAsLevel);
       const pageNum = Math.max(0, parseInt(u.searchParams.get('page') || '0', 10) || 0);
       const flash = flashBanner(u);
       const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
@@ -9283,6 +9596,15 @@ function start(client, hooks = {}) {
       }
 
       await loadSite(); // настройки бренда/темы (кэш 30 сек)
+
+      if (path === '/viewas') {
+        if (!user || user.id !== OWNER_ID) return redirect('/');
+        const lvl = u.searchParams.get('level') || '';
+        const cookie = VIEW_AS_LEVELS.includes(lvl)
+          ? `fc_viewas=${lvl}; Path=/; Max-Age=${7 * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`
+          : 'fc_viewas=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax';
+        return redirect('/', { 'Set-Cookie': cookie });
+      }
 
       if (path === '/manifest.webmanifest') {
         const bg = (SITE.color && SITE.color.bg) || '#0f1013';
@@ -9541,7 +9863,8 @@ function start(client, hooks = {}) {
         const pg = await db.get('SELECT * FROM site_pages WHERE slug = ?', [slug]).catch(() => null);
         const draftHidden = pg && !pg.published && (!user || user.id !== OWNER_ID);
         if (!pg || draftHidden) return html(404, L({ title: 'Страница не найдена', user, level, body: '<h1>Страница не найдена</h1><a class="btn" href="/">На главную</a>' }));
-        return html(200, L({ title: pg.title || slug, user, level, body: flash + `${!pg.published ? '<div class="card" style="border-color:var(--warn)"><b>Черновик</b> — виден только вам (havirys).</div>' : ''}<h1>${esc(pg.title || slug)}</h1><div class="card">${mdToHtml(pg.content || '')}</div>` }));
+        const pageBody = pg.blocks ? pageBlocksToHtml(parsePageBlocks(pg.blocks)) : `<div class="card">${mdToHtml(pg.content || '')}</div>`;
+        return html(200, L({ title: pg.title || slug, user, level, body: flash + `${!pg.published ? '<div class="card" style="border-color:var(--warn)"><b>Черновик</b> — виден только вам (havirys).</div>' : ''}<h1>${esc(pg.title || slug)}</h1>${pageBody}` }));
       }
 
       if (path === '/login') {
@@ -9711,9 +10034,16 @@ function start(client, hooks = {}) {
 
           // Привязка Discord к локальному аккаунту (не вход) — state=link.
           if (u.searchParams.get('state') === 'link' && user && user.local) {
-            const taken = await db.get('SELECT discord_id FROM web_users WHERE discord_id = ? OR (is_local = 1 AND oauth_discord_id = ?)', [me.id, me.id]).catch(() => null);
-            if (taken && taken.discord_id !== user.localId) {
-              return html(400, L({ title: 'Discord занят', user, body: '<h1>Этот Discord уже привязан к другому аккаунту</h1><a class="btn" href="/account">← к аккаунту</a>' }));
+            // Важно: искать конфликт ТОЛЬКО среди oauth_discord_id других локальных
+            // аккаунтов. Раньше проверка ловила и обычную запись web_users, которая
+            // создаётся при первом же входе через Discord (есть почти у всех) —
+            // из-за этого привязка отказывала «занято» даже собственному Discord.
+            const taken = await db.get(
+              'SELECT discord_id FROM web_users WHERE is_local = 1 AND oauth_discord_id = ? AND discord_id != ?',
+              [me.id, user.localId],
+            ).catch(() => null);
+            if (taken) {
+              return html(400, L({ title: 'Discord занят', user, body: '<h1>Этот Discord уже привязан к другому локальному аккаунту</h1><a class="btn" href="/account">← к аккаунту</a>' }));
             }
             await db.run('UPDATE web_users SET oauth_discord_id = ? WHERE discord_id = ?', [me.id, user.localId]);
             return redirect('/account?' + qs({ ok: 'Discord привязан.' }));
@@ -9848,6 +10178,24 @@ function start(client, hooks = {}) {
           <p class="mini">Слева — версия от ${fmt(ver.saved_at)}, справа — текущая. Зелёное — добавлено, красное — убрано.</p>
           <div class="card">${lineDiffHtml(ver.content || '', cur.content || '')}</div>
           <p><a href="/panel?tab=pages">← к страницам</a></p>` }));
+      }
+
+      if (path === '/panel/page_builder' && req.method === 'GET') {
+        if (!user) return redirect('/login');
+        const acc = await accessFor(client, user.id);
+        if (user.id !== OWNER_ID) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Только havirys</h1>' }));
+        const slug = (u.searchParams.get('slug') || '').trim().toLowerCase();
+        const pg = await db.get('SELECT * FROM site_pages WHERE slug = ?', [slug]).catch(() => null);
+        if (!pg) return html(404, L({ title: 'Не найдено', user, level: acc.level, body: '<h1>Страница не найдена</h1><a class="btn" href="/panel?tab=pages">← к страницам</a>' }));
+        // Первое открытие конструктора для страницы, которая раньше была
+        // просто markdown-текстом, — переносим content в один текстовый блок.
+        // Оригинальный content не трогаем (остаётся резервом, если блоки очистят).
+        if (!pg.blocks) {
+          const seeded = JSON.stringify(parsePageBlocks(JSON.stringify(pg.content ? [{ type: 'text', md: pg.content }] : [])));
+          await db.run('UPDATE site_pages SET blocks = ? WHERE slug = ?', [seeded, slug]).catch(() => {});
+          pg.blocks = seeded;
+        }
+        return html(200, L({ title: 'Конструктор страницы', user, level: acc.level, wide: true, body: flash + pageBuilderBody(user, pg) }));
       }
 
       if (path === '/panel/row' && req.method === 'GET') {

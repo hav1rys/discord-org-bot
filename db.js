@@ -659,6 +659,7 @@ const SCHEMA = {
       slug: 'TEXT PRIMARY KEY',
       title: 'TEXT',
       content: 'TEXT',
+      blocks: 'TEXT', // JSON-массив блоков конструктора; если задано — страница рендерится из блоков, а не из content
       nav: 'INTEGER DEFAULT 0', // 1 — показывать ссылку в шапке
       published: 'INTEGER DEFAULT 1', // 0 — черновик, виден только havirys
       publish_at: 'TEXT', // если задано и в будущем — авто-публикация в это время
@@ -890,6 +891,7 @@ const SCHEMA = {
       slug: 'TEXT',
       title: 'TEXT',
       content: 'TEXT',
+      blocks: 'TEXT',
       nav: 'INTEGER DEFAULT 0',
       saved_at: 'TEXT',
       saved_by: 'TEXT',

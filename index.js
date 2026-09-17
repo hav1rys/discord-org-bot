@@ -7189,7 +7189,10 @@ client.on('interactionCreate', async (interaction) => {
           if (!channel.name.startsWith('закрыт-')) {
             await channel.setName(`закрыт-${channel.name}`.slice(0, 100)).catch(() => {});
           }
-          await channel.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription(`🔒 Тикет закрыт — <@${interaction.user.id}>, ${formatDateTime(new Date())}`)] }).catch(() => {});
+          await channel.send({
+            embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription(`🔒 Тикет закрыт — <@${interaction.user.id}>, ${formatDateTime(new Date())}`)],
+            components: [row(new ButtonBuilder().setCustomId(`ticket_reopen:${ticketId}`).setLabel('🔓 Переоткрыть').setStyle(ButtonStyle.Secondary))],
+          }).catch(() => {});
         } catch (err) {
           console.error('Не удалось заархивировать канал тикета:', err.message);
         }
@@ -7209,6 +7212,36 @@ client.on('interactionCreate', async (interaction) => {
           )],
         });
         return safeReply(interaction, '🔒 Тикет закрыт и перемещён в архив.');
+      }
+
+      // Раньше переоткрыть тикет можно было только с сайта — тут не было
+      // ни кнопки, ни команды. Кнопка «🔓 Переоткрыть» вешается на сообщение
+      // о закрытии (см. выше); право — как на закрытие: автор или руководство.
+      if (id.startsWith('ticket_reopen:')) {
+        const ticketId = id.split(':')[1];
+        const ticket = await db.get('SELECT * FROM tickets WHERE id = ?', [ticketId]);
+        if (!ticket) return safeReply(interaction, 'Тикет не найден.');
+        if (ticket.status === 'open') return safeReply(interaction, 'Тикет уже открыт.');
+        if (interaction.user.id !== ticket.opener_id && !perms.canReview(interaction.member)) {
+          return safeReply(interaction, '⛔ Переоткрыть тикет может автор или руководство.');
+        }
+        try { await interaction.update({ components: [] }); } catch (_) {}
+        try {
+          const channel = await guild.channels.fetch(ticket.channel_id);
+          await channel.permissionOverwrites.edit(ticket.opener_id, { ViewChannel: true, SendMessages: true }).catch(() => {});
+          await channel.setParent(config.CHANNEL_TICKETS_ACTIVE_CATEGORY, { lockPermissions: false }).catch(() => {});
+          if (channel.name.startsWith('закрыт-')) await channel.setName(channel.name.replace(/^закрыт-/, '').slice(0, 100)).catch(() => {});
+          await channel.send({ content: `🔓 Тикет переоткрыт — <@${interaction.user.id}>` }).catch(() => {});
+        } catch (err) {
+          console.error('Не удалось восстановить канал тикета:', err.message);
+        }
+        await db.run("UPDATE tickets SET status = 'open', closed_at = NULL, closed_by = NULL, last_activity = ? WHERE id = ?", [new Date().toISOString(), ticketId]);
+        await logAudit(guild, interaction.user, 'Тикет переоткрыт', [
+          { name: 'Кто', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Автор', value: `<@${ticket.opener_id}>`, inline: true },
+          { name: 'Тема', value: ticket.subject || '—', inline: true },
+        ]);
+        return safeReply(interaction, '🔓 Тикет переоткрыт.');
       }
 
       if (id.startsWith('ticket_rate:')) {
