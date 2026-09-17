@@ -584,6 +584,53 @@ const CLIENT_SCRIPT = `
     img.src=url;
     return false;
   };
+  // Черновики форм: перед отправкой сохраняем значения полей в sessionStorage,
+  // после возврата с ошибкой — восстанавливаем (включая уже сжатый скрин в
+  // скрытом data-URI поле), чтобы не перепечатывать всё заново.
+  window.fcSaveDraft=function(f){
+    try{
+      var forms=document.querySelectorAll('form'), idx=Array.prototype.indexOf.call(forms,f);
+      if(idx<0)return;
+      var data={};
+      f.querySelectorAll('input[name],select[name],textarea[name]').forEach(function(el){
+        if(el.type==='file'||el.type==='password'||el.name==='_csrf')return;
+        if(el.type==='checkbox'||el.type==='radio') data['cb:'+el.name+':'+el.value]=el.checked?'1':'0';
+        else data[el.name]=el.value;
+      });
+      sessionStorage.setItem('fc_draft:'+location.pathname+':'+idx, JSON.stringify(data));
+    }catch(e){}
+  };
+  window.fcRestoreDrafts=function(){
+    try{
+      document.querySelectorAll('form').forEach(function(f,idx){
+        try{
+          var raw=sessionStorage.getItem('fc_draft:'+location.pathname+':'+idx); if(!raw)return;
+          var data=JSON.parse(raw);
+          f.querySelectorAll('input[name],select[name],textarea[name]').forEach(function(el){
+            if(el.type==='file'||el.type==='password'||el.name==='_csrf')return;
+            if(el.type==='checkbox'||el.type==='radio'){
+              var v=data['cb:'+el.name+':'+el.value]; if(v!==undefined) el.checked=(v==='1');
+            } else if(Object.prototype.hasOwnProperty.call(data,el.name)) el.value=data[el.name];
+          });
+        }catch(e){}
+      });
+    }catch(e){}
+  };
+  // Помощник «выбрать дату»: пишет ДД.ММ.ГГГГ из нативного date-picker в
+  // соседнее текстовое поле (которое может ещё принимать «7d» и т.п.).
+  window.fcDatePick=function(dateInput, targetName){
+    var v=dateInput.value; if(!v)return;
+    var parts=v.split('-'); if(parts.length!==3)return;
+    var form=dateInput.form; var target=form&&form[targetName];
+    if(target){ target.value=parts[2]+'.'+parts[1]+'.'+parts[0]; try{target.dispatchEvent(new Event('input',{bubbles:true}));}catch(e){} }
+  };
+  window.fcClearDrafts=function(){
+    try{
+      var pre='fc_draft:'+location.pathname+':', rm=[];
+      for(var i=0;i<sessionStorage.length;i++){ var k=sessionStorage.key(i); if(k&&k.indexOf(pre)===0) rm.push(k); }
+      rm.forEach(function(k){ sessionStorage.removeItem(k); });
+    }catch(e){}
+  };
   document.addEventListener('click',function(e){ var p=pop(); if(!p||p.hasAttribute('hidden'))return;
     if(!p.contains(e.target)&&!(e.target.closest&&e.target.closest('.themebox'))) p.setAttribute('hidden',''); });
   try{
@@ -597,8 +644,10 @@ const CLIENT_SCRIPT = `
     // Тост из ?ok/?err + чистим URL
     try{
       var t=document.querySelector('[data-toast]');
-      if(t){ requestAnimationFrame(function(){t.classList.add('show');});
-        setTimeout(function(){t.classList.remove('show');setTimeout(function(){t.remove();},300);},4200);
+      if(t){
+        if(t.classList.contains('bad')) window.fcRestoreDrafts(); else window.fcClearDrafts();
+        requestAnimationFrame(function(){t.classList.add('show');});
+        setTimeout(function(){t.classList.remove('show');setTimeout(function(){t.remove();},300);},t.classList.contains('bad')?7000:5000);
         if(history.replaceState){ var u=new URL(location.href); u.searchParams.delete('ok'); u.searchParams.delete('err'); history.replaceState(null,'',u.pathname+u.search+u.hash); }
       }
     }catch(e){}
@@ -712,6 +761,14 @@ const CLIENT_SCRIPT = `
         }).join(' ');
       }
     }catch(e){}
+    // Черновики форм: сохраняем значения при отправке (img-формы сохраняют
+    // финальный снимок сами из IMGFORM_SCRIPT.done(), уже со скрином).
+    try{
+      document.querySelectorAll('form').forEach(function(f){
+        if(f.method.toLowerCase()!=='post')return;
+        f.addEventListener('submit',function(){ window.fcSaveDraft(f); });
+      });
+    }catch(e){}
     // Защита от двойной отправки: форма без onsubmit блокируется на 6 сек
     try{
       document.querySelectorAll('form').forEach(function(f){
@@ -736,6 +793,15 @@ const CLIENT_SCRIPT = `
       },250); }
       ta.addEventListener('input',upd); upd();
     })(tas[i]);
+    // Счётчик символов для textarea с data-counter (учитывает maxlength).
+    var cnts=document.querySelectorAll('textarea[data-counter][maxlength]');
+    for(var ci=0;ci<cnts.length;ci++)(function(ta){
+      var max=parseInt(ta.getAttribute('maxlength'),10)||0;
+      var sp=document.createElement('div'); sp.className='mini';
+      ta.parentNode.insertBefore(sp, ta.nextSibling);
+      function upd(){ sp.textContent=ta.value.length+' / '+max; sp.style.color=ta.value.length>=max?'var(--bad)':''; }
+      ta.addEventListener('input',upd); upd();
+    })(cnts[ci]);
     // Клиентская сортировка таблиц: клик по заголовку. Пропускаем table[data-nosort].
     var tbls=document.querySelectorAll('.tablewrap table');
     for(var t=0;t<tbls.length;t++)(function(tb){
@@ -1582,8 +1648,19 @@ async function meBody(client, user) {
   const p = await db.get('SELECT * FROM participants WHERE discord_id = ?', [did]);
   const av = await avatarDataUri(client, did, 128);
   const roleTags = acc.roleNames.length ? acc.roleNames.map((n) => `<span class="pill">${esc(n)}</span>`).join('') : '<span class="muted">нет ролей на сервере</span>';
-  const myTicket = await db.get("SELECT id, subject FROM tickets WHERE opener_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1", [did]).catch(() => null);
-  const ticketCard = myTicket ? `<div class="card"><h2>Мой открытый тикет</h2><a class="btn sm" href="/ticket/${myTicket.id}">🎫 ${esc(myTicket.subject || 'Тикет')} — открыть переписку</a></div>` : '';
+  const myTickets = await db.all("SELECT id, subject, category, status, rating, created_at, closed_at FROM tickets WHERE opener_id = ? ORDER BY id DESC LIMIT 15", [did]).catch(() => []);
+  const myTicket = myTickets.find((t) => t.status === 'open') || null;
+  const ticketHistRows = myTickets.filter((t) => t.id !== (myTicket && myTicket.id)).map((t) => `<tr>
+    <td><a href="/ticket/${t.id}">${esc(t.subject || 'Тикет #' + t.id)}</a></td>
+    <td class="mini">${esc(TICKET_CAT_RU[t.category] || t.category || '—')}</td>
+    <td><span class="badge">${esc(ruStatus(t.status))}</span></td>
+    <td class="mini">${t.rating != null ? (t.rating ? '👍' : '👎') : '—'}</td>
+    <td class="mini">${fmt(t.closed_at || t.created_at)}</td>
+  </tr>`).join('');
+  const ticketCard = myTickets.length ? `<div class="card"><h2>Мои тикеты${myTickets.length > 1 ? ` (${myTickets.length})` : ''}</h2>
+    ${myTicket ? `<a class="btn sm" href="/ticket/${myTicket.id}">🎫 ${esc(myTicket.subject || 'Тикет')} — открыт, открыть переписку</a>` : ''}
+    ${ticketHistRows ? `<div class="tablewrap" style="margin-top:${myTicket ? '10px' : '0'}"><table><tr><th>Тема</th><th>Тип</th><th>Статус</th><th>Оценка</th><th>Когда</th></tr>${ticketHistRows}</table></div>` : ''}
+  </div>` : '';
   const logins = await db.all('SELECT ip, ua, at FROM web_logins WHERE discord_id = ? ORDER BY id DESC LIMIT 10', [did]).catch(() => []);
   const sessions = await db.all("SELECT sid, ip, ua, created_at, last_seen, label FROM web_sessions WHERE discord_id = ? AND revoked_at IS NULL ORDER BY last_seen DESC LIMIT 20", [did]).catch(() => []);
   const sessRows = sessions.map((s) => `<tr>
@@ -1691,7 +1768,7 @@ async function meBody(client, user) {
     <div class="card"><h2>Обо мне и приватность</h2>
       <p class="mini">Короткий текст на вашем публичном профиле (форматирование как в Discord). До 1000 символов.</p>
       <form method="POST" action="/me/about" class="form">${csrfField(user)}
-        <textarea name="about" rows="4" maxlength="1000" placeholder="Пару слов о себе, часовой пояс, чем занимаюсь…">${esc(p.about || '')}</textarea>
+        <textarea name="about" rows="4" maxlength="1000" data-counter placeholder="Пару слов о себе, часовой пояс, чем занимаюсь…">${esc(p.about || '')}</textarea>
         <label class="chk"><input type="checkbox" name="about_private" value="1" ${p.about_private ? 'checked' : ''}><span>Скрыть «Обо мне» от всех, кроме меня и HR+</span></label>
         <label class="chk"><input type="checkbox" name="contracts_private" value="1" ${p.contracts_private ? 'checked' : ''}><span>Скрыть контракты и их историю от всех, кроме меня и HR+</span></label>
         <label class="chk"><input type="checkbox" name="badges_private" value="1" ${p.badges_private ? 'checked' : ''}><span>Скрыть бейджи и достижения от всех, кроме меня и HR+</span></label>
@@ -1704,7 +1781,7 @@ async function meBody(client, user) {
     ${await memberActionsExtra(client, user, p, passports, acc)}
     ${icalCard}
     ${loginsCard}
-    ${memberForms(user, passports, canAppeal)}
+    ${await memberForms(user, passports, canAppeal)}
     </div>`;
 }
 
@@ -1744,7 +1821,16 @@ const GRANTABLE_TABS = new Set([
 ]);
 // HR-действие в панели разрешено, если ранг HR+ ИЛИ выдан доступ к разделу `tab`.
 async function panelActionAllowed(client, user, acc, tab) {
-  if (acc && acc.rank >= LEVELS.hr) return true;
+  return panelTabAllowed(client, user, acc, tab, LEVELS.hr);
+}
+// Общий вариант: действие в разделе `tab` разрешено, если ранг >= minRank
+// (как было раньше в каждом обработчике) ИЛИ havirys выдал точечный доступ
+// к этому разделу через /panel?tab=grants. Раньше почти все обработчики
+// (кроме apps/queues/contracts_check) проверяли только «голый» ранг и
+// полностью игнорировали выданные гранты — вкладка была видна, а любое
+// действие в ней отвечало «Недостаточно прав».
+async function panelTabAllowed(client, user, acc, tab, minRank) {
+  if (acc && acc.rank >= minRank) return true;
   if (!GRANTABLE_TABS.has(tab)) return false;
   return (await getPanelGrants(client, user && user.id)).has(tab);
 }
@@ -1820,15 +1906,15 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'apps') body = await panelApps(client, user, pageNum);
   else if (tab === 'queues') body = await panelQueues(client, user, pageNum);
   else if (tab === 'contracts_check') body = await panelContractCheck(client, user, pageNum, sp);
-  else if (tab === 'role_check') body = await panelRoleCheck(client, user);
-  else if (tab === 'members') body = await panelMembers(client, pageNum, user);
+  else if (tab === 'role_check') body = await panelRoleCheck(client, user, pageNum);
+  else if (tab === 'members') body = await panelMembers(client, pageNum, user, acc);
   else if (tab === 'contracts') body = await panelContracts(client);
   else if (tab === 'invites') body = await panelInvites(client);
   else if (tab === 'hr_payouts') body = await panelHrPayouts(client);
   else if (tab === 'giveaways') body = await panelGiveaways(client, acc, user);
-  else if (tab === 'blacklist') body = await panelBlacklist(client, user);
+  else if (tab === 'blacklist') body = await panelBlacklist(client, user, pageNum);
   else if (tab === 'texts') body = await panelTexts(user);
-  else if (tab === 'forms') body = await panelForms(client, user, acc);
+  else if (tab === 'forms') body = await panelForms(client, user, acc, pageNum);
   else if (tab === 'faq_manage') body = (await panelFaqManage(user)) + (await faqFeedbackReport());
   else if (tab === 'reasons') body = await panelReasons(user);
   else if (tab === 'broadcast') body = await panelBroadcast(user);
@@ -1838,16 +1924,23 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'landing') body = await panelLanding(user);
   else if (tab === 'pages') body = await panelPages(client, user);
   else if (tab === 'grants') body = await panelGrants(client, user, sp);
-  else if (tab === 'accounts') body = await panelAccounts(client, user, sp);
+  else if (tab === 'accounts') body = await panelAccounts(client, user, pageNum, sp);
   else if (tab === 'data') body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
   const grantNote = (acc.rank < LEVELS.hr && grants.size)
     ? `<div class="muted">Вам выданы разделы: ${[...grants].map((t) => esc((PANEL_TABS.find(([i]) => i === t) || [t, t])[1])).join(', ')}</div>`
     : `<div class="muted">Ваш уровень: <b>${esc(acc.level)}</b></div>`;
+  const extraLinks = [
+    acc.rank >= LEVELS.deputy ? '<a href="/audit">📜 Аудит</a>' : '',
+    canOwner ? '<a href="/tools">🛠 Инструменты</a>' : '',
+    canOwner ? '<a href="/health">💚 Здоровье системы</a>' : '',
+  ].filter(Boolean).join(' · ');
+  const extraLinksHtml = extraLinks ? `<div class="mini" style="margin:4px 0 10px">${extraLinks}</div>` : '';
   return `<h1>Панель управления</h1>
     ${grantNote}
     <div class="tabs">${tabsHtml}</div>
+    ${extraLinksHtml}
     ${body}`;
 }
 
@@ -1892,11 +1985,14 @@ async function panelOverview() {
   </div></div>`;
 }
 
-async function panelMembers(client, pageNum, user) {
+async function panelMembers(client, pageNum, user, acc) {
   const totalRow = await db.get('SELECT COUNT(*) c FROM participants');
   const total = totalRow ? totalRow.c : 0;
   const rows = await db.all('SELECT * FROM participants ORDER BY name LIMIT ? OFFSET ?', [PAGE_SIZE, pageNum * PAGE_SIZE]);
   const rankOpts = (config.ROLE_IDS || []).map((rid) => `<option value="${esc(rid)}">${esc(roleName(client, rid))}</option>`).join('');
+  // Импорт CSV — массовое действие, поэтому строже «Добавить вручную»: только
+  // владелец-аккаунт (havirys), без права по гранту вкладки «Участники».
+  const canImport = user && user.id === OWNER_ID;
   const addForm = user ? `<div class="card"><h2>Добавить участника вручную</h2>
     <form method="POST" action="/panel/member/add" class="form">${csrfField(user)}
       <label>Discord ID<input name="discord_id" required pattern="[0-9]+" maxlength="25"></label>
@@ -1909,11 +2005,11 @@ async function panelMembers(client, pageNum, user) {
     <p class="mini">Оформляет как приём заявки: роли, ник, канал-профиль, запись в историю.</p>
   </div>
   <div class="card"><h2>Импорт из CSV</h2>
-    <form method="POST" action="/panel/member/import" class="form">${csrfField(user)}
+    ${canImport ? `<form method="POST" action="/panel/member/import" class="form">${csrfField(user)}
       <label>CSV (колонки: discord_id, name, static, lvl, role_id — заголовок обязателен)<textarea name="csv" rows="5" placeholder="discord_id,name,static,lvl&#10;123...,Ivan Petrov,199615,20"></textarea></label>
       <button class="btn" type="submit">Импортировать</button>
     </form>
-    <p class="mini">Пропускает уже существующих и занятые паспорта; итог покажет сколько добавлено/пропущено.</p>
+    <p class="mini">Пропускает уже существующих и занятые паспорта; итог покажет сколько добавлено/пропущено.</p>` : '<p class="mini">Массовый импорт CSV может запускать только havirys — в отличие от добавления одного участника выше, это может сильно поменять состав сразу.</p>'}
   </div>` : '';
   const range = contracts.getWeekRange(0);
   const out = [];
@@ -1964,7 +2060,7 @@ async function panelInvites(client) {
 
 async function panelGiveaways(client, acc, user) {
   let manage = '';
-  if (acc && acc.rank >= LEVELS.owner && user) {
+  if (user && (await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) {
     const active = await db.all("SELECT * FROM giveaways WHERE status='active' ORDER BY id DESC");
     const activeRows = [];
     for (const g of active) {
@@ -2207,18 +2303,18 @@ async function panelData(client, table, pageNum, user, sp) {
         ${colNames.map((c) => `<label class="chk"><input type="checkbox" name="cols" value="${esc(c)}" checked><span>${esc(c)}</span></label>`).join('')}
         <button class="btn ghost sm" type="submit">⬇ Скачать выбранное</button>
       </form>
-    </details>` : ''}
+    </details>` : '<p class="muted" style="margin-bottom:10px">Только просмотр — редактировать строки и скачивать CSV может только havirys.</p>'}
     <div class="tablewrap"><table><tr>${head}</tr>${trs || '<tr><td>—</td></tr>'}</table></div>
     ${pager(`/panel?tab=data&${baseQ}&sort=${sortCol}&dir=${dir.toLowerCase()}`, pageNum, total)}
   </div>`;
 }
 
-function pager(baseHref, pageNum, total) {
+function pager(baseHref, pageNum, total, paramName = 'page') {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   if (pages <= 1) return '';
   const sep = baseHref.includes('?') ? '&' : '?';
-  const prev = pageNum > 0 ? `<a class="btn ghost sm" href="${baseHref}${sep}page=${pageNum - 1}">← Назад</a>` : '';
-  const next = pageNum < pages - 1 ? `<a class="btn ghost sm" href="${baseHref}${sep}page=${pageNum + 1}">Вперёд →</a>` : '';
+  const prev = pageNum > 0 ? `<a class="btn ghost sm" href="${baseHref}${sep}${paramName}=${pageNum - 1}">← Назад</a>` : '';
+  const next = pageNum < pages - 1 ? `<a class="btn ghost sm" href="${baseHref}${sep}${paramName}=${pageNum + 1}">Вперёд →</a>` : '';
   return `<div class="pager">${prev}<span class="muted">стр. ${pageNum + 1} из ${pages}</span>${next}</div>`;
 }
 
@@ -2590,8 +2686,8 @@ async function logDenial(client, user, what) {
 function flashBanner(u) {
   const ok = u.searchParams.get('ok');
   const err = u.searchParams.get('err');
-  if (ok) return `<div class="toast ok" data-toast>✅ ${esc(ok)}</div>`;
-  if (err) return `<div class="toast bad" data-toast>⛔ ${esc(err)}</div>`;
+  if (ok) return `<div class="toast ok" data-toast role="status" aria-live="polite">✅ ${esc(ok)}</div>`;
+  if (err) return `<div class="toast bad" data-toast role="alert" aria-live="assertive">⛔ ${esc(err)}</div>`;
   return '';
 }
 function qs(obj) {
@@ -2663,6 +2759,9 @@ function applyBody(user, ref) {
   </div>`;
 }
 
+function datePickHelper(targetName) {
+  return ` <input type="date" class="mini" style="width:auto;padding:4px 6px" onchange="fcDatePick(this,'${targetName}')" title="выбрать дату" aria-label="выбрать дату">`;
+}
 function imgOrUrlFields(dataName, urlName, fileLabel) {
   return `<label>${fileLabel} — файл<input type="file" accept="image/*" data-img="${dataName}"></label>
     <label>…или ссылка<input name="${urlName}" maxlength="400" placeholder="https://..."></label>
@@ -2680,6 +2779,7 @@ if(!window.fcImgFormSubmit) window.fcImgFormSubmit=function fcImgFormSubmit(f){
       if(!has)okAll=false;
     });
     if(!okAll){ alert('Приложите скриншот: файл с устройства или ссылку (http).'); return; }
+    if(window.fcSaveDraft) window.fcSaveDraft(f);
     f.submit();
   }
   hid.forEach(function(inp){ var file=inp.files[0]; if(!file)return; pending++;
@@ -2781,8 +2881,26 @@ async function memberActionsExtra(client, user, p, passports, acc) {
   return `<script>${IMGFORM_SCRIPT}</script>` + takenCard + afkCard + codewordCard + hrCard;
 }
 
-function memberForms(user, passports = [], blacklisted = false) {
+async function memberForms(user, passports = [], blacklisted = false) {
   const passOpts = passports.map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('');
+  const dcLast = await db.get("SELECT status, new_name, reject_reason, created_at FROM data_change_requests WHERE discord_id = ? ORDER BY id DESC LIMIT 1", [user.id]).catch(() => null);
+  const dcPending = dcLast && dcLast.status === 'pending';
+  const dcStatusLine = dcLast
+    ? (dcLast.status === 'pending'
+      ? `<p class="mini">Заявка от ${fmt(dcLast.created_at)} (→ «${esc(dcLast.new_name || '')}») — <span class="badge warn">на рассмотрении</span></p>`
+      : dcLast.status === 'accepted'
+        ? `<p class="mini">Последняя заявка — <span class="badge ok">принята</span> ${fmt(dcLast.created_at)}</p>`
+        : `<p class="mini">Последняя заявка (${fmt(dcLast.created_at)}) — <span class="badge bad">отклонена</span>${dcLast.reject_reason ? `: ${esc(dcLast.reject_reason)}` : ''}</p>`)
+    : '';
+  const prLast = await db.get("SELECT status, name, static, reject_reason, created_at FROM passport_requests WHERE discord_id = ? ORDER BY id DESC LIMIT 1", [user.id]).catch(() => null);
+  const prPending = prLast && prLast.status === 'pending';
+  const prStatusLine = prLast
+    ? (prLast.status === 'pending'
+      ? `<p class="mini">Заявка от ${fmt(prLast.created_at)} (${esc(prLast.name || '')}, № ${esc(prLast.static || '')}) — <span class="badge warn">на рассмотрении</span></p>`
+      : prLast.status === 'accepted'
+        ? `<p class="mini">Последняя заявка — <span class="badge ok">принята</span> ${fmt(prLast.created_at)}</p>`
+        : `<p class="mini">Последняя заявка (${fmt(prLast.created_at)}) — <span class="badge bad">отклонена</span>${prLast.reject_reason ? `: ${esc(prLast.reject_reason)}` : ''}</p>`)
+    : '';
   return `
   <script>${IMGFORM_SCRIPT}</script>
   <div class="card"><h2>Взять контракт</h2>
@@ -2799,7 +2917,7 @@ function memberForms(user, passports = [], blacklisted = false) {
   <div class="card"><h2>Запросить отпуск</h2>
     <form method="POST" action="/me/vacation" class="form">
       ${csrfField(user)}
-      <label>До какого числа (ДД.ММ.ГГГГ или, например, 7d)<input name="deadline" required maxlength="20"></label>
+      <label>До какого числа (ДД.ММ.ГГГГ или, например, 7d)<input name="deadline" required maxlength="20">${datePickHelper('deadline')}</label>
       <label>Причина<textarea name="reason" rows="2" maxlength="400"></textarea></label>
       <button class="btn" type="submit">Отправить на рассмотрение</button>
     </form>
@@ -2823,18 +2941,20 @@ function memberForms(user, passports = [], blacklisted = false) {
     <p class="mini" style="margin-top:6px">Нашли ошибку на сайте? <a href="/bug">🐞 Сообщить о баге</a> — отдельная короткая форма.</p>
   </div>
   ${passports.length ? `<div class="card"><h2>Заявка на изменение Имени Фамилии</h2>
-    <form method="POST" action="/me/data_change" class="form">${csrfField(user)}
+    ${dcStatusLine}
+    ${dcPending ? '' : `<form method="POST" action="/me/data_change" class="form">${csrfField(user)}
       <label>Паспорт<select name="static">${passOpts}</select></label>
       <label>Новое Имя Фамилия<input name="new_name" required maxlength="60"></label>
       <button class="btn" type="submit">Отправить на рассмотрение</button>
-    </form>
+    </form>`}
   </div>` : ''}
   <div class="card"><h2>Заявка на добавление паспорта</h2>
-    <form method="POST" action="/me/passport_request" class="form">${csrfField(user)}
+    ${prStatusLine}
+    ${prPending ? '' : `<form method="POST" action="/me/passport_request" class="form">${csrfField(user)}
       <label>Имя Фамилия<input name="name" required maxlength="60"></label>
       <label>№ Паспорта<input name="static" required pattern="[0-9]+" maxlength="12"></label>
       <button class="btn" type="submit">Отправить на рассмотрение</button>
-    </form>
+    </form>`}
   </div>
   ${blacklisted ? `<div class="card" style="border-color:#5c2626"><h2>Апелляция на чёрный список</h2>
     <form method="POST" action="/me/appeal" class="form">${csrfField(user)}
@@ -2844,14 +2964,16 @@ function memberForms(user, passports = [], blacklisted = false) {
   </div>` : ''}`;
 }
 
-async function panelBlacklist(client, user) {
-  const rows = await db.all('SELECT * FROM blacklist ORDER BY id DESC LIMIT 100');
+async function panelBlacklist(client, user, pageNum = 0) {
+  const totalRow = await db.get('SELECT COUNT(*) c FROM blacklist').catch(() => null);
+  const total = totalRow ? totalRow.c : 0;
+  const rows = await db.all('SELECT * FROM blacklist ORDER BY id DESC LIMIT ? OFFSET ?', [PAGE_SIZE, pageNum * PAGE_SIZE]);
   const list = rows.map((b) => `<tr>
     <td>${esc(b.discord_id || '—')}</td>
     <td>${esc(b.static || '—')}</td>
     <td>${esc(b.reason || '—')}</td>
     <td class="muted">${b.until ? 'до ' + fmt(b.until) : 'бессрочно'}</td>
-    <td><form method="POST" action="/panel/blacklist/remove" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${b.id}"><button class="btn ghost sm" type="submit">Убрать</button></form></td>
+    <td><form method="POST" action="/panel/blacklist/remove" style="display:inline" onsubmit="return confirm('Убрать запись из ЧС?')">${csrfField(user)}<input type="hidden" name="id" value="${b.id}"><button class="btn ghost sm" type="submit">Убрать</button></form></td>
   </tr>`).join('');
   return `
   <div class="card"><h2>Внести в чёрный список</h2>
@@ -2860,13 +2982,15 @@ async function panelBlacklist(client, user) {
       <label>Discord ID<input name="discord_id" pattern="[0-9]*" maxlength="25"></label>
       <label>№ Паспорта<input name="static" pattern="[0-9]*" maxlength="12"></label>
       <label>Причина<input name="reason" required maxlength="300"></label>
-      <label>До какого числа (пусто — бессрочно)<input name="until" maxlength="20"></label>
+      <label>До какого числа (пусто — бессрочно)<input name="until" maxlength="20">${datePickHelper('until')}</label>
       <button class="btn" type="submit">Внести</button>
     </form>
     <p class="muted" style="margin-top:8px">Если человек сейчас в организации — его нужно уволить вручную в Discord, сайт только добавляет запись в ЧС.</p>
   </div>
-  <div class="card"><h2>Записи ЧС (последние 100)</h2>
+  <div class="card"><h2>Записи ЧС (${total})</h2>
+    ${pager('/panel?tab=blacklist', pageNum, total)}
     <div class="tablewrap"><table><tr><th>Discord ID</th><th>Паспорт</th><th>Причина</th><th>Срок</th><th></th></tr>${list || '<tr><td colspan="5">—</td></tr>'}</table></div>
+    ${pager('/panel?tab=blacklist', pageNum, total)}
   </div>`;
 }
 
@@ -3144,7 +3268,7 @@ async function profileBody(client, viewer, acc, targetId) {
     blocks.push(`<form method="POST" action="/u/vacation" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
       <h3>Выдать отпуск</h3>
       ${passSel('Кому — паспорт или все')}
-      <label>До какого числа (ДД.ММ.ГГГГ или 7d)<input name="deadline" required maxlength="20"></label>
+      <label>До какого числа (ДД.ММ.ГГГГ или 7d)<input name="deadline" required maxlength="20">${datePickHelper('deadline')}</label>
       <label>Причина<input name="reason" maxlength="200"></label>
       <button class="btn sm" type="submit">Выдать</button></form>`);
     if (anyVac) {
@@ -3156,7 +3280,7 @@ async function profileBody(client, viewer, acc, targetId) {
     blocks.push(`<form method="POST" action="/u/afk" class="form">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
       <h3>Отметить AFK</h3>
       ${passSel('Кому — паспорт или все')}
-      <label>Дата начала (ДД.ММ.ГГГГ)<input name="date" required maxlength="20"></label>
+      <label>Дата начала (ДД.ММ.ГГГГ)<input name="date" required maxlength="20">${datePickHelper('date')}</label>
       <label>Причина<input name="reason" maxlength="200"></label>
       <button class="btn sm" type="submit">Отметить</button></form>`);
     if (anyAfk) {
@@ -3212,7 +3336,7 @@ async function profileBody(client, viewer, acc, targetId) {
       <input name="text" placeholder="оставить запись…" maxlength="500" required style="flex:1"><button class="btn sm" type="submit">Написать</button></form>` : ''}
     ${gbRows.length ? gbRows.map((gr) => `<div class="mini" style="border-left:2px solid var(--line);padding-left:8px;margin:6px 0">
       <b>${personLink(client, gr.author_id)}</b> · ${fmt(gr.created_at)}
-      ${gbCanDel(gr.author_id) ? `<form method="POST" action="/u/guestbook_del" style="display:inline">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}"><input type="hidden" name="id" value="${gr.id}"><button class="btn ghost sm" type="submit" style="padding:0 6px">✕</button></form>` : ''}
+      ${gbCanDel(gr.author_id) ? `<form method="POST" action="/u/guestbook_del" style="display:inline" onsubmit="return confirm('Удалить запись из гостевой книги?')">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}"><input type="hidden" name="id" value="${gr.id}"><button class="btn ghost sm" type="submit" style="padding:0 6px">✕</button></form>` : ''}
       <br>${esc(gr.text)}</div>`).join('') : '<span class="mini">пока пусто</span>'}
   </div>`;
 
@@ -3669,12 +3793,12 @@ async function leaderboardsBody(client, viewerId) {
     <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Побед</th></tr>${gwTop.map(([w, n], i) => `<tr${rowCls(w)}><td>${i + 1}</td><td>${personLink(client, w)}</td><td>${n}</td></tr>`).join('') || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
 }
 
-async function compareBody(client, meId, otherId, periodDays) {
+async function compareBody(client, meId, otherId, periodDays, acc) {
   const range = contracts.getWeekRange(0);
   const pd = [30, 90, 180, 365].includes(+periodDays) ? +periodDays : 90;
   const since = new Date(Date.now() - pd * 864e5).toISOString();
   const gather = async (id) => {
-    const p = await db.get('SELECT name, joined_at FROM participants WHERE discord_id = ?', [id]).catch(() => null);
+    const p = await db.get('SELECT name, joined_at, contracts_private, badges_private FROM participants WHERE discord_id = ?', [id]).catch(() => null);
     const bs = await computeBadgesAndStreak(client, id);
     const week = await contracts.getUserWeekStats(id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
     const periodC = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status = 'fulfilled' AND submitted_at >= ?", [id, since]).catch(() => null);
@@ -3687,6 +3811,7 @@ async function compareBody(client, meId, otherId, periodDays) {
       periodC: periodC ? periodC.c : 0, thanks: thanks ? thanks.c : 0, tickets: tks ? tks.c : 0,
       invites: bs.invConfirmed || 0, streak: bs.streak || 0,
       days: bs.days || 0, wins: bs.wins || 0, badges: (bs.badges || []).length,
+      contractsPrivate: !!(p && p.contracts_private), badgesPrivate: !!(p && p.badges_private),
     };
   };
   const me = await gather(meId);
@@ -3702,7 +3827,11 @@ async function compareBody(client, meId, otherId, periodDays) {
 
   if (!otherId || !/^\d{5,25}$/.test(otherId)) return `<h1>Сравнение</h1>${picker}`;
   const ot = await gather(otherId);
-  const row = (label, a, b, better = 'high') => {
+  const otSelfOrHr = otherId === meId || (acc && acc.rank >= LEVELS.hr);
+  const otContractsHidden = ot.contractsPrivate && !otSelfOrHr;
+  const otBadgesHidden = ot.badgesPrivate && !otSelfOrHr;
+  const row = (label, a, b, better = 'high', hidden = false) => {
+    if (hidden) return `<tr><td>${esc(label)}</td><td>${a}</td><td class="muted">🔒 скрыто</td></tr>`;
     const win = a === b ? '' : ((better === 'high') === (a > b) ? 'a' : 'b');
     return `<tr><td>${esc(label)}</td>
       <td style="${win === 'a' ? 'color:var(--ok);font-weight:700' : ''}">${a}</td>
@@ -3712,16 +3841,16 @@ async function compareBody(client, meId, otherId, periodDays) {
   <div class="card"><h2>${esc(me.name)} vs ${esc(ot.name)}</h2>
     <div class="tablewrap"><table>
       <tr><th>Показатель</th><th>${esc(me.name)}</th><th>${esc(ot.name)}</th></tr>
-      ${row('Контракты за всё время', me.fulfilled, ot.fulfilled)}
-      ${row('Контракты на этой неделе', me.week, ot.week)}
-      ${row(`Контракты за ${pd} дн.`, me.periodC, ot.periodC)}
+      ${row('Контракты за всё время', me.fulfilled, ot.fulfilled, 'high', otContractsHidden || otBadgesHidden)}
+      ${row('Контракты на этой неделе', me.week, ot.week, 'high', otContractsHidden)}
+      ${row(`Контракты за ${pd} дн.`, me.periodC, ot.periodC, 'high', otContractsHidden)}
       ${row(`Благодарностей за ${pd} дн.`, me.thanks, ot.thanks)}
       ${row(`Тикетов открыто за ${pd} дн.`, me.tickets, ot.tickets, 'low')}
       ${row('Приглашений подтверждено', me.invites, ot.invites)}
-      ${row('Недельный стрик', me.streak, ot.streak)}
+      ${row('Недельный стрик', me.streak, ot.streak, 'high', otBadgesHidden)}
       ${row('Дней в организации', me.days, ot.days)}
-      ${row('Побед в розыгрышах', me.wins, ot.wins)}
-      ${row('Бейджей открыто', me.badges, ot.badges)}
+      ${row('Побед в розыгрышах', me.wins, ot.wins, 'high', otBadgesHidden)}
+      ${row('Бейджей открыто', me.badges, ot.badges, 'high', otBadgesHidden)}
     </table></div>
     <p class="mini"><a href="/u/${esc(ot.id)}">профиль ${esc(ot.name)}</a></p>
   </div>`;
@@ -4126,7 +4255,7 @@ function sanitizeFormFields(raw) {
   return out;
 }
 
-async function panelForms(client, user, acc) {
+async function panelForms(client, user, acc, pageNum = 0) {
   const canEdit = acc.rank >= LEVELS.owner;
   const forms = await db.all('SELECT * FROM forms ORDER BY id DESC').catch(() => []);
 
@@ -4228,10 +4357,14 @@ async function panelForms(client, user, acc) {
     </div>`;
   }
 
+  const pendTotalRow = await db.get("SELECT COUNT(*) c FROM form_submissions WHERE status = 'pending'").catch(() => null);
+  const pendTotal = pendTotalRow ? pendTotalRow.c : 0;
   const pend = await db.all(
-    "SELECT s.*, f.name form_name, f.fields form_fields FROM form_submissions s LEFT JOIN forms f ON f.id = s.form_id WHERE s.status = 'pending' ORDER BY s.id DESC LIMIT 100",
+    "SELECT s.*, f.name form_name, f.fields form_fields FROM form_submissions s LEFT JOIN forms f ON f.id = s.form_id WHERE s.status = 'pending' ORDER BY s.id DESC LIMIT ? OFFSET ?",
+    [PAGE_SIZE, pageNum * PAGE_SIZE],
   ).catch(() => []);
-  const pendCard = `<div class="card"><h2>Заявки на рассмотрении (${pend.length})</h2>
+  const pendCard = `<div class="card"><h2>Заявки на рассмотрении (${pendTotal})</h2>
+    ${pager('/panel?tab=forms', pageNum, pendTotal)}
     ${pend.length ? pend.map((s) => {
       let fields = []; try { fields = JSON.parse(s.form_fields || '[]'); } catch (_) {}
       let data = {}; try { data = JSON.parse(s.data || '{}'); } catch (_) {}
@@ -4246,6 +4379,7 @@ async function panelForms(client, user, acc) {
         </form>
       </div>`;
     }).join('') : '<p class="mini">Пусто.</p>'}
+    ${pager('/panel?tab=forms', pageNum, pendTotal)}
   </div>`;
 
   return `${!canEdit ? '<div class="muted">Создавать и менять формы может Владелец; вам доступен разбор заявок.</div>' : ''}${listCard}${editorCard}${pendCard}`;
@@ -4313,8 +4447,10 @@ async function formPublicBody(client, user, f) {
     <p><a href="/me">← в кабинет</a></p>`;
 }
 
-async function panelAccounts(client, user, sp) {
-  const rows = await db.all("SELECT discord_id, login, email, linked_discord_id, oauth_discord_id, first_login, login_count FROM web_users WHERE is_local = 1 ORDER BY first_login DESC LIMIT 300").catch(() => []);
+async function panelAccounts(client, user, pageNum, sp) {
+  const totalRow = await db.get("SELECT COUNT(*) c FROM web_users WHERE is_local = 1").catch(() => null);
+  const total = totalRow ? totalRow.c : 0;
+  const rows = await db.all("SELECT discord_id, login, email, linked_discord_id, oauth_discord_id, first_login, login_count FROM web_users WHERE is_local = 1 ORDER BY first_login DESC LIMIT ? OFFSET ?", [PAGE_SIZE, pageNum * PAGE_SIZE]).catch(() => []);
   const reqs = await db.all("SELECT * FROM password_reset_requests WHERE status = 'pending' ORDER BY id DESC LIMIT 100").catch(() => []);
   // Постоянный (не исчезающий тостом) блок с временным паролем сразу после сброса.
   const resetTemp = sp && sp.get && sp.get('reset_temp');
@@ -4354,11 +4490,13 @@ async function panelAccounts(client, user, sp) {
   }).join('');
   return `
   ${resetBox}
-  <div class="card"><h2>Локальные аккаунты (${rows.length})</h2>
+  <div class="card"><h2>Локальные аккаунты (${total})</h2>
     <p class="mini">Вход по логину/паролю без Discord. «Привязать к участнику» — по Discord ID или № паспорта: тогда человек на сайте работает от имени этого участника.</p>
+    ${pager('/panel?tab=accounts', pageNum, total)}
     <div class="tablewrap"><table><tr><th>Логин / почта</th><th>Привязан к участнику</th><th>Свой Discord</th><th>Создан</th><th></th></tr>
       ${list || '<tr><td colspan="5">пусто</td></tr>'}
     </table></div>
+    ${pager('/panel?tab=accounts', pageNum, total)}
   </div>
   <div class="card"><h2>Заявки на сброс пароля (${reqs.length})</h2>
     ${reqs.length ? reqs.map((q) => `<div class="bar" style="border-top:1px solid var(--line);padding-top:8px">
@@ -6460,9 +6598,14 @@ async function panelContractCheck(client, user, pageNum = 0, sp) {
   const idsOnPage = rows.map((r) => r.id).join(',');
 
   // В работе: «взял», но итог ещё не сдан. Руководство может снять такой контракт.
+  // Отдельная страница пагинации (tpage), чтобы не конфликтовать со списком выше.
   const abandonDays = (typeof config.CONTRACT_ABANDON_DAYS === 'number' && config.CONTRACT_ABANDON_DAYS > 0) ? config.CONTRACT_ABANDON_DAYS : 2;
+  const takenPage = Math.max(0, parseInt((sp && sp.get && sp.get('tpage')) || '0', 10) || 0);
+  const takenTotalRow = await db.get("SELECT COUNT(*) c FROM contracts WHERE status = 'taken'").catch(() => null);
+  const takenTotal = takenTotalRow ? takenTotalRow.c : 0;
   const takenRows = await db.all(
-    "SELECT id, discord_id, taken_submitted_at, taken_message_url FROM contracts WHERE status = 'taken' ORDER BY taken_submitted_at ASC LIMIT 60",
+    "SELECT id, discord_id, taken_submitted_at, taken_message_url FROM contracts WHERE status = 'taken' ORDER BY taken_submitted_at ASC LIMIT ? OFFSET ?",
+    [PAGE_SIZE, takenPage * PAGE_SIZE],
   ).catch(() => []);
   const takenCards = [];
   for (const tc of takenRows) {
@@ -6479,9 +6622,11 @@ async function panelContractCheck(client, user, pageNum = 0, sp) {
       </form>
     </div>`);
   }
-  const takenBlock = `<div class="card"><h2>Контракты в работе — ${takenRows.length}${takenRows.length === 60 ? '+' : ''}</h2>
+  const takenBlock = `<div class="card"><h2>Контракты в работе — ${takenTotal}</h2>
     <p class="mini">Взяты, итог не сдан. Через ${abandonDays} дн. снимаются автоматически; здесь руководство может снять раньше.</p>
-    ${takenCards.join('') || '<div class="mini">Нет контрактов в работе.</div>'}</div>`;
+    ${pager('/panel?tab=contracts_check', takenPage, takenTotal, 'tpage')}
+    ${takenCards.join('') || '<div class="mini">Нет контрактов в работе.</div>'}
+    ${pager('/panel?tab=contracts_check', takenPage, takenTotal, 'tpage')}</div>`;
 
   return `<div class="card"><h2>Контракты на проверке — всего ${total}</h2>
     <form method="GET" action="/panel" class="bar" style="margin:6px 0">
@@ -6525,7 +6670,11 @@ async function panelFaqManage(user) {
 }
 
 // ---------- Шаблоны причин отказа (Владелец) ----------
-const REASON_QUEUES = [['application', 'Заявки на вступление'], ['kick', 'Заявки на увольнение'], ['vacation', 'Заявки на отпуск']];
+const REASON_QUEUES = [
+  ['application', 'Заявки на вступление'], ['kick', 'Заявки на увольнение'], ['vacation', 'Заявки на отпуск'],
+  ['passport', 'Добавление паспорта'], ['data_change', 'Изменение данных'], ['hr_application', 'Заявки в HR'],
+  ['appeal', 'Апелляции ЧС'], ['codeword', 'Кодовые слова'],
+];
 async function panelReasons(user) {
   const parts = [`<h1>Шаблоны</h1><p class="muted">Готовые тексты для отказов, ответов в тикетах и рассылок — чтобы не печатать одно и то же каждый раз.</p>`];
   const tpls = await db.all('SELECT * FROM ticket_reply_templates ORDER BY name').catch(() => []);
@@ -6559,7 +6708,7 @@ async function panelReasons(user) {
 }
 
 // ---------- Сверка ролей (Зам.+) ----------
-async function panelRoleCheck(client, user) {
+async function panelRoleCheck(client, user, pageNum = 0) {
   const g = guildOf(client);
   if (!g) return '<div class="card">Бот офлайн.</div>';
   const parts = await db.all('SELECT discord_id, name FROM participants ORDER BY name');
@@ -6581,14 +6730,18 @@ async function panelRoleCheck(client, user) {
     if (config.ROLE_ORGANIZATION && !m.roles.cache.has(config.ROLE_ORGANIZATION)) problems.push('нет роли организации');
     if (problems.length) rows.push({ id: p.discord_id, name: p.name, issue: problems.join('; ') });
   }
-  const list = rows.map((r) => `<tr>
+  const total = rows.length;
+  const pageRows = rows.slice(pageNum * PAGE_SIZE, pageNum * PAGE_SIZE + PAGE_SIZE);
+  const list = pageRows.map((r) => `<tr>
     <td>${personLink(client, r.id)}</td>
     <td class="mini">${esc(r.issue)}</td>
     <td><form method="POST" action="/panel/rolecheck/fix" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.id)}"><button class="btn ghost sm" type="submit">Починить</button></form></td>
   </tr>`).join('');
-  return `<div class="card"><h2>Расхождения ролей / ников (${rows.length})</h2>
-    ${rows.length ? `<form method="POST" action="/panel/rolecheck/fixall" style="margin-bottom:10px" onsubmit="return confirm('Пересинхронизировать всех перечисленных?')">${csrfField(user)}<button class="btn sm" type="submit">Починить всех</button></form>
-    <div class="tablewrap"><table><tr><th>Участник</th><th>Проблема</th><th></th></tr>${list}</table></div>` : '<p class="mini">Все ники и роли совпадают с эффективной личностью 👍</p>'}
+  return `<div class="card"><h2>Расхождения ролей / ников (${total})</h2>
+    ${total ? `<form method="POST" action="/panel/rolecheck/fixall" style="margin-bottom:10px" onsubmit="return confirm('Пересинхронизировать всех перечисленных?')">${csrfField(user)}<button class="btn sm" type="submit">Починить всех</button></form>
+    ${pager('/panel?tab=role_check', pageNum, total)}
+    <div class="tablewrap"><table><tr><th>Участник</th><th>Проблема</th><th></th></tr>${list}</table></div>
+    ${pager('/panel?tab=role_check', pageNum, total)}` : '<p class="mini">Все ники и роли совпадают с эффективной личностью 👍</p>'}
   </div>`;
 }
 
@@ -7494,12 +7647,12 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     await channel.send({ embeds: [new EmbedBuilder().setColor(0x2b2d31).setDescription('👋 Спасибо за обращение! Опишите вопрос как можно подробнее — руководство ответит в течение суток. Если 5 дней не будет активности, тикет закроется автоматически.')] }).catch(() => {});
     await db.run('UPDATE tickets SET last_activity = ? WHERE id = ?', [new Date().toISOString(), r.lastID]).catch(() => {});
     await webAudit(client, user, 'Открыт тикет (сайт)', `#${r.lastID} ${CATS[cat]}: ${subject}`);
-    return backTo + qs({ ok: isBug ? 'Спасибо! Баг-репорт создан — руководство ответит в тикете.' : 'Тикет создан в Discord.' });
+    return `/ticket/${r.lastID}?` + qs({ ok: isBug ? 'Спасибо! Баг-репорт создан — руководство ответит в тикете.' : 'Тикет создан.' });
   }
 
   // ===== розыгрыши (owner) =====
   if (pathName === '/panel/giveaway/create' || pathName === '/panel/giveaway/end' || pathName === '/panel/giveaway/cancel') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/giveaway/create') {
       const prize = (body.get('prize') || '').trim().slice(0, 200);
       const winners = parseInt(body.get('winners'), 10) || 0;
@@ -7566,7 +7719,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== чёрный список (deputy+) =====
   if (pathName.startsWith('/panel/blacklist/')) {
-    if (acc.rank < LEVELS.deputy) return '/panel?tab=blacklist&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'blacklist', LEVELS.deputy))) return '/panel?tab=blacklist&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/blacklist/add') {
       const did = (body.get('discord_id') || '').trim();
       const stat = (body.get('static') || '').trim();
@@ -7782,11 +7935,17 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName === '/u/passport_remove') {
       if (acc.rank < LEVELS.deputy) return back + '?' + qs({ err: 'Недостаточно прав.' });
       const stat = (body.get('static') || '').trim();
+      let result;
       try {
-        await passportsLib.removePassportKeepAccount(target, stat);
+        // Через тот же код, что и в Discord: помимо снятия паспорта архивирует
+        // канал, синхронизирует роли/ник и шлёт DM участнику — раньше сайт
+        // делал это вручную и не полностью (без DM, без архивации канала).
+        result = await hook('kickPassportOrFull')(g, part, stat, 'Удалено на сайте');
       } catch (e) { return back + '?' + qs({ err: e.message }); }
-      await hook('syncEffectiveIdentity')(g, target);
-      await hook('safeUpdateMembersList')(g);
+      if (result && result.fullyRemoved) {
+        await webAudit(client, user, 'Увольнение через удаление последнего паспорта (сайт)', `<@${target}> № ${stat}`);
+        return '/people?' + qs({ ok: 'Это был последний паспорт — участник полностью уволен.' });
+      }
       await webAudit(client, user, 'Удалён паспорт (сайт)', `<@${target}> № ${stat}`);
       return back + '?' + qs({ ok: 'Паспорт удалён.' });
     }
@@ -8045,7 +8204,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== тексты (Владелец) =====
   if (pathName === '/panel/text/save') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=texts&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'texts', LEVELS.owner))) return '/panel?tab=texts&' + qs({ err: 'Недостаточно прав.' });
     const key = body.get('key');
     if (!['rules', 'agitation', 'hr_info'].includes(key)) return '/panel?tab=texts&' + qs({ err: 'Неизвестный ключ.' });
     const contentText = (body.get('content') || '').trim();
@@ -8217,7 +8376,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== рассылка (Владелец) =====
   if (pathName === '/panel/broadcast') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'broadcast', LEVELS.owner))) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
     if (!g) return '/panel?tab=broadcast&' + qs({ err: 'Бот недоступен.' });
     const text = (body.get('text') || '').trim();
     if (!text) return '/panel?tab=broadcast&' + qs({ err: 'Пустой текст.' });
@@ -8260,7 +8419,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== переключатели фич (Владелец) =====
   if (pathName === '/panel/feature/toggle') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=settings&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'settings', LEVELS.owner))) return '/panel?tab=settings&' + qs({ err: 'Недостаточно прав.' });
     const key = (body.get('key') || '').trim();
     if (!FEATURE_FLAGS.some(([k]) => k === key)) return '/panel?tab=settings&' + qs({ err: 'Неизвестный переключатель.' });
     await db.setSetting(`feature_${key}_enabled`, body.get('on') === '1' ? 'true' : 'false');
@@ -8270,7 +8429,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== настройки (Владелец) =====
   if (pathName === '/panel/setting/save') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=settings&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'settings', LEVELS.owner))) return '/panel?tab=settings&' + qs({ err: 'Недостаточно прав.' });
     const key = (body.get('key') || '').trim();
     if (!key) return '/panel?tab=settings&' + qs({ err: 'Пустой ключ.' });
     await db.setSetting(key, (body.get('value') || '').trim());
@@ -8301,7 +8460,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== розыгрыши: расширенное (Владелец) =====
   if (pathName === '/panel/giveaway/reroll' || pathName === '/panel/giveaway/entry_add' || pathName === '/panel/giveaway/entry_remove') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     const gid = parseInt(body.get('id'), 10) || 0;
     const gv = await giveaways.getGiveaway(gid);
     if (!gv) return '/panel?tab=giveaways&' + qs({ err: 'Розыгрыш не найден.' });
@@ -8465,7 +8624,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== SLA: взять заявку/тикет на себя =====
   if (pathName === '/panel/sla/claim') {
-    if (acc.rank < LEVELS.hr) return '/panel?tab=sla&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'sla', LEVELS.hr))) return '/panel?tab=sla&' + qs({ err: 'Недостаточно прав.' });
     const table = body.get('table');
     const allowed = ['applications', 'kicks', 'vacations', 'passport_requests', 'data_change_requests', 'hr_applications', 'tickets'];
     if (!allowed.includes(table)) return '/panel?tab=sla&' + qs({ err: 'Неизвестная таблица.' });
@@ -8477,7 +8636,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== шаблоны рассылок =====
   if (pathName === '/panel/broadcast/tpl_save') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'broadcast', LEVELS.owner))) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
     const name = (body.get('name') || '').trim().slice(0, 80);
     const text = (body.get('text') || '').trim();
     if (!name || !text) return '/panel?tab=broadcast&' + qs({ err: 'Нужны название и текст.' });
@@ -8485,14 +8644,14 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=broadcast&' + qs({ ok: 'Шаблон сохранён.' });
   }
   if (pathName === '/panel/broadcast/tpl_delete') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'broadcast', LEVELS.owner))) return '/panel?tab=broadcast&' + qs({ err: 'Недостаточно прав.' });
     await db.run('DELETE FROM broadcast_templates WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
     return '/panel?tab=broadcast&' + qs({ ok: 'Шаблон удалён.' });
   }
 
   // ===== отложенный розыгрыш =====
   if (pathName === '/panel/giveaway/schedule') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     const prize = (body.get('prize') || '').trim().slice(0, 200);
     const winners = parseInt(body.get('winners'), 10) || 0;
     const durMs = giveaways.parseDuration((body.get('duration') || '').trim());
@@ -8517,13 +8676,13 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=giveaways&' + qs({ ok: 'Розыгрыш запланирован.' });
   }
   if (pathName === '/panel/giveaway/schedule_cancel') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     await db.run("UPDATE scheduled_giveaways SET status='cancelled' WHERE id = ? AND status='pending'", [parseInt(body.get('id'), 10) || 0]);
     await webAudit(client, user, 'Отменён отложенный розыгрыш (сайт)', `#${body.get('id')}`);
     return '/panel?tab=giveaways&' + qs({ ok: 'Отменено.' });
   }
   if (pathName === '/panel/giveaway/tpl_save' || pathName === '/panel/giveaway/tpl_del') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/giveaway/tpl_del') {
       await db.run('DELETE FROM giveaway_templates WHERE id = ?', [parseInt(body.get('id'), 10) || 0]);
       return '/panel?tab=giveaways&' + qs({ ok: 'Шаблон удалён.' });
@@ -8670,6 +8829,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         } catch (_) {}
       }
       if (t.opener_id && t.opener_id !== user.id) await pushNotify(t.opener_id, 'ticket', `Тикет «${t.subject || 'Тикет'}» закрыт${reason ? `: ${reason}` : ''}`, `/ticket/${tid}`).catch(() => {});
+      if (g && t.opener_id) await hook('notifyTicketClosed')(g, tid, t.opener_id, t.subject).catch(() => {});
       await webAudit(client, user, 'Тикет закрыт (сайт)', `#${tid}${reason ? ' — ' + reason : ''}`);
       return back + qs({ ok: 'Тикет закрыт.' });
     }
@@ -8747,7 +8907,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== гайды FAQ (Владелец) =====
   if (pathName.startsWith('/panel/faq/')) {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=faq_manage&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'faq_manage', LEVELS.owner))) return '/panel?tab=faq_manage&' + qs({ err: 'Недостаточно прав.' });
     const refreshCat = async (cat) => { try { if (g) await faqDisplay.safeUpdateFaqChannel(g, cat); } catch (_) {} };
     if (pathName === '/panel/faq/add') {
       const cat = ['public', 'hr', 'member'].includes(body.get('category')) ? body.get('category') : 'member';
@@ -8786,10 +8946,10 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== шаблоны причин отказа (Владелец) =====
   if (pathName.startsWith('/panel/reason/')) {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=reasons&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'reasons', LEVELS.owner))) return '/panel?tab=reasons&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/reason/add') {
       const q = body.get('queue');
-      if (!['application', 'kick', 'vacation'].includes(q)) return '/panel?tab=reasons&' + qs({ err: 'Неизвестная очередь.' });
+      if (!REASON_QUEUES.some(([key]) => key === q)) return '/panel?tab=reasons&' + qs({ err: 'Неизвестная очередь.' });
       const text = (body.get('text') || '').trim().slice(0, 300);
       if (!text) return '/panel?tab=reasons&' + qs({ err: 'Пустой текст.' });
       const mx = await db.get('SELECT MAX(position) m FROM reject_reason_templates WHERE queue = ?', [q]);
@@ -8820,7 +8980,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== ручное добавление участника (Зам.+) =====
   if (pathName === '/panel/member/add') {
-    if (acc.rank < LEVELS.deputy) return '/panel?tab=members&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'members', LEVELS.deputy))) return '/panel?tab=members&' + qs({ err: 'Недостаточно прав.' });
     if (!g) return '/panel?tab=members&' + qs({ err: 'Бот недоступен.' });
     const did = (body.get('discord_id') || '').trim();
     const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
@@ -8854,7 +9014,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== повторяющиеся розыгрыши (Владелец) =====
   if (pathName === '/panel/giveaway/recur_create' || pathName === '/panel/giveaway/recur_toggle' || pathName === '/panel/giveaway/recur_delete') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/giveaway/recur_create') {
       const prize = (body.get('prize') || '').trim().slice(0, 200);
       const winners = parseInt(body.get('winners'), 10) || 0;
@@ -8900,7 +9060,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     return '/panel?tab=texts&' + qs({ ok: `Правила отправлены в канал; рассылка в ЛС (${ids.length}) идёт в фоне.` });
   }
   if (pathName === '/panel/text/publish') {
-    if (acc.rank < LEVELS.owner) return '/panel?tab=texts&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'texts', LEVELS.owner))) return '/panel?tab=texts&' + qs({ err: 'Недостаточно прав.' });
     if (!g) return '/panel?tab=texts&' + qs({ err: 'Бот недоступен.' });
     const key = body.get('key');
     const chMap = { agitation: config.CHANNEL_AGITATION, hr_info: config.CHANNEL_HR_APPLY_MENU };
@@ -9434,7 +9594,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
 
   // ===== сверка ролей: починить (Зам.+) =====
   if (pathName === '/panel/rolecheck/fix' || pathName === '/panel/rolecheck/fixall') {
-    if (acc.rank < LEVELS.deputy) return '/panel?tab=role_check&' + qs({ err: 'Недостаточно прав.' });
+    if (!(await panelTabAllowed(client, user, acc, 'role_check', LEVELS.deputy))) return '/panel?tab=role_check&' + qs({ err: 'Недостаточно прав.' });
     if (!g) return '/panel?tab=role_check&' + qs({ err: 'Бот недоступен.' });
     let ids = [];
     if (pathName === '/panel/rolecheck/fix') {
@@ -9946,7 +10106,7 @@ function start(client, hooks = {}) {
           <div class="card"><b>Логин:</b> ${esc(lu ? lu.login : user.username)}<br><b>Почта:</b> ${esc(lu ? lu.email || '—' : '—')}</div>
           <div class="card"><h2>Discord</h2><p>${linkedTxt}</p>
             ${lu && lu.linked_discord_id ? '' : `<a class="btn sm" href="/login?go=link">Привязать Discord</a>
-            ${lu && lu.oauth_discord_id ? `<form method="POST" action="/account/discord_unlink" style="display:inline;margin-left:6px">${csrfField(user)}<button class="btn ghost sm" type="submit">Отвязать</button></form>` : ''}`}
+            ${lu && lu.oauth_discord_id ? `<form method="POST" action="/account/discord_unlink" style="display:inline;margin-left:6px" onsubmit="return confirm('Отвязать Discord-аккаунт? Понадобится вход по логину/паролю.')">${csrfField(user)}<button class="btn ghost sm" type="submit">Отвязать</button></form>` : ''}`}
           </div>
           <div class="card"><h2>Сменить пароль</h2>
             <form method="POST" action="/account/password" class="form">${csrfField(user)}
@@ -10242,7 +10402,7 @@ function start(client, hooks = {}) {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
         if (acc.rank < LEVELS.member) return html(403, L({ title: 'Нет доступа', user, level: acc.level, body: '<h1>Раздел для участников организации</h1><a class="btn" href="/me">Мой профиль</a>' }));
-        return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim(), u.searchParams.get('days')) }));
+        return html(200, L({ title: 'Сравнение', user, level: acc.level, wide: true, body: flash + await compareBody(client, user.id, (u.searchParams.get('with') || '').trim(), u.searchParams.get('days'), acc) }));
       }
 
       if (path === '/bug' && req.method === 'GET') {

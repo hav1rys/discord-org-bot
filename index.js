@@ -1033,6 +1033,7 @@ async function checkStuckContracts(guild) {
   const abandoned = await db.all("SELECT id, discord_id FROM contracts WHERE status = 'taken' AND taken_submitted_at <= ?", [abandonCutoff]).catch(() => []);
   for (const a of abandoned) {
     await db.run("UPDATE contracts SET status = 'abandoned' WHERE id = ?", [a.id]).catch(() => {});
+    await dmUser(guild, a.discord_id, `🚫 Взятый контракт #${a.id} снят автоматически — итог не сдан ${abandonDays} дн. Можно взять контракт заново.`).catch(() => {});
     await notify(a.discord_id, 'contract', `Взятый контракт #${a.id} снят автоматически — итог не сдан ${abandonDays} дн.`, '/me').catch(() => {});
   }
 
@@ -9682,6 +9683,7 @@ client.once('clientReady', async () => {
       syncProfileChannelName,
       createProfileThread,
       removeParticipant,
+      kickPassportOrFull,
       safeUpdateMembersList,
       getCurrentText,
       runWeeklyRankAdjustment,
@@ -9733,6 +9735,17 @@ client.once('clientReady', async () => {
           allowedMentions: { roles: config.ROLES_MEMBERS_LIST_ALLOWED },
         });
         await db.run('UPDATE hr_applications SET message_id = ? WHERE id = ?', [sent.id, reqId]).catch(() => {});
+      },
+      // Тикет закрыт с сайта — просим автора оценить обращение, как при закрытии в Discord.
+      notifyTicketClosed: async (guild, ticketId, openerId, subject) => {
+        if (!guild || !openerId) return;
+        await dmUser(guild, openerId, {
+          content: `Ваш тикет «${subject || '—'}» закрыт. Помогло ли обращение?`,
+          components: [row(
+            new ButtonBuilder().setCustomId(`ticket_rate:${ticketId}:1`).setLabel('👍 Помогло').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId(`ticket_rate:${ticketId}:0`).setLabel('👎 Не помогло').setStyle(ButtonStyle.Secondary),
+          )],
+        });
       },
       restoreProfiles: async (guild) => {
         const parts = await db.all('SELECT discord_id FROM participants');
