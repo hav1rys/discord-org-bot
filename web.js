@@ -30,6 +30,8 @@ const csvLib = require('./csv');
 const { notify: pushNotify, unreadCount, invalidateUnread, isDmOff, KINDS: NOTIF_KINDS, getPrefs: getNotifPrefs, setPrefs: setNotifPrefs } = require('./notify');
 
 const OWNER_ID = config.OWNER_USER_ID; // havirys — полный доступ, включая редактор БД
+// Настоящий владелец (havirys), а не «Просмотр как»: в режиме просмотра инструменты владельца скрыты, как у выбранного уровня.
+function realHavirys(user) { return !!(user && user.id === OWNER_ID && !user._viewAsLevel); }
 
 // Функции-хуки из index.js (онбординг/синхронизация ролей), передаются в start().
 // Позволяют сайту выполнять те же действия, что и кнопки бота, через уже
@@ -1205,7 +1207,8 @@ const PHOTO_CSS = `<style>
     .ph-row input{flex:1;min-width:0;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
     .ph-bar{height:6px;border-radius:99px;background:var(--panel2);overflow:hidden}.ph-bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
     .ph-file{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
-    .ph-file img{width:64px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+    .ph-file img{width:64px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--line);cursor:zoom-in}
+    .ph-file img:hover{border-color:var(--accent)}
     .ph-lb{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:500;display:none;align-items:center;justify-content:center}
     .ph-lb.on{display:flex}.ph-lb img{max-width:92vw;max-height:88vh;border-radius:8px}
     .ph-lb button{position:absolute;background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:50%;width:44px;height:44px;font-size:20px;cursor:pointer}
@@ -1269,13 +1272,13 @@ async function photoBody(user, pageNum) {
       ${cards ? `<div class="ph-grid" id="phAlbums">${cards}</div>` : '<p class="mini">Пока нет альбомов — загрузите первые фото выше.</p>'}
       ${pager('/photo', pageNum, total)}</div>`;
   }
-  const isOwnerUser = !!(user && user.id === OWNER_ID);
+  const isOwnerUser = realHavirys(user);
   const sliderMax = isOwnerUser ? 365 : photoMaxDays(!!user); // владельцу доступен ещё один шаг — «бессрочно»
   return `<h1>📷 Фотообменник</h1>
   <p class="muted" style="margin-bottom:14px">Загрузите несколько картинок — получите одну ссылку на альбом, которую можно отправить кому угодно. JPG, PNG, GIF, WEBP до 10 МБ, до ${albumMaxPhotos(!!user)} фото в альбоме. После создания альбом изменить нельзя (название, срок, отдельные фото) — удалить его целиком может только автор после входа на сайт. Альбомы хранятся ограниченное время и удаляются сами: без входа — до ${photoMaxDays(false)} дн., после входа — до ${photoMaxDays(true)} дн.${user ? '' : ' Войдите, чтобы видеть свои альбомы в профиле.'}</p>
   ${(!user && !guestsOk) ? '<div class="card">Загрузка доступна после входа на сайт. <a class="btn sm" href="/login">Войти</a></div>' : `
   <div class="card"><div class="form" style="margin:0">
-    <label>Название альбома<input id="phTitle" maxlength="80" placeholder="Например: Скриншоты с контракта"></label>
+    <label>Название альбома<input id="phTitle" maxlength="80" placeholder="Введите название альбома"></label>
     <label>Срок хранения: <b id="phTtlV">${sliderMax} ${daysWord(sliderMax)}</b>
       <input type="range" id="phTtl" min="1" max="${sliderMax + (isOwnerUser ? 1 : 0)}" step="1" value="${sliderMax}" style="width:100%;max-width:520px;accent-color:var(--accent)"></label>
     <div class="mini">${isOwnerUser ? 'Тяните ползунок вправо до конца — альбом будет храниться бессрочно.' : `Максимум ${sliderMax} ${daysWord(sliderMax)}.`}</div>
@@ -1287,6 +1290,7 @@ async function photoBody(user, pageNum) {
   </div>
   <div id="phResults"></div>`}
   ${albumsCard}
+  <div class="ph-lb" id="phLb"><img alt=""><button type="button" class="nv p" id="phLbP" aria-label="Предыдущее">‹</button><button type="button" class="nv n" id="phLbN" aria-label="Следующее">›</button><button type="button" id="phLbX" style="top:16px;right:16px" aria-label="Закрыть">✕</button><div class="cnt" id="phLbC"></div></div>
   ${PHOTO_CSS}
   <script>(function(){
     var CSRF=${JSON.stringify(csrf)}, MAX=${PHOTO_MAX}, LOGGED=${user ? 'true' : 'false'}, MAXD=${sliderMax}, OWNER=${isOwnerUser ? 'true' : 'false'};
@@ -1296,6 +1300,19 @@ async function photoBody(user, pageNum) {
     function ttlValue(){ var v=parseInt(ttlEl.value,10); return (OWNER&&v>MAXD)?0:v; }
     if(ttlEl){ ttlEl.addEventListener('input',function(){ttlV.textContent=ttlLabel(ttlEl.value,MAXD,OWNER);}); }
     var drop=document.getElementById('phDrop'), inp=document.getElementById('phFile'), out=document.getElementById('phResults');
+    // Увеличение загруженных фото (клик по миниатюре), листание ‹ › / стрелки клавиатуры / свайп.
+    var zb=document.getElementById('phLb'), zi=zb.querySelector('img'), zc=document.getElementById('phLbC'), zcur=-1, zlist=[];
+    function zshow(i){ if(!zlist.length)return; zcur=(i+zlist.length)%zlist.length; zi.src=zlist[zcur].getAttribute('src'); zc.textContent=(zcur+1)+' / '+zlist.length; }
+    document.getElementById('phLbP').onclick=function(e){e.stopPropagation();zshow(zcur-1);};
+    document.getElementById('phLbN').onclick=function(e){e.stopPropagation();zshow(zcur+1);};
+    document.addEventListener('click',function(e){
+      var im=e.target.closest&&e.target.closest('.ph-file img');
+      if(im){ zlist=[].slice.call(document.querySelectorAll('.ph-file img')); zshow(zlist.indexOf(im)); zb.classList.add('on'); return; }
+      if(e.target===zb||e.target.id==='phLbX')zb.classList.remove('on');
+    });
+    document.addEventListener('keydown',function(e){ if(!zb.classList.contains('on'))return; if(e.key==='Escape')zb.classList.remove('on'); else if(e.key==='ArrowLeft')zshow(zcur-1); else if(e.key==='ArrowRight')zshow(zcur+1); });
+    var ztx=null; zb.addEventListener('touchstart',function(e){ztx=e.touches[0].clientX;},{passive:true});
+    zb.addEventListener('touchend',function(e){ if(ztx===null)return; var dx=e.changedTouches[0].clientX-ztx; ztx=null; if(Math.abs(dx)>50)zshow(zcur+(dx<0?1:-1)); },{passive:true});
     document.addEventListener('click',function(e){
       var d=e.target.closest&&e.target.closest('[data-adel]'); if(!d)return;
       if(!confirm('Удалить альбом целиком? Все ссылки на фото перестанут работать.'))return;
@@ -1359,7 +1376,7 @@ async function albumBody(client, user, canDelete, album) {
   const totalSize = photos.reduce((s, p) => s + (p.size || 0), 0);
   const author = album.owner_id ? personLink(client, album.owner_id) : 'гость';
   const csrf = user ? csrfToken(user) : '';
-  const isHavirys = !!(user && user.id === OWNER_ID); // единственное исключение: правка и удаление отдельных фото
+  const isHavirys = realHavirys(user); // единственное исключение: правка и удаление отдельных фото
   const cards = photos.map((p) => `<div class="ph-card ph-item" data-pcode="${esc(p.code)}" data-name="${esc((p.orig_name || '').toLowerCase())}" data-taken="${new Date(p.taken_at || p.created_at).getTime() || 0}" data-up="${p.id}" data-size="${p.size || 0}">
       <a class="ph-th" href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt="${esc(p.orig_name || '')}"></a>
       <div class="ph-info">
@@ -1372,17 +1389,9 @@ async function albumBody(client, user, canDelete, album) {
           <a class="btn ghost sm" href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}">Открыть</a>
           ${isHavirys ? `<button type="button" class="btn sm" style="background:var(--bad)" data-pdel="${esc(p.code)}" title="Только владелец сайта">✕</button>` : ''}
         </div></div></div>`).join('');
-  return `<div class="al-head">
-    <div class="al-t">${album.title ? `<h1>${esc(album.title)}</h1>` : ''}</div>
-    <div class="al-i">
-      <div>Автор: <b>${author}</b></div>
-      <div>Создан: <b>${fmt(album.created_at)}</b></div>
-      <div>Фото: <b>${photos.length}</b> · Размер: <b>${esc(fmtBytes(totalSize))}</b></div>
-      <div>Просмотров: <b>${album.views || 0}</b></div>
-      <div>Хранится: <b>${album.expires_at ? 'до ' + fmt(album.expires_at) : 'бессрочно'}</b></div>
-    </div>
-  </div>
-  <div class="al-col">
+  return `<div class="al-col">
+  <h1>${esc(album.title || 'Альбом')}</h1>
+  <p class="muted">Автор: ${author} · ${photos.length} фото · ${esc(fmtBytes(totalSize))} · 👁 ${album.views || 0} · создан ${fmt(album.created_at)} · хранится ${album.expires_at ? 'до ' + fmt(album.expires_at) : 'бессрочно'}</p>
   <div class="card"><div class="bar" style="flex-wrap:wrap;gap:8px">
     <button type="button" class="btn sm" data-copy="${esc(albumUrl(album.code))}">🔗 Копировать ссылку на альбом</button>
     <a class="btn ghost sm" href="/photo">Создать свой альбом</a>
@@ -1680,7 +1689,7 @@ function layout(opts) {
   let sidebar = '';
   let header;
   if (user) {
-    const groups = v2NavGroups(level, opts.panelGrant, user.id === OWNER_ID);
+    const groups = v2NavGroups(level, opts.panelGrant, realHavirys(user));
     const csrf = (() => { try { return csrfField(user); } catch (_) { return ''; } })();
     sidebar = `<aside class="sb" id="sb">${brand}${v2NavHtml(groups, ctx)}
       <div class="sbfoot"><div><b>${esc(user.username || user.id)}</b></div><div>${esc(level)}</div>
@@ -2496,7 +2505,7 @@ function panelCanTab(acc, grants, id) {
 }
 
 async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
-  acc._isHavirys = !!(user && user.id === OWNER_ID);
+  acc._isHavirys = realHavirys(user);
   const grants = await getPanelGrants(client, user && user.id);
   const canTab = (id) => panelCanTab(acc, grants, id);
   const canData = canTab('data');
@@ -2624,7 +2633,7 @@ async function panelMembers(client, pageNum, user, acc) {
   const rankOpts = (config.ROLE_IDS || []).map((rid) => `<option value="${esc(rid)}">${esc(roleName(client, rid))}</option>`).join('');
   // Импорт CSV — массовое действие, поэтому строже «Добавить вручную»: только
   // владелец-аккаунт (havirys), без права по гранту вкладки «Участники».
-  const canImport = user && user.id === OWNER_ID;
+  const canImport = realHavirys(user);
   const addForm = user ? `<div class="card"><h2>Добавить участника вручную</h2>
     <form method="POST" action="/panel/member/add" class="form">${csrfField(user)}
       <label>Discord ID<input name="discord_id" required pattern="[0-9]+" maxlength="25"></label>
@@ -2986,7 +2995,7 @@ async function panelData(client, table, pageNum, user, sp) {
   const def = DATA_TABLES[table];
   if (!def) return '<div class="card">Неизвестная таблица.</div>';
   const [title, cols] = def;
-  const canEdit = !!(user && user.id === OWNER_ID);
+  const canEdit = realHavirys(user);
   const picker = Object.entries(DATA_TABLES)
     .map(([k, v]) => `<a class="${k === table ? 'on' : ''}" href="/panel?tab=data&table=${k}">${esc(v[0])}</a>`).join('');
 
@@ -6813,7 +6822,7 @@ function commandsAllowed(rank, isHavirys) {
 function commandsBody(acc, user) {
   const labels = HOOKS.tierLabels || {};
   const descs = HOOKS.commandDescriptions || {};
-  const grouped = commandsAllowed(acc.rank, user && user.id === OWNER_ID);
+  const grouped = commandsAllowed(acc.rank, realHavirys(user));
   const order = ['everyone', 'hr', 'deputy', 'owner', 'admin', 'owner_account_only'];
   const seen = new Set();
   const secs = [];
@@ -9628,7 +9637,7 @@ function start(client, hooks = {}) {
       const pj = (code, obj) => done(code, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
       const isPhotoAdmin = async () => {
         if (!user) return false;
-        if (user.id === OWNER_ID) return true;
+        if (realHavirys(user)) return true;
         return ((await accessFor(client, user.id)).rank || 0) >= LEVELS.owner;
       };
       // Может ли текущий посетитель управлять альбомом: владелец, админ или с секретным токеном.
@@ -9649,7 +9658,7 @@ function start(client, hooks = {}) {
         if (!user && SITE.photo_guests === '0') return pj(403, { ok: false, err: 'Загрузка доступна после входа на сайт.' });
         if (user && !csrfOk(user, b.get('_csrf'))) return pj(403, { ok: false, err: 'Сессия устарела — обновите страницу.' });
         if (!photoRateOk('alb:' + (user ? user.id : clientIp), user ? 40 : 6)) return pj(429, { ok: false, err: 'Слишком много альбомов за час — попробуйте позже.' });
-        const isOwnerAcc = !!(user && user.id === OWNER_ID);
+        const isOwnerAcc = realHavirys(user);
         const forever = isOwnerAcc && String(b.get('ttl')) === '0'; // бессрочно — только владелец
         const maxDays = isOwnerAcc ? 3650 : photoMaxDays(!!user);
         let ttl = parseInt(b.get('ttl'), 10);
@@ -9670,7 +9679,7 @@ function start(client, hooks = {}) {
         const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [String(req.headers['x-album'] || '')]).catch(() => null);
         if (!album) return pj(404, { ok: false, err: 'Альбом не найден или срок его хранения истёк.' });
         const tokenOk = album.del_token && String(req.headers['x-album-token'] || '') === album.del_token;
-        const isHavirysUp = !!(user && user.id === OWNER_ID);
+        const isHavirysUp = realHavirys(user);
         if (!isHavirysUp) {
           if (!tokenOk && !(user && album.owner_id === user.id)) return pj(403, { ok: false, err: 'Нет прав добавлять фото в этот альбом.' });
           // Как на фотохостингах: фото загружаются при создании альбома, потом он «закрывается».
@@ -9715,7 +9724,7 @@ function start(client, hooks = {}) {
         const b = await readBody(req);
         const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
         if (!album) return pj(404, { ok: false, err: 'Альбом не найден.' });
-        if (!(user && user.id === OWNER_ID && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'После создания альбом изменить нельзя.' });
+        if (!(realHavirys(user) && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'После создания альбом изменить нельзя.' });
         let title = album.title || '';
         if (b.has('title')) {
           title = (b.get('title') || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 80);
@@ -9753,7 +9762,7 @@ function start(client, hooks = {}) {
         const b = await readBody(req);
         const row = await db.get('SELECT * FROM photos WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
         if (!row) return pj(404, { ok: false, err: 'Картинка не найдена.' });
-        if (!(user && user.id === OWNER_ID && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'Удалять отдельные фото из альбома нельзя. Можно удалить альбом целиком (автору).' });
+        if (!(realHavirys(user) && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'Удалять отдельные фото из альбома нельзя. Можно удалить альбом целиком (автору).' });
         await removePhotoFiles([row]);
         await db.run('DELETE FROM photos WHERE id = ?', [row.id]);
         return pj(200, { ok: true });
