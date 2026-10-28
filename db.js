@@ -780,6 +780,7 @@ const SCHEMA = {
       del_token: 'TEXT', // секрет для удаления без входа
       expires_at: 'TEXT', // после этой даты файл удаляется автоматически
       album_id: 'INTEGER', // photo_albums.id; пусто — одиночное фото (старый формат)
+      taken_at: 'TEXT', // когда снимок создан (EXIF или дата файла на устройстве), а не когда загружен
       views: 'INTEGER DEFAULT 0',
       created_at: 'TEXT',
     },

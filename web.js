@@ -1090,6 +1090,46 @@ function readRaw(req, max) {
   });
 }
 // Формат определяем по первым байтам, а не по имени/заголовку: SVG и прочее не принимаем.
+// Дата создания снимка из EXIF (DateTimeOriginal / DateTime) для JPEG. Время в EXIF без пояса — считаем московским.
+function exifTakenAt(buf) {
+  try {
+    if (!(buf[0] === 0xFF && buf[1] === 0xD8)) return null;
+    let off = 2;
+    while (off + 4 < buf.length) {
+      if (buf[off] !== 0xFF) return null;
+      const marker = buf[off + 1];
+      const len = buf.readUInt16BE(off + 2);
+      if (marker === 0xDA) return null;
+      if (marker === 0xE1 && buf.slice(off + 4, off + 10).toString('latin1') === 'Exif\0\0') {
+        const t = off + 10;
+        const le = buf.slice(t, t + 2).toString('latin1') === 'II';
+        const u16 = (o) => (le ? buf.readUInt16LE(t + o) : buf.readUInt16BE(t + o));
+        const u32 = (o) => (le ? buf.readUInt32LE(t + o) : buf.readUInt32BE(t + o));
+        const find = (ifdOff, want) => {
+          const n = u16(ifdOff);
+          for (let i = 0; i < Math.min(n, 200); i++) {
+            const e = ifdOff + 2 + i * 12;
+            if (u16(e) === want) return { count: u32(e + 4), valOff: e + 8 };
+          }
+          return null;
+        };
+        const ifd0 = u32(4);
+        const exifPtr = find(ifd0, 0x8769);
+        let ent = null;
+        if (exifPtr) { const ex = u32(exifPtr.valOff); ent = find(ex, 0x9003) || find(ex, 0x9004); }
+        if (!ent) ent = find(ifd0, 0x0132);
+        if (!ent || ent.count < 19) return null;
+        const o = ent.count > 4 ? u32(ent.valOff) : ent.valOff;
+        const m = /^(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d):(\d\d)/.exec(buf.slice(t + o, t + o + ent.count - 1).toString('latin1'));
+        if (!m) return null;
+        const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) - 3 * 3600e3);
+        return Number.isNaN(d.getTime()) || d.getTime() < 9.46e11 || d.getTime() > Date.now() + 864e5 ? null : d.toISOString();
+      }
+      off += 2 + len;
+    }
+  } catch (_) {}
+  return null;
+}
 function sniffImage(b) {
   if (!b || b.length < 12) return null;
   if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return { ext: 'jpg', mime: 'image/jpeg' };
@@ -1171,6 +1211,10 @@ const PHOTO_CSS = `<style>
     .ph-lb button{position:absolute;background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:50%;width:44px;height:44px;font-size:20px;cursor:pointer}
     .ph-cover{display:block;width:100%;height:150px;object-fit:cover;background:var(--bg)}
     .mg{display:none}.mg.on{display:inline-block}
+    .ph-nm{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ph-lb .nv{top:50%;margin-top:-22px}
+    .ph-lb .nv.p{left:14px}.ph-lb .nv.n{right:14px}
+    .ph-lb .cnt{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,.5);padding:4px 12px;border-radius:99px;font-size:13px}
 </style>`;
 
 // Склонение «день/дня/дней» для клиентского ползунка.
@@ -1185,8 +1229,6 @@ const PHOTO_JS_COMMON = `
       if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done);}else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(e){}a.remove();done();} }
     function post(url,data,cb){ var b=Object.keys(data).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(data[k]);}).join('&');
       fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}).then(function(r){return r.json();}).then(cb).catch(function(){alert('Ошибка сети');}); }
-    function tokens(){ try{return JSON.parse(localStorage.getItem('fc_albums')||'{}')||{};}catch(e){return {};} }
-    function saveToken(code,t){ try{var o=tokens();o[code]=t;localStorage.setItem('fc_albums',JSON.stringify(o));}catch(e){} }
     document.addEventListener('click',function(e){ var c=e.target.closest&&e.target.closest('[data-copy]'); if(c){copy(c.getAttribute('data-copy'),c);} });
 `;
 
@@ -1217,7 +1259,7 @@ async function photoBody(user, pageNum) {
   const isOwnerUser = !!(user && user.id === OWNER_ID);
   const sliderMax = isOwnerUser ? 365 : photoMaxDays(!!user); // владельцу доступен ещё один шаг — «бессрочно»
   return `<h1>📷 Фотообменник</h1>
-  <p class="muted" style="margin-bottom:14px">Загрузите несколько картинок — получите одну ссылку на альбом, которую можно отправить кому угодно. JPG, PNG, GIF, WEBP до 10 МБ, до ${albumMaxPhotos(!!user)} фото в альбоме. Альбомы хранятся ограниченное время и удаляются сами: без входа — до ${photoMaxDays(false)} дн., после входа — до ${photoMaxDays(true)} дн.${user ? '' : ' Войдите, чтобы видеть свои альбомы в профиле.'}</p>
+  <p class="muted" style="margin-bottom:14px">Загрузите несколько картинок — получите одну ссылку на альбом, которую можно отправить кому угодно. JPG, PNG, GIF, WEBP до 10 МБ, до ${albumMaxPhotos(!!user)} фото в альбоме. После создания альбом изменить нельзя (название, срок, отдельные фото) — удалить его целиком может только автор после входа на сайт. Альбомы хранятся ограниченное время и удаляются сами: без входа — до ${photoMaxDays(false)} дн., после входа — до ${photoMaxDays(true)} дн.${user ? '' : ' Войдите, чтобы видеть свои альбомы в профиле.'}</p>
   ${(!user && !guestsOk) ? '<div class="card">Загрузка доступна после входа на сайт. <a class="btn sm" href="/login">Войти</a></div>' : `
   <div class="card"><div class="form" style="margin:0">
     <label>Название альбома<input id="phTitle" maxlength="80" placeholder="Например: Скриншоты с контракта"></label>
@@ -1245,7 +1287,7 @@ async function photoBody(user, pageNum) {
       var d=e.target.closest&&e.target.closest('[data-adel]'); if(!d)return;
       if(!confirm('Удалить альбом целиком? Все ссылки на фото перестанут работать.'))return;
       var code=d.getAttribute('data-adel');
-      post('/photo/album_delete',{code:code,token:tokens()[code]||'',_csrf:CSRF},function(j){ if(j.ok){var c=d.closest('.ph-card');if(c)c.remove();} else alert(j.err||'Не удалось удалить'); });
+      post('/photo/album_delete',{code:code,_csrf:CSRF},function(j){ if(j.ok){var c=d.closest('.ph-card');if(c)c.remove();} else alert(j.err||'Не удалось удалить'); });
     });
     var album=null, albumP=null, queue=Promise.resolve(), box=null, filesBox=null, count=0;
     function createAlbum(){
@@ -1253,10 +1295,10 @@ async function photoBody(user, pageNum) {
       albumP=new Promise(function(resolve,reject){
         post('/photo/album',{title:(document.getElementById('phTitle').value||'').trim(),ttl:ttlValue(),_csrf:CSRF},function(j){
           if(!j.ok){ albumP=null; reject(j.err||'Не удалось создать альбом'); return; }
-          album=j; if(!LOGGED)saveToken(j.code,j.token);
+          album=j;
           box=document.createElement('div'); box.className='card';
           box.innerHTML='<h2>Ваш альбом'+(j.title?' «'+esc(j.title)+'»':'')+'</h2><div class="ph-row"><span>Ссылка на альбом</span><input readonly value="'+esc(j.url)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url)+'">Копировать</button><a class="btn sm" href="/a/'+esc(j.code)+'" target="_blank" rel="noopener">Открыть</a></div>'
-            +(LOGGED?'<div class="mini">Хранится '+esc(j.until)+'. Альбом появится в «Мои альбомы» и в профиле.</div>':'<div class="ph-row"><span>Управление</span><input readonly value="'+esc(j.url+'?m='+j.token)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url+'?m='+j.token)+'">Копировать</button></div><div class="mini">Сохраните ссылку управления — по ней можно переименовать или удалить альбом. Хранится '+esc(j.until)+'.</div>')
+            +'<div class="mini">Хранится '+esc(j.until)+'. '+(LOGGED?'Альбом появится в «Мои альбомы» и в профиле; удалить его целиком можно там же.':'Сохраните ссылку: после создания альбом нельзя изменить или удалить. Чтобы управлять альбомами, входите на сайт.')+'</div>'
             +'<div id="phFiles" style="margin-top:10px"></div><div class="bar" style="margin-top:10px"><button type="button" class="btn ghost sm" id="phNew">Создать новый альбом</button></div>';
           out.prepend(box); filesBox=box.querySelector('#phFiles');
           box.querySelector('#phNew').onclick=function(){ album=null;albumP=null;box=null;filesBox=null;count=0;out.innerHTML='';document.getElementById('phTitle').value=''; };
@@ -1272,13 +1314,13 @@ async function photoBody(user, pageNum) {
         filesBox.appendChild(row);
         var st=row.querySelector('.st'), bar=row.querySelector('.ph-bar i');
         if(file.size>MAX){ st.textContent='⛔ Больше 10 МБ'; return resolve(); }
-        var x=new XMLHttpRequest(); x.open('POST','/photo/upload'); x.setRequestHeader('X-Filename',encodeURIComponent(file.name||'image')); x.setRequestHeader('X-Csrf',CSRF); x.setRequestHeader('X-Album',a.code); x.setRequestHeader('X-Album-Token',a.token||'');
+        var x=new XMLHttpRequest(); x.open('POST','/photo/upload'); x.setRequestHeader('X-Filename',encodeURIComponent(file.name||'image')); x.setRequestHeader('X-Taken',String(file.lastModified||'')); x.setRequestHeader('X-Csrf',CSRF); x.setRequestHeader('X-Album',a.code); x.setRequestHeader('X-Album-Token',a.token||'');
         x.upload.onprogress=function(e){ if(e.lengthComputable)bar.style.width=Math.round(e.loaded/e.total*100)+'%'; };
         x.onerror=function(){ st.textContent='⛔ Ошибка сети'; resolve(); };
         x.onload=function(){ var j={}; try{j=JSON.parse(x.responseText);}catch(e){}
           if(!j.ok){ st.textContent='⛔ '+(j.err||'Не удалось загрузить'); return resolve(); }
           count++;
-          row.innerHTML='<img src="'+esc(j.url)+'" alt=""><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+esc(j.size)+'</span><div class="ph-row"><span>Прямая ссылка</span><input readonly value="'+esc(j.url)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url)+'">Копировать</button></div><div class="ph-row"><span>BB-код</span><input readonly value="[img]'+esc(j.url)+'[/img]" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="[img]'+esc(j.url)+'[/img]">Копировать</button></div></div>';
+          row.innerHTML='<img src="'+esc(j.url)+'" alt=""><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+esc(j.size)+'</span><div class="ph-row"><span>Прямая ссылка</span><input readonly value="'+esc(j.url)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url)+'">Копировать</button></div></div>';
           resolve(); };
         x.send(file);
       }); });
@@ -1299,57 +1341,84 @@ async function photoBody(user, pageNum) {
 }
 
 // Страница альбома /a/<code>: открывается по ссылке любым человеком.
-async function albumBody(client, user, canManage, album, mParam) {
+async function albumBody(client, user, canDelete, album) {
   const photos = await db.all('SELECT * FROM photos WHERE album_id = ? ORDER BY id', [album.id]).catch(() => []);
   const totalSize = photos.reduce((s, p) => s + (p.size || 0), 0);
   const author = album.owner_id ? personLink(client, album.owner_id) : 'гость';
   const csrf = user ? csrfToken(user) : '';
-  const cards = photos.map((p) => `<div class="ph-card" data-pcode="${esc(p.code)}">
-      <a href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt=""></a>
-      <div class="ph-meta"><span class="mini">${esc(fmtBytes(p.size))}</span>
+  const isHavirys = !!(user && user.id === OWNER_ID); // единственное исключение: правка и удаление отдельных фото
+  const cards = photos.map((p) => `<div class="ph-card" data-pcode="${esc(p.code)}" data-name="${esc((p.orig_name || '').toLowerCase())}" data-taken="${new Date(p.taken_at || p.created_at).getTime() || 0}" data-up="${p.id}" data-size="${p.size || 0}">
+      <a href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt="${esc(p.orig_name || '')}"></a>
+      <div class="ph-meta"><div class="ph-nm" title="${esc(p.orig_name || '')}">${esc(p.orig_name || 'без названия')}</div>
+        <span class="mini">${esc(fmtBytes(p.size))} · 📅 ${fmt(p.taken_at || p.created_at)}</span>
         <div class="ph-acts">
-          <button type="button" class="btn ghost sm" data-copy="${esc(photoUrl(p))}">Ссылка</button>
-          <button type="button" class="btn ghost sm" data-copy="[img]${esc(photoUrl(p))}[/img]">BB</button>
-          <button type="button" class="btn sm mg${canManage ? ' on' : ''}" style="background:var(--bad)" data-pdel="${esc(p.code)}">✕</button>
+          <button type="button" class="btn ghost sm" data-copy="${esc(photoUrl(p))}" title="Скопировать прямую ссылку на картинку">Ссылка</button>
+          ${isHavirys ? `<button type="button" class="btn sm" style="background:var(--bad)" data-pdel="${esc(p.code)}" title="Только владелец сайта">✕</button>` : ''}
         </div></div></div>`).join('');
-  return `<h1 id="alTitle">${esc(album.title || 'Альбом')}</h1>
+  return `<h1>${esc(album.title || 'Альбом')}</h1>
   <p class="muted">Автор: ${author} · ${photos.length} фото · ${esc(fmtBytes(totalSize))} · 👁 ${album.views || 0} · создан ${fmt(album.created_at)} · хранится ${album.expires_at ? 'до ' + fmt(album.expires_at) : 'бессрочно'}</p>
   <div class="card"><div class="bar" style="flex-wrap:wrap;gap:8px">
     <button type="button" class="btn sm" data-copy="${esc(albumUrl(album.code))}">🔗 Копировать ссылку на альбом</button>
     <a class="btn ghost sm" href="/photo">Создать свой альбом</a>
-    <span class="mg${canManage ? ' on' : ''}" style="display:none"><input id="alRename" value="${esc(album.title || '')}" maxlength="80" placeholder="Название" style="max-width:240px"> <button type="button" class="btn ghost sm" id="alSave">Переименовать</button>
-      <button type="button" class="btn sm" style="background:var(--bad)" id="alDel">Удалить альбом</button></span>
+    ${canDelete ? '<button type="button" class="btn sm" style="background:var(--bad)" id="alDel">Удалить альбом</button>' : ''}
   </div></div>
-  ${user && user.id === OWNER_ID ? `<div class="card"><label>Срок хранения: <b id="alExpV"></b>
+  ${isHavirys ? `<div class="card"><h2>Режим владельца сайта</h2>
+    <div class="bar" style="flex-wrap:wrap;gap:8px"><input id="alRename" value="${esc(album.title || '')}" maxlength="80" placeholder="Название" style="max-width:260px"><button type="button" class="btn ghost sm" id="alSave">Переименовать</button></div>
+    <label style="display:block;margin-top:10px">Срок хранения: <b id="alExpV"></b>
       <input type="range" id="alExpR" min="1" max="366" step="1" value="${album.expires_at ? Math.min(365, Math.max(1, Math.ceil((new Date(album.expires_at) - Date.now()) / 86400e3))) : 366}" style="width:100%;max-width:520px;accent-color:var(--accent)"></label>
-      <div class="bar" style="margin-top:6px"><button type="button" class="btn sm" id="alExpSave">Применить срок</button><span class="mini">Ползунок до конца вправо — бессрочно (считается от сегодня).</span></div></div>` : ''}
-  ${cards ? `<div class="ph-grid">${cards}</div>` : '<div class="card muted">В альбоме пока нет фото.</div>'}
-  <div class="ph-lb" id="phLb"><img alt=""><button type="button" id="phLbX" style="top:16px;right:16px">✕</button></div>
+    <div class="bar" style="margin-top:6px"><button type="button" class="btn sm" id="alExpSave">Применить срок</button><span class="mini">Ползунок до конца вправо — бессрочно (считается от сегодня).</span></div>
+    <div class="mini" style="margin-top:6px">Остальным участникам после создания альбом изменить нельзя: ни название, ни срок, ни отдельные фото.</div></div>` : ''}
+  ${photos.length > 1 ? `<div class="card" style="padding:10px 16px"><label class="bar" style="gap:10px;margin:0;flex-wrap:wrap">Сортировка:
+      <select id="alSort" style="max-width:340px">
+        <option value="up">В порядке загрузки</option>
+        <option value="name-asc">По названию А → Я</option>
+        <option value="name-desc">По названию Я → А</option>
+        <option value="taken-asc">По дате создания снимка: сначала старые</option>
+        <option value="taken-desc">По дате создания снимка: сначала новые</option>
+        <option value="size-desc">По размеру: сначала большие</option>
+        <option value="size-asc">По размеру: сначала маленькие</option>
+      </select><span class="mini">Дата создания — когда сделан снимок (из данных фото или файла), а не когда загружен на сайт.</span></label></div>` : ''}
+  ${cards ? `<div class="ph-grid" id="phGrid">${cards}</div>` : '<div class="card muted">В альбоме пока нет фото.</div>'}
+  <div class="ph-lb" id="phLb"><img alt=""><button type="button" class="nv p" id="phLbP" aria-label="Предыдущее">‹</button><button type="button" class="nv n" id="phLbN" aria-label="Следующее">›</button><button type="button" id="phLbX" style="top:16px;right:16px" aria-label="Закрыть">✕</button><div class="cnt" id="phLbC"></div></div>
   ${PHOTO_CSS}
   <script>(function(){
-    var CSRF=${JSON.stringify(csrf)}, CODE=${JSON.stringify(album.code)}, SERVER_OK=${canManage ? 'true' : 'false'};
+    var CSRF=${JSON.stringify(csrf)}, CODE=${JSON.stringify(album.code)};
     ${PHOTO_JS_COMMON}
-    var m=new URLSearchParams(location.search).get('m'); if(m){ saveToken(CODE,m); }
-    var token=tokens()[CODE]||'';
-    if(SERVER_OK||token){ document.querySelectorAll('.mg').forEach(function(e){e.classList.add('on');e.style.display='';}); }
-    var lb=document.getElementById('phLb'), lbi=lb.querySelector('img');
+    var grid=document.getElementById('phGrid'), sortEl=document.getElementById('alSort');
+    function sortCards(mode){
+      if(!grid)return; var cards=[].slice.call(grid.children), parts=mode.split('-'), key=parts[0], dir=parts[1]==='desc'?-1:1;
+      cards.sort(function(a,b){
+        var x,y;
+        if(key==='name'){ return dir*(a.getAttribute('data-name')||'').localeCompare(b.getAttribute('data-name')||'','ru',{numeric:true}); }
+        x=+a.getAttribute('data-'+key)||0; y=+b.getAttribute('data-'+key)||0; return dir*(x-y)||((+a.getAttribute('data-up'))-(+b.getAttribute('data-up')));
+      });
+      cards.forEach(function(c){grid.appendChild(c);});
+    }
+    if(sortEl){ try{var sv0=sessionStorage.getItem('fc_alsort')||''; if(sv0){sortEl.value=sv0;sortCards(sv0);}}catch(e){} sortEl.addEventListener('change',function(){sortCards(sortEl.value);try{sessionStorage.setItem('fc_alsort',sortEl.value);}catch(e){}}); }
+    var lb=document.getElementById('phLb'), lbi=lb.querySelector('img'), lbc=document.getElementById('phLbC'), cur=-1, list=[];
+    function show(i){ if(!list.length)return; cur=(i+list.length)%list.length; lbi.src=list[cur].getAttribute('data-lb'); lbc.textContent=(cur+1)+' / '+list.length; }
+    function openAt(a){ list=[].slice.call(document.querySelectorAll('.ph-card [data-lb]')); show(list.indexOf(a)); lb.classList.add('on'); }
+    document.getElementById('phLbP').onclick=function(e){e.stopPropagation();show(cur-1);};
+    document.getElementById('phLbN').onclick=function(e){e.stopPropagation();show(cur+1);};
+    var tx=null; lb.addEventListener('touchstart',function(e){tx=e.touches[0].clientX;},{passive:true});
+    lb.addEventListener('touchend',function(e){ if(tx===null)return; var dx=e.changedTouches[0].clientX-tx; tx=null; if(Math.abs(dx)>50)show(cur+(dx<0?1:-1)); },{passive:true});
     document.addEventListener('click',function(e){
-      var a=e.target.closest&&e.target.closest('[data-lb]'); if(a){e.preventDefault();lbi.src=a.getAttribute('data-lb');lb.classList.add('on');return;}
+      var a=e.target.closest&&e.target.closest('[data-lb]'); if(a){e.preventDefault();openAt(a);return;}
       if(e.target===lb||e.target.id==='phLbX'){lb.classList.remove('on');}
       var d=e.target.closest&&e.target.closest('[data-pdel]'); if(d){ if(!confirm('Удалить это фото?'))return;
-        post('/photo/delete',{code:d.getAttribute('data-pdel'),token:token,_csrf:CSRF},function(j){ if(j.ok){var c=d.closest('.ph-card');if(c)c.remove();} else alert(j.err||'Не удалось удалить'); }); }
+        post('/photo/delete',{code:d.getAttribute('data-pdel'),_csrf:CSRF},function(j){ if(j.ok){var c=d.closest('.ph-card');if(c)c.remove();} else alert(j.err||'Не удалось удалить'); }); }
     });
-    document.addEventListener('keydown',function(e){ if(e.key==='Escape')lb.classList.remove('on'); });
-    var sv=document.getElementById('alSave'); if(sv)sv.onclick=function(){ post('/photo/album_edit',{code:CODE,title:document.getElementById('alRename').value,token:token,_csrf:CSRF},function(j){ if(j.ok){document.getElementById('alTitle').textContent=j.title||'Альбом';sv.textContent='✓';setTimeout(function(){sv.textContent='Переименовать';},900);} else alert(j.err||'Не удалось'); }); };
-    ${user && user.id === OWNER_ID ? `
+    document.addEventListener('keydown',function(e){ if(!lb.classList.contains('on'))return; if(e.key==='Escape')lb.classList.remove('on'); else if(e.key==='ArrowLeft')show(cur-1); else if(e.key==='ArrowRight')show(cur+1); });
+    var dl=document.getElementById('alDel'); if(dl)dl.onclick=function(){ if(!confirm('Удалить альбом целиком? Все ссылки на фото перестанут работать.'))return;
+      post('/photo/album_delete',{code:CODE,_csrf:CSRF},function(j){ if(j.ok){location.href='/photo';} else alert(j.err||'Не удалось удалить'); }); };
+    ${isHavirys ? `
     ${TTL_SLIDER_JS}
+    var sv=document.getElementById('alSave'); if(sv)sv.onclick=function(){ post('/photo/album_edit',{code:CODE,title:document.getElementById('alRename').value,_csrf:CSRF},function(j){ if(j.ok){sv.textContent='✓';setTimeout(function(){location.reload();},500);} else alert(j.err||'Не удалось'); }); };
     var er=document.getElementById('alExpR'), ev=document.getElementById('alExpV');
     if(er){ ev.textContent=ttlLabel(er.value,365,true); er.addEventListener('input',function(){ev.textContent=ttlLabel(er.value,365,true);});
       document.getElementById('alExpSave').onclick=function(){ var v=parseInt(er.value,10); var b=this;
         post('/photo/album_edit',{code:CODE,expires:v>365?'forever':String(v),_csrf:CSRF},function(j){ if(j.ok){b.textContent='✓ '+(j.until||'');setTimeout(function(){location.reload();},700);} else alert(j.err||'Не удалось'); }); }; }
     ` : ''}
-    var dl=document.getElementById('alDel'); if(dl)dl.onclick=function(){ if(!confirm('Удалить альбом целиком?'))return;
-      post('/photo/album_delete',{code:CODE,token:token,_csrf:CSRF},function(j){ if(j.ok){location.href='/photo';} else alert(j.err||'Не удалось удалить'); }); };
   })();</script>`;
 }
 
@@ -9571,7 +9640,12 @@ function start(client, hooks = {}) {
         const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [String(req.headers['x-album'] || '')]).catch(() => null);
         if (!album) return pj(404, { ok: false, err: 'Альбом не найден или срок его хранения истёк.' });
         const tokenOk = album.del_token && String(req.headers['x-album-token'] || '') === album.del_token;
-        if (!tokenOk && !(user && album.owner_id === user.id)) return pj(403, { ok: false, err: 'Нет прав добавлять фото в этот альбом.' });
+        const isHavirysUp = !!(user && user.id === OWNER_ID);
+        if (!isHavirysUp) {
+          if (!tokenOk && !(user && album.owner_id === user.id)) return pj(403, { ok: false, err: 'Нет прав добавлять фото в этот альбом.' });
+          // Как на фотохостингах: фото загружаются при создании альбома, потом он «закрывается».
+          if (Date.now() - new Date(album.created_at).getTime() > 30 * 60e3) return pj(403, { ok: false, err: 'Альбом уже создан — добавлять фото нельзя. Создайте новый альбом.' });
+        }
         if (!photoRateOk(user ? 'u:' + user.id : 'ip:' + clientIp, user ? 200 : 40)) return pj(429, { ok: false, err: 'Слишком много загрузок за час — попробуйте позже.' });
         const inAlbum = (await db.get('SELECT COUNT(*) c FROM photos WHERE album_id = ?', [album.id]).catch(() => null) || { c: 0 }).c;
         if (inAlbum >= albumMaxPhotos(!!album.owner_id)) return pj(400, { ok: false, err: `В альбоме уже максимум фото (${albumMaxPhotos(!!album.owner_id)}).` });
@@ -9586,11 +9660,18 @@ function start(client, hooks = {}) {
         let origName = 'image';
         try { origName = decodeURIComponent(String(req.headers['x-filename'] || 'image')).replace(/[^\p{L}\p{N}._ -]/gu, '').slice(0, 80) || 'image'; } catch (_) {}
         const pcode = crypto.randomBytes(6).toString('base64url').replace(/[-_]/g, 'x');
+        // Когда снимок создан: EXIF, иначе дата файла на устройстве (её присылает страница), иначе — момент загрузки.
+        let takenAt = kind.ext === 'jpg' ? exifTakenAt(buf) : null;
+        if (!takenAt) {
+          const tm = parseInt(req.headers['x-taken'], 10);
+          if (Number.isFinite(tm) && tm > 9.46e11 && tm < Date.now() + 864e5) takenAt = new Date(tm).toISOString();
+        }
+        if (!takenAt) takenAt = new Date().toISOString();
         try {
           await _fsMod.promises.writeFile(_pathMod.join(photosDir(), `${pcode}.${kind.ext}`), buf);
           await db.run(
-            'INSERT INTO photos (code, owner_id, ext, mime, orig_name, size, ip, del_token, expires_at, album_id, views, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
-            [pcode, album.owner_id || '', kind.ext, kind.mime, origName, buf.length, clientIp, '', album.expires_at, album.id, new Date().toISOString()],
+            'INSERT INTO photos (code, owner_id, ext, mime, orig_name, size, ip, del_token, expires_at, album_id, taken_at, views, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+            [pcode, album.owner_id || '', kind.ext, kind.mime, origName, buf.length, clientIp, '', album.expires_at, album.id, takenAt, new Date().toISOString()],
           );
         } catch (e) {
           console.error('[web] photo upload:', e.message);
@@ -9599,23 +9680,20 @@ function start(client, hooks = {}) {
         return pj(200, { ok: true, code: pcode, url: `${baseUrl()}/i/${pcode}.${kind.ext}`, size: fmtBytes(buf.length) });
       }
 
+      // Правка после создания — только у владельца сайта (havirys). Остальным альбом изменить нельзя.
       if (path === '/photo/album_edit' && req.method === 'POST') {
         const b = await readBody(req);
         const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
         if (!album) return pj(404, { ok: false, err: 'Альбом не найден.' });
-        const tokenOk = !!(b.get('token') && b.get('token') === album.del_token);
-        const userOk = user && csrfOk(user, b.get('_csrf')) && ((album.owner_id && album.owner_id === user.id) || (await isPhotoAdmin()));
-        if (!tokenOk && !userOk) return pj(403, { ok: false, err: 'Нет прав.' });
+        if (!(user && user.id === OWNER_ID && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'После создания альбом изменить нельзя.' });
         let title = album.title || '';
         if (b.has('title')) {
           title = (b.get('title') || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 80);
           await db.run('UPDATE photo_albums SET title = ? WHERE id = ?', [title, album.id]);
         }
-        // Срок хранения меняет только владелец (havirys): число дней или 'forever' — бессрочно.
         let untilTxt;
         const expRaw = (b.get('expires') || '').trim();
         if (expRaw) {
-          if (!(user && user.id === OWNER_ID && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'Менять срок хранения может только владелец.' });
           let newExp = null;
           if (expRaw !== 'forever') {
             const days = Math.min(3650, Math.max(1, parseInt(expRaw, 10) || 1));
@@ -9628,26 +9706,24 @@ function start(client, hooks = {}) {
         return pj(200, { ok: true, title, until: untilTxt });
       }
 
+      // Удалить альбом целиком: вошедший автор альбома или администратор (модерация). Альбом без входа — только администратор.
       if (path === '/photo/album_delete' && req.method === 'POST') {
         const b = await readBody(req);
         const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
         if (!album) return pj(404, { ok: false, err: 'Альбом не найден.' });
-        const tokenOk = !!(b.get('token') && b.get('token') === album.del_token);
         const userOk = user && csrfOk(user, b.get('_csrf')) && ((album.owner_id && album.owner_id === user.id) || (await isPhotoAdmin()));
-        if (!tokenOk && !userOk) return pj(403, { ok: false, err: 'Нет прав на удаление.' });
+        if (!userOk) return pj(403, { ok: false, err: 'Удалить альбом может только его автор (после входа на сайт).' });
         await deleteAlbum(album.id);
         if (user && album.owner_id !== user.id) await webAudit(client, user, 'Фотоальбом удалён (модерация)', `${album.code} «${album.title || ''}» автор ${album.owner_id || 'гость'}`).catch(() => {});
         return pj(200, { ok: true });
       }
 
+      // Отдельное фото из альбома может удалить только владелец сайта (havirys).
       if (path === '/photo/delete' && req.method === 'POST') {
         const b = await readBody(req);
         const row = await db.get('SELECT * FROM photos WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
         if (!row) return pj(404, { ok: false, err: 'Картинка не найдена.' });
-        const album = row.album_id ? await db.get('SELECT * FROM photo_albums WHERE id = ?', [row.album_id]).catch(() => null) : null;
-        const tokenOk = !!(b.get('token') && ((album && b.get('token') === album.del_token) || (row.del_token && b.get('token') === row.del_token)));
-        const userOk = user && csrfOk(user, b.get('_csrf')) && ((row.owner_id && row.owner_id === user.id) || (await isPhotoAdmin()));
-        if (!tokenOk && !userOk) return pj(403, { ok: false, err: 'Нет прав на удаление.' });
+        if (!(user && user.id === OWNER_ID && csrfOk(user, b.get('_csrf')))) return pj(403, { ok: false, err: 'Удалять отдельные фото из альбома нельзя. Можно удалить альбом целиком (автору).' });
         await removePhotoFiles([row]);
         await db.run('DELETE FROM photos WHERE id = ?', [row.id]);
         return pj(200, { ok: true });
@@ -9665,8 +9741,8 @@ function start(client, hooks = {}) {
             return html(404, L({ title: 'Альбом не найден', user, level: alevel, body: '<h1>Альбом не найден</h1><div class="card">Ссылка неверная, или срок хранения альбома истёк, или его удалили.</div><a class="btn" href="/photo">Создать свой альбом</a>' }));
           }
           db.run('UPDATE photo_albums SET views = COALESCE(views, 0) + 1 WHERE id = ?', [album.id]).catch(() => {});
-          const manage = (user && album.owner_id && album.owner_id === user.id) || await isPhotoAdmin();
-          return html(200, L({ title: album.title || 'Альбом', user, level: alevel, wide: true, body: flash + await albumBody(client, user, !!manage, album, u.searchParams.get('m')) }));
+          const canDelete = !!((user && album.owner_id && album.owner_id === user.id) || await isPhotoAdmin());
+          return html(200, L({ title: album.title || 'Альбом', user, level: alevel, wide: true, body: flash + await albumBody(client, user, canDelete, album) }));
         }
       }
 
