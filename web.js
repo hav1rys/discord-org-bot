@@ -1212,6 +1212,19 @@ const PHOTO_CSS = `<style>
     .ph-cover{display:block;width:100%;height:150px;object-fit:cover;background:var(--bg)}
     .mg{display:none}.mg.on{display:inline-block}
     .ph-nm{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .al-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:16px}
+    .al-t{min-width:0;flex:1}.al-t h1{margin:0;word-break:break-word}
+    .al-i{margin-left:auto;text-align:right;font-size:13px;color:var(--muted);line-height:1.75;flex:0 0 auto;max-width:48%}
+    .al-i b{color:var(--text);font-weight:600}
+    .al-col{max-width:880px;margin:0 auto}
+    .ph-list{display:flex;flex-direction:column;gap:14px}
+    .ph-item{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:18px;align-items:center;padding:10px}
+    .ph-item .ph-th{display:block;border-radius:10px;overflow:hidden;background:var(--bg)}
+    .ph-item img{height:auto;max-height:320px;object-fit:contain}
+    .ph-info{display:flex;flex-direction:column;gap:5px;min-width:0;padding-right:8px}
+    .ph-info .ph-nm{font-size:15px;margin-bottom:4px}
+    .ph-kv{display:flex;gap:10px;font-size:13.5px}.ph-kv span{flex:0 0 92px;color:var(--muted)}.ph-kv b{font-weight:600;min-width:0}
+    @media(max-width:700px){.al-head{flex-direction:column}.al-i{text-align:left;margin-left:0;max-width:none}.ph-item{grid-template-columns:1fr}}
     .ph-lb .nv{top:50%;margin-top:-22px}
     .ph-lb .nv.p{left:14px}.ph-lb .nv.n{right:14px}
     .ph-lb .cnt{position:absolute;bottom:16px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,.5);padding:4px 12px;border-radius:99px;font-size:13px}
@@ -1347,16 +1360,29 @@ async function albumBody(client, user, canDelete, album) {
   const author = album.owner_id ? personLink(client, album.owner_id) : 'гость';
   const csrf = user ? csrfToken(user) : '';
   const isHavirys = !!(user && user.id === OWNER_ID); // единственное исключение: правка и удаление отдельных фото
-  const cards = photos.map((p) => `<div class="ph-card" data-pcode="${esc(p.code)}" data-name="${esc((p.orig_name || '').toLowerCase())}" data-taken="${new Date(p.taken_at || p.created_at).getTime() || 0}" data-up="${p.id}" data-size="${p.size || 0}">
-      <a href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt="${esc(p.orig_name || '')}"></a>
-      <div class="ph-meta"><div class="ph-nm" title="${esc(p.orig_name || '')}">${esc(p.orig_name || 'без названия')}</div>
-        <span class="mini">${esc(fmtBytes(p.size))} · 📅 ${fmt(p.taken_at || p.created_at)}</span>
+  const cards = photos.map((p) => `<div class="ph-card ph-item" data-pcode="${esc(p.code)}" data-name="${esc((p.orig_name || '').toLowerCase())}" data-taken="${new Date(p.taken_at || p.created_at).getTime() || 0}" data-up="${p.id}" data-size="${p.size || 0}">
+      <a class="ph-th" href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt="${esc(p.orig_name || '')}"></a>
+      <div class="ph-info">
+        <div class="ph-nm" title="${esc(p.orig_name || '')}">${esc(p.orig_name || 'без названия')}</div>
+        <div class="ph-kv"><span>Размер</span><b>${esc(fmtBytes(p.size))}</b></div>
+        <div class="ph-kv"><span>Снято</span><b>${fmt(p.taken_at || p.created_at)}</b></div>
+        <div class="ph-kv"><span>Загружено</span><b>${fmt(p.created_at)}</b></div>
         <div class="ph-acts">
           <button type="button" class="btn ghost sm" data-copy="${esc(photoUrl(p))}" title="Скопировать прямую ссылку на картинку">Ссылка</button>
+          <a class="btn ghost sm" href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}">Открыть</a>
           ${isHavirys ? `<button type="button" class="btn sm" style="background:var(--bad)" data-pdel="${esc(p.code)}" title="Только владелец сайта">✕</button>` : ''}
         </div></div></div>`).join('');
-  return `<h1>${esc(album.title || 'Альбом')}</h1>
-  <p class="muted">Автор: ${author} · ${photos.length} фото · ${esc(fmtBytes(totalSize))} · 👁 ${album.views || 0} · создан ${fmt(album.created_at)} · хранится ${album.expires_at ? 'до ' + fmt(album.expires_at) : 'бессрочно'}</p>
+  return `<div class="al-head">
+    <div class="al-t">${album.title ? `<h1>${esc(album.title)}</h1>` : ''}</div>
+    <div class="al-i">
+      <div>Автор: <b>${author}</b></div>
+      <div>Создан: <b>${fmt(album.created_at)}</b></div>
+      <div>Фото: <b>${photos.length}</b> · Размер: <b>${esc(fmtBytes(totalSize))}</b></div>
+      <div>Просмотров: <b>${album.views || 0}</b></div>
+      <div>Хранится: <b>${album.expires_at ? 'до ' + fmt(album.expires_at) : 'бессрочно'}</b></div>
+    </div>
+  </div>
+  <div class="al-col">
   <div class="card"><div class="bar" style="flex-wrap:wrap;gap:8px">
     <button type="button" class="btn sm" data-copy="${esc(albumUrl(album.code))}">🔗 Копировать ссылку на альбом</button>
     <a class="btn ghost sm" href="/photo">Создать свой альбом</a>
@@ -1378,7 +1404,8 @@ async function albumBody(client, user, canDelete, album) {
         <option value="size-desc">По размеру: сначала большие</option>
         <option value="size-asc">По размеру: сначала маленькие</option>
       </select><span class="mini">Дата создания — когда сделан снимок (из данных фото или файла), а не когда загружен на сайт.</span></label></div>` : ''}
-  ${cards ? `<div class="ph-grid" id="phGrid">${cards}</div>` : '<div class="card muted">В альбоме пока нет фото.</div>'}
+  ${cards ? `<div class="ph-list" id="phGrid">${cards}</div>` : '<div class="card muted">В альбоме пока нет фото.</div>'}
+  </div>
   <div class="ph-lb" id="phLb"><img alt=""><button type="button" class="nv p" id="phLbP" aria-label="Предыдущее">‹</button><button type="button" class="nv n" id="phLbN" aria-label="Следующее">›</button><button type="button" id="phLbX" style="top:16px;right:16px" aria-label="Закрыть">✕</button><div class="cnt" id="phLbC"></div></div>
   ${PHOTO_CSS}
   <script>(function(){
@@ -1397,7 +1424,7 @@ async function albumBody(client, user, canDelete, album) {
     if(sortEl){ try{var sv0=sessionStorage.getItem('fc_alsort')||''; if(sv0){sortEl.value=sv0;sortCards(sv0);}}catch(e){} sortEl.addEventListener('change',function(){sortCards(sortEl.value);try{sessionStorage.setItem('fc_alsort',sortEl.value);}catch(e){}}); }
     var lb=document.getElementById('phLb'), lbi=lb.querySelector('img'), lbc=document.getElementById('phLbC'), cur=-1, list=[];
     function show(i){ if(!list.length)return; cur=(i+list.length)%list.length; lbi.src=list[cur].getAttribute('data-lb'); lbc.textContent=(cur+1)+' / '+list.length; }
-    function openAt(a){ list=[].slice.call(document.querySelectorAll('.ph-card [data-lb]')); show(list.indexOf(a)); lb.classList.add('on'); }
+    function openAt(a){ list=[].slice.call(document.querySelectorAll('.ph-card .ph-th')); var card=a.closest('.ph-card'); show(list.indexOf(card?card.querySelector('.ph-th'):a)); lb.classList.add('on'); }
     document.getElementById('phLbP').onclick=function(e){e.stopPropagation();show(cur-1);};
     document.getElementById('phLbN').onclick=function(e){e.stopPropagation();show(cur+1);};
     var tx=null; lb.addEventListener('touchstart',function(e){tx=e.touches[0].clientX;},{passive:true});
@@ -1520,6 +1547,9 @@ body.v2{background:var(--bg)}
 .v2 .nvsub{display:none;flex-direction:column;gap:1px;margin:2px 0 4px 18px;padding-left:8px;border-left:1px solid var(--line)}
 .v2 .nvg.open>.nvsub{display:flex}
 .v2 .nvsub a.nv{padding:6px 10px;font-size:13.5px}
+/* Узкие карточки (вход, регистрация): по центру страницы вместе с заголовком */
+.v2 .wrap>.card[style*="max-width:420px"]{margin-left:auto;margin-right:auto;width:100%}
+.v2 .wrap>h1:has(+ .card[style*="max-width:420px"]){text-align:center;margin-top:6vh}
 .v2 .tabrows{margin:6px 0 14px}
 .v2 .trow{display:flex;align-items:center;gap:12px;margin:5px 0}
 .v2 .trow .tl{flex:0 0 150px;font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);font-weight:700}
