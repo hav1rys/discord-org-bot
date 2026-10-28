@@ -79,7 +79,6 @@ const SCHEMA = {
       contracts_private: 'INTEGER DEFAULT 0', // 1 — контракты/история видны только себе и HR+
       badges_private: 'INTEGER DEFAULT 0', // 1 — бейджи/достижения видны только себе и HR+
       last_anniv_year: 'INTEGER', // год, за который уже поздравили с годовщиной вступления
-      last_weekly_digest: 'TEXT', // метка недели (YYYY-Www), за которую уже отправлен личный отчёт
       pinned_badges: 'TEXT', // закреплённые бейджи участника (ключи через запятую)
       frozen: 'INTEGER DEFAULT 0', // 1 — доступ к сайту заморожен
       frozen_reason: 'TEXT',
@@ -696,7 +695,6 @@ const SCHEMA = {
       muted: 'TEXT', // список kind через запятую
       dm_kinds: 'TEXT', // какие типы дополнительно присылать в ЛС Discord (через запятую)
       dm_off: 'INTEGER DEFAULT 0', // 1 — не присылать никаких ЛС от бота (кроме входов с нового устройства)
-      weekly_report: 'INTEGER DEFAULT 0', // 1 — присылать личный еженедельный отчёт (по желанию)
     },
   },
 

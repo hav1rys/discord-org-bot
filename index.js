@@ -739,8 +739,6 @@ function buildProfileComponents(discordId) {
 // Раз в час (вызывается из общего таймера) — шлёт ЛС, если чей-то отпуск
 // заканчивается менее чем через сутки, и ещё не напоминали про именно этот
 // отпуск (проверяется по discordId+паспорт+точная дата окончания).
-// Раз в неделю (проверяется из часового таймера) — напоминает HR/руководству
-// проверить накопившиеся заявки, если они есть.
 // Раз в час — если место на диске заполнено на 90%+, предупреждаем один
 // раз (не при каждой проверке), пока не освободится обратно ниже порога.
 // Раз в час — если карточка контракта висит на проверке (никто не нажал
@@ -917,104 +915,6 @@ async function runWeeklyRankAdjustment(guild, force = false) {
   return demotions.length;
 }
 
-async function sendWeeklyDigest(guild) {
-  const lastSent = await db.getSetting('weekly_digest_last_sent');
-  if (lastSent && Date.now() - new Date(lastSent).getTime() < 7 * 24 * 60 * 60 * 1000) return;
-
-  const range = contracts.getWeekRange(0);
-  const contractRows = await db.all(
-    `SELECT status FROM contracts WHERE status IN ('fulfilled','unfulfilled') AND submitted_at BETWEEN ? AND ?`,
-    [range.start.toISOString(), range.end.toISOString()],
-  );
-  const fulfilled = contractRows.filter((r) => r.status === 'fulfilled').length;
-  const unfulfilled = contractRows.filter((r) => r.status === 'unfulfilled').length;
-
-  const confirmedInvites = (await db.get(
-    `SELECT COUNT(*) as cnt FROM invitations WHERE status = 'confirmed' AND joined_at BETWEEN ? AND ?`,
-    [range.start.toISOString(), range.end.toISOString()],
-  )).cnt;
-
-  const acceptedApps = (await db.get(
-    `SELECT COUNT(*) as cnt FROM applications WHERE status = 'accepted' AND created_at BETWEEN ? AND ?`,
-    [range.start.toISOString(), range.end.toISOString()],
-  )).cnt;
-  const rejectedApps = (await db.get(
-    `SELECT COUNT(*) as cnt FROM applications WHERE status = 'rejected' AND created_at BETWEEN ? AND ?`,
-    [range.start.toISOString(), range.end.toISOString()],
-  )).cnt;
-
-  const kicksThisWeek = (await db.get(
-    `SELECT COUNT(*) as cnt FROM kicks WHERE status = 'accepted' AND created_at BETWEEN ? AND ?`,
-    [range.start.toISOString(), range.end.toISOString()],
-  )).cnt;
-
-  const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle(`📊 Итоги недели: ${contracts.formatWeekLabel(range)}`)
-    .addFields(
-      { name: 'Контракты', value: `✅ ${fulfilled} / ❌ ${unfulfilled}`, inline: true },
-      { name: 'Подтверждённые приглашения', value: String(confirmedInvites), inline: true },
-      { name: 'Заявки: принято/отклонено', value: `${acceptedApps} / ${rejectedApps}`, inline: true },
-      { name: 'Увольнений за неделю', value: String(kicksThisWeek), inline: true },
-    );
-
-  // Ведомость выплат за принятых, кто пробыл 3+ дня (за последние 7 дней)
-  try {
-    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const { rows: payoutRows, total: payoutTotal } = await computeHrPayouts(guild, since);
-    if (payoutRows.length > 0) {
-      const lines = payoutRows.map((r) => {
-        const who = r.name ? `${r.name}, № ${r.static}` : `<@${r.staffId}>`;
-        return `${who} | принятых: ${r.count} | ${formatMoney(r.sum)}`;
-      });
-      embed.addFields({ name: `💰 К выплате за неделю (итого ${formatMoney(payoutTotal)})`, value: lines.join('\n').slice(0, 1024) });
-    }
-  } catch (err) {
-    console.error('Не удалось посчитать выплаты HR для недельной сводки:', err.message);
-  }
-
-  await dmUser(guild, config.OWNER_USER_ID, { embeds: [embed] });
-  await db.setSetting('weekly_digest_last_sent', new Date().toISOString());
-}
-
-// Личный еженедельный отчёт в ЛС — только тем, кто сам включил его (/уведомления или сайт → Уведомления).
-async function sendPersonalWeeklyDigests(guild) {
-  const lastSent = await db.getSetting('personal_digest_last_sent');
-  if (lastSent && Date.now() - new Date(lastSent).getTime() < 6.5 * 24 * 60 * 60 * 1000) return;
-  const range = contracts.getWeekRange(1); // прошлая полная неделя
-  const weekTag = range.start.toISOString().slice(0, 10);
-  const label = contracts.formatWeekLabel(range);
-  const parts = await db.all(
-    'SELECT p.discord_id, p.name, p.last_weekly_digest FROM participants p JOIN notif_prefs n ON n.discord_id = p.discord_id WHERE n.weekly_report = 1',
-  ).catch(() => []);
-  let sent = 0;
-  for (const p of parts) {
-    if (p.last_weekly_digest === weekTag) continue;
-    try {
-      const w = await contracts.getUserWeekStats(p.discord_id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
-      const inv = await db.get(
-        "SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed' AND joined_at BETWEEN ? AND ?",
-        [p.discord_id, range.start.toISOString(), range.end.toISOString()],
-      ).catch(() => null);
-      let streak = 0;
-      try { streak = (await badges.compute(p.discord_id)).streak || 0; } catch (_) {}
-      const f = w.fulfilled.length; const uf = w.unfulfilled.length;
-      await dmUser(guild, p.discord_id,
-        `📊 Ваш отчёт за ${label}\n`
-        + `Контракты: ✅ ${f} / ❌ ${uf}\n`
-        + `Подтверждённых приглашений: ${inv ? inv.c : 0}\n`
-        + `Недельный стрик: ${streak} ${streak === 1 ? 'неделя' : 'нед.'}${streak >= 2 ? ' 🔥' : ''}\n`
-        + `${f === 0 && uf === 0 ? 'На прошлой неделе контрактов не было — самое время начать!' : 'Так держать!'}\n`
-        + '_Отключить отчёт: команда /уведомления или сайт → «Уведомления»._');
-      await db.run('UPDATE participants SET last_weekly_digest = ? WHERE discord_id = ?', [weekTag, p.discord_id]).catch(() => {});
-      sent++;
-      await new Promise((r) => setTimeout(r, 600));
-    } catch (_) { /* участник закрыл ЛС и т.п. */ }
-  }
-  await db.setSetting('personal_digest_last_sent', new Date().toISOString());
-  if (sent) console.log(`Личный еженедельный отчёт отправлен ${sent} участникам.`);
-}
-
 // Панель настроек уведомлений для команды /уведомления (Discord).
 async function buildNotifPanel(userId) {
   const prefs = await getNotifPrefs(userId);
@@ -1025,7 +925,6 @@ async function buildNotifPanel(userId) {
     .addFields(
       { name: '🔔 На сайте', value: siteOn.length ? siteOn.join(', ').slice(0, 1024) : 'ничего', inline: false },
       { name: '✉ В ЛС', value: prefs.dmOff ? 'ЛС от бота выключены полностью' : (dmOn.length ? dmOn.join(', ').slice(0, 1024) : 'ничего дополнительно'), inline: false },
-      { name: '📊 Еженедельный отчёт', value: prefs.weekly ? 'включён' : 'выключен', inline: true },
     );
   const siteSel = new StringSelectMenuBuilder().setCustomId('notifp_site').setPlaceholder('🔔 Что показывать на сайте').setMinValues(0).setMaxValues(NOTIF_KINDS.length)
     .addOptions(NOTIF_KINDS.map(([k, l]) => new StringSelectMenuOptionBuilder().setLabel(l).setValue(k).setDefault(!prefs.muted.has(k))));
@@ -1033,7 +932,6 @@ async function buildNotifPanel(userId) {
     .addOptions(NOTIF_KINDS.map(([k, l]) => new StringSelectMenuOptionBuilder().setLabel(l).setValue(k).setDefault(prefs.dmKinds.has(k))));
   const btns = row(
     new ButtonBuilder().setCustomId('notifp_dmoff').setLabel(prefs.dmOff ? '🔕 ЛС от бота выключены — включить' : '🔔 ЛС от бота включены — выключить').setStyle(prefs.dmOff ? ButtonStyle.Danger : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('notifp_weekly').setLabel(prefs.weekly ? '📊 Отчёт: включён — выключить' : '📊 Отчёт: выключен — включить').setStyle(prefs.weekly ? ButtonStyle.Success : ButtonStyle.Secondary),
   );
   return { embeds: [embed], components: [row(siteSel), row(dmSel), btns] };
 }
@@ -1169,29 +1067,6 @@ async function checkReviewSla(guild) {
       console.error(`SLA-напоминание (${type}):`, err.message);
     }
   }
-}
-
-async function checkHrReminder(guild) {
-  const lastReminder = await db.getSetting('hr_reminder_last_sent');
-  const intervalMs = config.HR_REMINDER_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
-  if (lastReminder && Date.now() - new Date(lastReminder).getTime() < intervalMs) return;
-
-  const pendingRow = await db.get(`SELECT COUNT(*) as cnt FROM applications WHERE status = 'pending'`);
-  const count = pendingRow ? pendingRow.cnt : 0;
-  if (count === 0) return;
-
-  try {
-    const channel = await guild.channels.fetch(config.CHANNEL_APPLY_REVIEW);
-    await channel.send({
-      content: perms.mentionManagementRoles(),
-      embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle('📋 Напоминание: непроверенные заявки').setDescription(`В очереди сейчас **${count}** заявок на рассмотрение — загляните, пожалуйста.`)],
-      ...mentionOpts,
-    });
-  } catch (err) {
-    console.error('Не удалось отправить еженедельное напоминание HR:', err.message);
-  }
-
-  await db.setSetting('hr_reminder_last_sent', new Date().toISOString());
 }
 
 async function checkVacationReminders(guild) {
@@ -6326,10 +6201,9 @@ client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       const id = interaction.customId;
 
-      if (id === 'notifp_dmoff' || id === 'notifp_weekly') {
+      if (id === 'notifp_dmoff') {
         const cur = await getNotifPrefs(interaction.user.id);
-        if (id === 'notifp_dmoff') await setNotifPrefs(interaction.user.id, { dmOff: !cur.dmOff });
-        else await setNotifPrefs(interaction.user.id, { weekly: !cur.weekly });
+        await setNotifPrefs(interaction.user.id, { dmOff: !cur.dmOff });
         return interaction.update(await buildNotifPanel(interaction.user.id));
       }
 
@@ -10478,7 +10352,6 @@ client.once('clientReady', async () => {
         await applicationsDisplay.safeUpdateApplicationsStats(guild);
         if (await isFeatureEnabled('reminders')) {
           await checkVacationReminders(guild);
-          await checkHrReminder(guild);
           await checkReviewSla(guild);
         }
         await checkDiskSpace(guild);
@@ -10494,8 +10367,6 @@ client.once('clientReady', async () => {
         await checkRecurringGiveaways(guild);
         await badges.syncAllRoles(guild);
         // ежедневная сводка теперь по расписанию в 23:59 МСК (см. ниже)
-        await sendWeeklyDigest(guild);
-        await sendPersonalWeeklyDigests(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);

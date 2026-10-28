@@ -1461,7 +1461,7 @@ async function albumBody(client, user, canDelete, album) {
 // Карточка «Мои альбомы» в личном кабинете.
 function meNotifCard() {
   return `<div class="card"><h2>🔔 Уведомления</h2>
-    <p class="mini">Выберите, что показывать на сайте, а что присылать в личные сообщения Discord. Там же можно включить еженедельный отчёт. Настроить можно и в Discord командой /уведомления.</p>
+    <p class="mini">Выберите, что показывать на сайте, а что присылать в личные сообщения Discord. Настроить можно и в Discord командой /уведомления.</p>
     <a class="btn sm" href="/notifications#prefs">Настроить уведомления</a></div>`;
 }
 
@@ -6654,7 +6654,6 @@ async function notificationsBody(user, sp) {
           <td><input type="checkbox" name="dm" value="${k}" ${np.dmKinds.has(k) ? 'checked' : ''} aria-label="${esc(lbl)} — в ЛС"></td></tr>`).join('')}
       </table></div>
       <label class="chk"><input type="checkbox" name="dm_on" value="1" ${np.dmOff ? '' : 'checked'}><span>Разрешить боту писать мне в личные сообщения. Если снять — ЛС не придут вообще, даже отмеченные выше (кроме входа с нового устройства).</span></label>
-      <label class="chk"><input type="checkbox" name="weekly" value="1" ${np.weekly ? 'checked' : ''}><span>📊 Присылать личный еженедельный отчёт в ЛС (контракты за неделю, приглашения, стрик)</span></label>
       <button class="btn sm" type="submit">Сохранить</button>
     </form></div>`;
   return `<div class="bar"><h1 style="margin:0">Уведомления</h1>
@@ -9392,7 +9391,6 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       muted: known.filter((k) => !site.has(k)),
       dmKinds: body.getAll('dm').filter((k) => known.includes(k)),
       dmOff: body.get('dm_on') !== '1',
-      weekly: body.get('weekly') === '1',
     });
     return '/notifications?' + qs({ ok: 'Настройки сохранены.' });
   }

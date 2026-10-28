@@ -25,27 +25,25 @@ async function getPrefs(discordId) {
   const hit = _prefCache.get(key);
   if (hit && Date.now() - hit.at < 5000) return hit.v;
   let row = null;
-  try { row = await db.get('SELECT muted, dm_kinds, dm_off, weekly_report FROM notif_prefs WHERE discord_id = ?', [key]); } catch (_) {}
+  try { row = await db.get('SELECT muted, dm_kinds, dm_off FROM notif_prefs WHERE discord_id = ?', [key]); } catch (_) {}
   const v = {
     muted: csv(row && row.muted),
     dmKinds: csv(row && row.dm_kinds),
     dmOff: !!(row && row.dm_off),
-    weekly: !!(row && row.weekly_report),
   };
   _prefCache.set(key, { at: Date.now(), v });
   if (_prefCache.size > 3000) _prefCache.clear();
   return v;
 }
-async function setPrefs(discordId, { muted, dmKinds, dmOff, weekly }) {
+async function setPrefs(discordId, { muted, dmKinds, dmOff }) {
   const cur = await getPrefs(discordId);
   const m = muted !== undefined ? [...muted] : [...cur.muted];
   const d = dmKinds !== undefined ? [...dmKinds] : [...cur.dmKinds];
   const off = dmOff !== undefined ? (dmOff ? 1 : 0) : (cur.dmOff ? 1 : 0);
-  const wk = weekly !== undefined ? (weekly ? 1 : 0) : (cur.weekly ? 1 : 0);
   await db.run(
-    `INSERT INTO notif_prefs (discord_id, muted, dm_kinds, dm_off, weekly_report) VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(discord_id) DO UPDATE SET muted = excluded.muted, dm_kinds = excluded.dm_kinds, dm_off = excluded.dm_off, weekly_report = excluded.weekly_report`,
-    [String(discordId), m.join(','), d.join(','), off, wk],
+    `INSERT INTO notif_prefs (discord_id, muted, dm_kinds, dm_off) VALUES (?, ?, ?, ?)
+     ON CONFLICT(discord_id) DO UPDATE SET muted = excluded.muted, dm_kinds = excluded.dm_kinds, dm_off = excluded.dm_off`,
+    [String(discordId), m.join(','), d.join(','), off],
   );
   _prefCache.delete(String(discordId));
 }
