@@ -226,7 +226,7 @@ const TIER_INFO = {
   owner: { label: 'Владелец и выше', check: (m) => perms.isOwnerTier(m) },
   deputy: { label: 'Зам. Владелец и выше', check: (m) => perms.isDeputyTier(m) },
   hr: { label: 'HR-Менеджер и выше', check: (m) => perms.isHrTier(m) },
-  owner_account_only: { label: `🔒 Только аккаунт <@${config.OWNER_USER_ID}> (без обхода через роли)`, check: (m) => m.id === config.OWNER_USER_ID },
+  owner_account_only: { label: '🔒 Только аккаунт havirys (без обхода через роли)', check: (m) => m.id === config.OWNER_USER_ID },
 };
 
 // Уровень по умолчанию для каждой команды (используется, пока никто не
@@ -1322,9 +1322,18 @@ async function syncEffectiveIdentity(guild, discordId, opts = {}) {
   if (identity.roleId) {
     try {
       const member = await guild.members.fetch(discordId);
-      const rolesToRemove = config.ROLE_IDS.filter((r) => r !== identity.roleId);
+      // HR-Менеджер — должность поверх ранга: её роль не снимаем, пока стоит признак hr_position.
+      const hrRow = await db.get('SELECT hr_position FROM participants WHERE discord_id = ?', [discordId]).catch(() => null);
+      let isHr = !!(hrRow && hrRow.hr_position);
+      // Старые HR (роль выдана вручную/при одобрении без признака) — закрепляем должность, а не снимаем роль.
+      if (!isHr && identity.roleId !== config.ROLE_HR && member.roles.cache.has(config.ROLE_HR)) {
+        await db.run('UPDATE participants SET hr_position = 1 WHERE discord_id = ?', [discordId]).catch(() => {});
+        isHr = true;
+      }
+      const rolesToRemove = config.ROLE_IDS.filter((r) => r !== identity.roleId && !(isHr && r === config.ROLE_HR));
       await member.roles.remove(rolesToRemove).catch(() => {});
       await member.roles.add(identity.roleId);
+      if (isHr && !member.roles.cache.has(config.ROLE_HR)) await member.roles.add(config.ROLE_HR).catch(() => {});
     } catch (err) {
       console.error(`Не удалось синхронизировать роль ранга для ${discordId}:`, err.message);
     }
@@ -1437,15 +1446,7 @@ async function createProfileThread(guild, discordId, name, staticValue) {
       topic: `Профиль ${name} (№ ${staticValue}) — сюда присылаются скриншоты контрактов`,
     });
 
-    // Памятка-картинка новичку: PNG доски, помеченной onboarding=1 (см. сайт /boards).
     const welcomeFiles = [];
-    try {
-      const ob = await db.get("SELECT image_file FROM boards WHERE onboarding = 1 AND image_file IS NOT NULL AND image_file != '' LIMIT 1");
-      if (ob && ob.image_file) {
-        const p = path.join(db.dataDir || path.join(process.cwd(), 'data'), 'uploads', path.basename(ob.image_file));
-        if (fs.existsSync(p)) welcomeFiles.push(new AttachmentBuilder(fs.readFileSync(p), { name: 'pamyatka.png' }));
-      }
-    } catch (_) {}
 
     await channel.send({
       content:
@@ -2125,7 +2126,8 @@ async function registerCommands() {
   // настроено — оставляем как раньше (видны всем), чтобы ничего не
   // сломать до завершения одноразовой настройки.
   const isPermSyncSetUp = await commandPermSync.isAuthorized().catch(() => false);
-  const payload = isPermSyncSetUp ? commands.map((c) => ({ ...c, default_member_permissions: '0' })) : commands;
+  // Команды «только аккаунт владельца» скрываем в списке Discord от всех (видят лишь администраторы сервера), даже если синхронизация прав не настроена.
+  const payload = commands.map((c) => ((isPermSyncSetUp || COMMAND_DEFAULT_TIERS[c.name] === 'owner_account_only') ? { ...c, default_member_permissions: '0' } : c));
 
   if (guildId) {
     // Если раньше (до того, как появился GUILD_ID) команды успели
@@ -3092,56 +3094,50 @@ async function removeParticipant(guild, participant, reason) {
   await safeUpdateMembersList(guild);
 }
 
-// Назначить/снять HR-Менеджера. HR — ступень иерархии рангов, поэтому меняем
-// ранг самого паспорта (а не только Discord-роль): иначе синхронизация ролей
-// снимает её, а сверка ролей на сайте считает «лишней ролью ранга».
+// Назначить/снять должность HR-Менеджера. Это ДОЛЖНОСТЬ поверх основного ранга
+// (Фрилансер/Стажёр/Зам. и т.д.), а не ступень иерархии: ранг паспорта не меняется,
+// ставится только признак participants.hr_position и Discord-роль HR-Менеджера.
 // Возвращает true, если что-то изменилось.
 async function setHrRole(guild, discordId, makeHr) {
-  const passports = await passportsLib.getAllPassports(discordId);
-  if (!passports.length) throw new Error('У участника нет паспортов.');
-  const hrIdx = config.ROLE_IDS.indexOf(config.ROLE_HR);
+  const part = await db.get('SELECT discord_id, hr_position FROM participants WHERE discord_id = ?', [discordId]);
+  if (!part) throw new Error('Участник не найден в списке.');
   let changed = false;
   if (makeHr) {
-    const alreadyHigh = passports.some((p) => {
-      const i = config.ROLE_IDS.indexOf(p.role_id);
-      return i !== -1 && i <= hrIdx;
-    });
-    if (!alreadyHigh) {
-      await passportsLib.updatePassportFields(discordId, passports[0].static, { role_id: config.ROLE_HR });
-      changed = true;
-    }
+    if (!part.hr_position) { await db.run('UPDATE participants SET hr_position = 1 WHERE discord_id = ?', [discordId]); changed = true; }
   } else {
+    if (part.hr_position) { await db.run('UPDATE participants SET hr_position = 0 WHERE discord_id = ?', [discordId]); changed = true; }
+    // Раньше HR ошибочно ставился как ранг паспорта — возвращаем такие паспорта на ступень ниже.
+    const hrIdx = config.ROLE_IDS.indexOf(config.ROLE_HR);
     const below = config.ROLE_IDS[hrIdx + 1] || config.ROLE_APPLY;
-    for (const p of passports) {
-      if (p.role_id === config.ROLE_HR) {
-        await passportsLib.updatePassportFields(discordId, p.static, { role_id: below });
-        changed = true;
-      }
+    for (const p of await passportsLib.getAllPassports(discordId)) {
+      if (p.role_id === config.ROLE_HR) { await passportsLib.updatePassportFields(discordId, p.static, { role_id: below }); changed = true; }
     }
-    // роль могла быть выдана в Discord вручную без ранга паспорта
-    try {
-      const member = await guild.members.fetch(discordId);
-      if (member.roles.cache.has(config.ROLE_HR)) { await member.roles.remove(config.ROLE_HR); changed = true; }
-    } catch (_) {}
   }
+  // Роль снимаем ДО синхронизации, иначе синхронизация примет её за «старого HR» и закрепит обратно.
+  try {
+    const member = await guild.members.fetch(discordId);
+    const has = member.roles.cache.has(config.ROLE_HR);
+    if (!makeHr && has) { await member.roles.remove(config.ROLE_HR); changed = true; }
+    if (makeHr && !has) { await member.roles.add(config.ROLE_HR); changed = true; }
+  } catch (_) {}
   await syncEffectiveIdentity(guild, discordId);
   await safeUpdateMembersList(guild);
   try { web.invalidateAccess(discordId); } catch (_) {}
   return changed;
 }
 
-// Роль HR уже выдана в Discord (так было при одобрении заявки раньше), но ранг
-// паспорта ниже — закрепляем HR в паспорте, чтобы сверка не ругалась.
+// Роль HR уже выдана в Discord (так было при одобрении заявки раньше), но признака
+// должности в базе нет — закрепляем должность, чтобы синхронизация её не снимала.
 async function adoptDiscordHr(guild, discordId) {
   try {
+    const part = await db.get('SELECT hr_position FROM participants WHERE discord_id = ?', [discordId]);
+    if (!part || part.hr_position) return false;
     const member = await guild.members.fetch(discordId);
     if (!member.roles.cache.has(config.ROLE_HR)) return false;
     const ident = await passportsLib.computeEffectiveIdentity(discordId);
-    if (!ident) return false;
-    const hrIdx = config.ROLE_IDS.indexOf(config.ROLE_HR);
-    const cur = config.ROLE_IDS.indexOf(ident.roleId);
-    if (cur !== -1 && cur <= hrIdx) return false;
-    return await setHrRole(guild, discordId, true);
+    if (ident && ident.roleId === config.ROLE_HR) return false; // HR как ранг (старая схема) — не трогаем
+    await db.run('UPDATE participants SET hr_position = 1 WHERE discord_id = ?', [discordId]);
+    return true;
   } catch (_) { return false; }
 }
 
@@ -4630,7 +4626,7 @@ client.on('interactionCreate', async (interaction) => {
           await interaction.editReply('Повторяющихся розыгрышей пока не настроено.');
           return;
         }
-        const lines = rules.map((r) => `#${r.id} — «${r.prize}», каждый(ую) ${giveaways.WEEKDAY_NAMES[r.weekday]}, в <#${r.channel_id}>, победителей: ${r.winners_count}${r.required_role_id ? `, условие: <@&${r.required_role_id}>` : ''}`);
+        const lines = rules.map((r) => `#${r.id} — «${r.prize}», каждый(ую) ${giveaways.WEEKDAY_NAMES[r.weekday]} в 12:00 МСК, в <#${r.channel_id}>, победителей: ${r.winners_count}, длится ${giveaways.formatDuration(r.duration_ms)}${r.status === 'paused' ? ' (на паузе)' : ''}${r.required_role_id ? `, только роль <@&${r.required_role_id}>` : ''}${r.blocked_role_id ? `, не участвует <@&${r.blocked_role_id}>` : ''}${r.min_participants ? `, минимум участников: ${r.min_participants}` : ''}`);
         const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔁 Повторяющиеся розыгрыши').setDescription(lines.join('\n').slice(0, 4000));
         await interaction.editReply({ embeds: [embed] });
         return;
@@ -10274,9 +10270,6 @@ client.once('clientReady', async () => {
   }
 
   await db.init();
-  // Стандартные доски создаём после init (таблицы уже есть); web.start() выше
-  // вызывается раньше db.init(), поэтому сидим отсюда.
-  try { await web.seedBoards(); } catch (e) { console.error('[доски] seedBoards:', e.message); }
   const overridesCount = await configStore.loadOverrides();
   if (overridesCount > 0) console.log(`Применено переопределений конфига из БД: ${overridesCount}`);
   await seedRejectTemplates();

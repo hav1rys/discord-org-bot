@@ -83,6 +83,7 @@ const SCHEMA = {
       pinned_badges: 'TEXT', // закреплённые бейджи участника (ключи через запятую)
       frozen: 'INTEGER DEFAULT 0', // 1 — доступ к сайту заморожен
       frozen_reason: 'TEXT',
+      hr_position: 'INTEGER DEFAULT 0', // должность HR-Менеджер (ставится поверх основного ранга, не заменяет его)
     },
     indexes: [['discord_id'], ['static']],
   },
@@ -746,6 +747,22 @@ const SCHEMA = {
     },
     indexes: [['target_id']],
   },
+  // Альбомы фотообменника: одна ссылка /a/<code> на несколько картинок.
+  photo_albums: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      code: 'TEXT UNIQUE',
+      title: 'TEXT',
+      owner_id: 'TEXT', // пусто — создан без входа
+      del_token: 'TEXT', // секрет для управления без входа
+      ip: 'TEXT',
+      views: 'INTEGER DEFAULT 0',
+      expires_at: 'TEXT',
+      created_at: 'TEXT',
+    },
+    indexes: [['owner_id'], ['created_at']],
+  },
+
   // Фотохостинг сайта: файлы лежат в data/uploads/photos/<code>.<ext>
   photos: {
     columns: {
@@ -759,6 +776,7 @@ const SCHEMA = {
       ip: 'TEXT',
       del_token: 'TEXT', // секрет для удаления без входа
       expires_at: 'TEXT', // после этой даты файл удаляется автоматически
+      album_id: 'INTEGER', // photo_albums.id; пусто — одиночное фото (старый формат)
       views: 'INTEGER DEFAULT 0',
       created_at: 'TEXT',
     },

@@ -124,26 +124,11 @@ const accessCache = new Map(); // discordId -> { at, data }
 // НИКОГДА не кладём в accessCache, чтобы включённый/выключенный режим не «протёк».
 const viewAsALS = new AsyncLocalStorage();
 
-// ---------- Версии сайта (старая v1 / новая v2) ----------
-// Контекст запроса: { skin: 'v1'|'v2', prefix: '' | '/NEWSITE' | '/OLDSITE', path, search }.
+// Контекст запроса (путь/строка запроса) — нужен левому меню для подсветки пункта.
 const skinALS = new AsyncLocalStorage();
-function skinCtx() { return skinALS.getStore() || { skin: 'v1', prefix: '', path: '/', search: '' }; }
-// Скрытые сегменты путей. Новая версия: /NEWSITE (меняется в панели → Админ),
-// старая (когда основной станет новая): /OLDSITE.
-function skinSegments() {
-  const clean = (s, d) => String(s || d).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || d;
-  return { v2: clean(SITE.v2_path, 'NEWSITE'), v1: 'OLDSITE' };
-}
-// Ссылки, которые должны остаться «как есть» (OAuth-колбэк Discord, файлы, PWA).
-const SKIN_KEEP = /^\/(?:auth\/|cimg\/|asset\/|i\/|manifest\.webmanifest|sw\.js|healthz)/i;
-function prefixSkinUrl(url, prefix) {
-  if (!prefix || !/^\/(?!\/)/.test(url) || SKIN_KEEP.test(url)) return url;
-  if (url === prefix || url.startsWith(prefix + '/') || url.startsWith(prefix + '?')) return url;
-  return prefix + (url === '/' ? '' : url);
-}
-function rewriteSkinLinks(htmlStr, prefix) {
-  return htmlStr.replace(/(\s(?:href|action|formaction)=)(["'])(\/(?!\/)[^"']*)\2/g, (m, attr, q, url) => `${attr}${q}${prefixSkinUrl(url, prefix)}${q}`);
-}
+function skinCtx() { return skinALS.getStore() || { path: '/', search: '' }; }
+// Старые скрытые ссылки прежних версий (/NEWSITE, /OLDSITE) ведут на обычные адреса.
+const LEGACY_SKIN_PREFIX = /^\/(?:newsite|oldsite)(?=\/|$)/i;
 const VIEW_AS_LEVELS = ['guest', 'member', 'hr', 'deputy', 'owner'];
 
 async function accessFor(client, discordId) {
@@ -645,6 +630,27 @@ const CLIENT_SCRIPT = `
     var form=dateInput.form; var target=form&&form[targetName];
     if(target){ target.value=parts[2]+'.'+parts[1]+'.'+parts[0]; try{target.dispatchEvent(new Event('input',{bubbles:true}));}catch(e){} }
   };
+  // Не прыгать наверх после действия на странице: перед отправкой формы запоминаем
+  // прокрутку, после перезагрузки (редирект на ту же страницу) возвращаемся на место.
+  (function(){
+    try{
+      var SK='fc_scroll:'+location.pathname+'|'+(new URLSearchParams(location.search).get('tab')||'');
+      document.addEventListener('submit',function(e){
+        var f=e.target;
+        if(f&&f.method&&String(f.method).toLowerCase()==='post'&&window.scrollY>0){
+          try{sessionStorage.setItem(SK,JSON.stringify({y:window.scrollY,t:Date.now()}));}catch(_){}
+        }
+      },true);
+      window.addEventListener('load',function(){
+        try{
+          var raw=sessionStorage.getItem(SK); if(!raw)return;
+          sessionStorage.removeItem(SK);
+          var o=JSON.parse(raw);
+          if(o&&o.y>0&&Date.now()-o.t<15000){ window.scrollTo(0,o.y); setTimeout(function(){window.scrollTo(0,o.y);},120); }
+        }catch(_){}
+      });
+    }catch(e){}
+  })();
   window.fcClearDrafts=function(){
     try{
       var pre='fc_draft:'+location.pathname+':', rm=[];
@@ -1032,47 +1038,6 @@ const DEFAULT_NAV_TEXT = [
   'Контракты | /panel?tab=contracts_check | hr',
   'Панель | /panel | hr',
 ].join('\n');
-function navItems(level, panelGrant) {
-  if (SITE.nav && SITE.nav.trim()) {
-    const items = SITE.nav.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0] && a[1])
-      .filter(([, , tier]) => {
-        const t = (tier || 'all').toLowerCase();
-        if (t === 'hr') return LEVELS[level] >= LEVELS.hr;
-        if (t === 'member') return LEVELS[level] >= LEVELS.member;
-        return true;
-      }).map(([txt, url]) => `<a href="${esc(url)}">${esc(txt)}</a>`);
-    for (const pg of (SITE._navPages || [])) {
-      const slug = (pg.slug || '').trim();
-      if (slug) items.push(`<a href="/p/${esc(slug)}">${esc((pg.title || slug).trim() || slug)}</a>`);
-    }
-    if (panelGrant && LEVELS[level] < LEVELS.hr && !items.some((h) => h.includes('href="/panel"'))) {
-      items.push('<a href="/panel">Панель</a>');
-    }
-    if (LEVELS[level] >= LEVELS.member && !items.some((h) => h.includes('href="/boards"'))) {
-      items.push('<a href="/boards">Доски</a>');
-    }
-    return items;
-  }
-  const nav = ['<a href="/me">Мой профиль</a>'];
-  if (LEVELS[level] < LEVELS.member) nav.push('<a href="/apply">Подать заявку</a>');
-  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/people">Участники</a>');
-  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/giveaways">Розыгрыши</a>');
-  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/text/rules">Правила</a>');
-  nav.push('<a href="/faq">FAQ</a>');
-  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/commands">Команды</a>');
-  if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/dashboard">Дашборд</a>');
-  if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/tickets">Тикеты</a>');
-  if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel?tab=apps">Заявки</a>');
-  if (LEVELS[level] >= LEVELS.hr) nav.push('<a href="/panel?tab=contracts_check">Контракты</a>');
-  if (LEVELS[level] >= LEVELS.hr || panelGrant) nav.push('<a href="/panel">Панель</a>');
-  if (LEVELS[level] >= LEVELS.member) nav.push('<a href="/boards">Доски</a>');
-  for (const pg of (SITE._navPages || [])) {
-    const slug = (pg.slug || '').trim();
-    if (!slug) continue;
-    nav.push(`<a href="/p/${esc(slug)}">${esc((pg.title || slug).trim() || slug)}</a>`);
-  }
-  return nav.filter(Boolean);
-}
 
 const VIEW_AS_LABELS = { guest: 'гость', member: 'участник', hr: 'HR-менеджер', deputy: 'заместитель', owner: 'владелец' };
 // Кнопка «👁 Просмотр как» — только у havirys. Меняет уровень доступа, которым
@@ -1089,21 +1054,6 @@ function viewAsControl(user) {
       <div class="mini" style="margin-bottom:6px">Смотреть сайт как:</div>
       ${items}
     </div>
-  </div>`;
-}
-function topbar(user, level, notif, panelGrant) {
-  const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
-  if (!user) {
-    const gnav = (SITE._navPages || []).map((pg) => `<a href="/p/${esc(pg.slug)}">${esc(pg.title || pg.slug)}</a>`).join('');
-    const gtoggle = gnav ? `<button id="navtoggle" type="button" aria-label="Меню" aria-expanded="false" onclick="var n=this.nextElementSibling;if(n){var o=n.classList.toggle('open');this.setAttribute('aria-expanded',o?'true':'false');}">☰</button>` : '';
-    return `<div class="top">${gtoggle}<div class="left nav">${themeToggle()}${gnav}</div><div class="right"><a class="btn sm" href="/login">Войти</a>${brand}</div></div>`;
-  }
-  const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${notif ? `<b style="color:var(--bad)"> ${notif}</b>` : ''}</a>`;
-  const bug = `<a href="/bug" class="tglbtn" style="text-decoration:none" title="Сообщить о баге">🐞</a>`;
-  return `<div class="top">
-    <button id="navtoggle" type="button" aria-label="Меню" aria-expanded="false" onclick="var n=document.querySelector('.top .left.nav');if(n){var o=n.classList.toggle('open');this.setAttribute('aria-expanded',o?'true':'false');}">☰</button>
-    <div class="left nav">${navItems(level, panelGrant).join('')}</div>
-    <div class="right">${viewAsControl(user)}${bug}${bell}${themeToggle()}${brand}</div>
   </div>`;
 }
 function bannerHtml() {
@@ -1167,14 +1117,6 @@ function photoTtlOptions(isUser) {
 }
 // Удаляет просроченные файлы (вызывается из обработчика запросов не чаще раза в 10 минут).
 let _photoSweepAt = 0;
-async function sweepPhotos() {
-  _photoSweepAt = Date.now();
-  const rows = await db.all('SELECT id, code, ext FROM photos WHERE expires_at IS NOT NULL AND expires_at <= ? LIMIT 500', [new Date().toISOString()]).catch(() => []);
-  for (const r of rows) {
-    await _fsMod.promises.unlink(_pathMod.join(photosDir(), `${r.code}.${r.ext}`)).catch(() => {});
-    await db.run('DELETE FROM photos WHERE id = ?', [r.id]).catch(() => {});
-  }
-}
 function fmtBytes(n) {
   n = Number(n) || 0;
   if (n < 1024) return n + ' Б';
@@ -1182,84 +1124,156 @@ function fmtBytes(n) {
   return (n / 1048576).toFixed(1) + ' МБ';
 }
 
-async function photoBody(user, pageNum) {
-  const guestsOk = SITE.photo_guests !== '0';
-  const csrf = user ? csrfToken(user) : '';
-  let gallery = '';
-  if (user) {
-    const PER = 24;
-    const total = (await db.get('SELECT COUNT(*) c FROM photos WHERE owner_id = ?', [user.id]).catch(() => null) || { c: 0 }).c;
-    const rows = await db.all('SELECT * FROM photos WHERE owner_id = ? ORDER BY id DESC LIMIT ? OFFSET ?', [user.id, PER, pageNum * PER]).catch(() => []);
-    const cards = rows.map((p) => `<div class="ph-card" data-code="${esc(p.code)}">
-        <a href="${esc(photoUrl(p))}" target="_blank" rel="noopener"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt=""></a>
-        <div class="ph-meta"><span class="mini">${esc(fmtBytes(p.size))} · до ${p.expires_at ? fmt(p.expires_at) : '—'}</span>
-          <div class="ph-acts">
-            <button type="button" class="btn ghost sm" data-copy="${esc(photoUrl(p))}">Ссылка</button>
-            <button type="button" class="btn ghost sm" data-copy="[img]${esc(photoUrl(p))}[/img]">BB</button>
-            <button type="button" class="btn ghost sm" style="background:var(--bad);color:#fff!important" data-del="${esc(p.code)}">✕</button>
-          </div></div></div>`).join('');
-    gallery = `<div class="card"><h2>Мои загрузки${total ? ` (${total})` : ''}</h2>
-      ${cards ? `<div class="ph-grid" id="phGallery">${cards}</div>` : '<p class="mini">Пока ничего не загружено.</p>'}
-      ${pager('/photo', pageNum, total)}</div>`;
-  }
-  return `<h1>📷 Фотохостинг</h1>
-  <p class="muted" style="margin-bottom:14px">Загрузите картинку и получите прямую ссылку — для Discord, форума, объявлений. JPG, PNG, GIF, WEBP до 10 МБ. Файлы хранятся ограниченное время и затем удаляются сами: без входа — до ${photoMaxDays(false)} дн., после входа — до ${photoMaxDays(true)} дн.${user ? ' Ваши прошлые загрузки — внизу страницы.' : ' Войдите, чтобы видеть свои прошлые загрузки.'}</p>
-  ${(!user && !guestsOk) ? '<div class="card">Загрузка доступна после входа на сайт. <a class="btn sm" href="/login">Войти</a></div>' : `
-  <div class="card" style="padding:12px 18px"><label class="bar" style="gap:10px;margin:0;flex-wrap:wrap">Хранить
-    <select id="phTtl" style="max-width:160px">${photoTtlOptions(!!user).map((d, i, a) => `<option value="${d}" ${i === a.length - 1 ? 'selected' : ''}>${d} ${d === 1 ? 'день' : (d < 5 ? 'дня' : 'дней')}</option>`).join('')}</select>
-    <span class="mini">потом файл удалится автоматически</span></label></div>
-  <div class="card ph-drop" id="phDrop" tabindex="0">
-    <div style="font-size:34px">📤</div>
-    <div><b>Перетащите файлы сюда</b>, нажмите, чтобы выбрать, или вставьте из буфера (Ctrl+V)</div>
-    <input type="file" id="phFile" accept="image/jpeg,image/png,image/gif,image/webp" multiple hidden>
-  </div>
-  <div id="phResults"></div>`}
-  ${gallery}
-  <style>
+// ---- Лимиты фотообменника (настраиваются в панели → Админ) ----
+function photoLimit(key, def) {
+  const v = parseInt(SITE[key], 10);
+  return Number.isFinite(v) && v >= 0 ? v : def;
+}
+const albumMaxPhotos = (isUser) => Math.max(1, photoLimit(isUser ? 'photo_album_max' : 'photo_album_max_guest', isUser ? 40 : 10));
+const userMaxPhotos = () => photoLimit('photo_user_total', 500); // 0 = без ограничения
+
+// Удаляет просроченные альбомы/фото (вызывается из обработчика запросов не чаще раза в 10 минут).
+async function removePhotoFiles(rows) {
+  for (const r of rows) await _fsMod.promises.unlink(_pathMod.join(photosDir(), `${r.code}.${r.ext}`)).catch(() => {});
+}
+async function deleteAlbum(albumId) {
+  const ph = await db.all('SELECT id, code, ext FROM photos WHERE album_id = ?', [albumId]).catch(() => []);
+  await removePhotoFiles(ph);
+  await db.run('DELETE FROM photos WHERE album_id = ?', [albumId]).catch(() => {});
+  await db.run('DELETE FROM photo_albums WHERE id = ?', [albumId]).catch(() => {});
+}
+async function sweepPhotos() {
+  _photoSweepAt = Date.now();
+  const nowIso = new Date().toISOString();
+  const albums = await db.all('SELECT id FROM photo_albums WHERE expires_at IS NOT NULL AND expires_at <= ? LIMIT 200', [nowIso]).catch(() => []);
+  for (const a of albums) await deleteAlbum(a.id);
+  const single = await db.all('SELECT id, code, ext FROM photos WHERE album_id IS NULL AND expires_at IS NOT NULL AND expires_at <= ? LIMIT 500', [nowIso]).catch(() => []);
+  await removePhotoFiles(single);
+  for (const r of single) await db.run('DELETE FROM photos WHERE id = ?', [r.id]).catch(() => {});
+}
+function albumUrl(code) { return `${baseUrl()}/a/${code}`; }
+function daysWord(d) { return d === 1 ? 'день' : (d >= 2 && d <= 4 ? 'дня' : 'дней'); }
+
+const PHOTO_CSS = `<style>
     .ph-drop{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;padding:34px 20px;border:2px dashed var(--line);cursor:pointer;transition:border-color .15s,background .15s}
     .ph-drop:hover,.ph-drop.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--panel))}
     .ph-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
     .ph-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
-    .ph-card img{display:block;width:100%;height:140px;object-fit:cover;background:var(--bg)}
+    .ph-card img{display:block;width:100%;height:150px;object-fit:cover;background:var(--bg)}
     .ph-meta{padding:8px 10px}.ph-acts{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
-    .ph-res{display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;align-items:start}
-    .ph-res img{width:120px;height:90px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
-    .ph-row{display:flex;gap:6px;align-items:center;margin:4px 0}.ph-row span{width:92px;flex:0 0 92px;font-size:12.5px;color:var(--muted)}
+    .ph-row{display:flex;gap:6px;align-items:center;margin:4px 0}.ph-row span{width:112px;flex:0 0 112px;font-size:12.5px;color:var(--muted)}
     .ph-row input{flex:1;min-width:0;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
     .ph-bar{height:6px;border-radius:99px;background:var(--panel2);overflow:hidden}.ph-bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
-    @media(max-width:560px){.ph-res{grid-template-columns:1fr}}
-  </style>
-  <script>(function(){
-    var CSRF=${JSON.stringify(csrf)}, MAX=${PHOTO_MAX}, LOGGED=${user ? 'true' : 'false'};
-    var drop=document.getElementById('phDrop'), inp=document.getElementById('phFile'), out=document.getElementById('phResults');
+    .ph-file{display:grid;grid-template-columns:64px minmax(0,1fr);gap:10px;align-items:center;padding:6px 0;border-top:1px solid var(--line)}
+    .ph-file img{width:64px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--line)}
+    .ph-lb{position:fixed;inset:0;background:rgba(0,0,0,.88);z-index:500;display:none;align-items:center;justify-content:center}
+    .ph-lb.on{display:flex}.ph-lb img{max-width:92vw;max-height:88vh;border-radius:8px}
+    .ph-lb button{position:absolute;background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:50%;width:44px;height:44px;font-size:20px;cursor:pointer}
+    .ph-cover{display:block;width:100%;height:150px;object-fit:cover;background:var(--bg)}
+    .mg{display:none}.mg.on{display:inline-block}
+</style>`;
+
+// Общие JS-функции страниц фотообмена (копирование, запросы, лайтбокс).
+const PHOTO_JS_COMMON = `
     function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
     function copy(t,btn){ var done=function(){var o=btn.textContent;btn.textContent='✓';setTimeout(function(){btn.textContent=o;},900);};
       if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done);}else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(e){}a.remove();done();} }
+    function post(url,data,cb){ var b=Object.keys(data).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(data[k]);}).join('&');
+      fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}).then(function(r){return r.json();}).then(cb).catch(function(){alert('Ошибка сети');}); }
+    function tokens(){ try{return JSON.parse(localStorage.getItem('fc_albums')||'{}')||{};}catch(e){return {};} }
+    function saveToken(code,t){ try{var o=tokens();o[code]=t;localStorage.setItem('fc_albums',JSON.stringify(o));}catch(e){} }
+    document.addEventListener('click',function(e){ var c=e.target.closest&&e.target.closest('[data-copy]'); if(c){copy(c.getAttribute('data-copy'),c);} });
+`;
+
+async function photoBody(user, pageNum) {
+  const guestsOk = SITE.photo_guests !== '0';
+  const csrf = user ? csrfToken(user) : '';
+  let albumsCard = '';
+  if (user) {
+    const PER = 18;
+    const total = (await db.get('SELECT COUNT(*) c FROM photo_albums WHERE owner_id = ?', [user.id]).catch(() => null) || { c: 0 }).c;
+    const rows = await db.all(
+      `SELECT a.*, (SELECT COUNT(*) FROM photos p WHERE p.album_id = a.id) cnt,
+              (SELECT p.code || '.' || p.ext FROM photos p WHERE p.album_id = a.id ORDER BY p.id LIMIT 1) cover
+         FROM photo_albums a WHERE a.owner_id = ? ORDER BY a.id DESC LIMIT ? OFFSET ?`, [user.id, PER, pageNum * PER]).catch(() => []);
+    const cards = rows.map((a) => `<div class="ph-card" data-album="${esc(a.code)}">
+        <a href="/a/${esc(a.code)}">${a.cover ? `<img class="ph-cover" loading="lazy" src="/i/${esc(a.cover)}" alt="">` : '<div class="ph-cover"></div>'}</a>
+        <div class="ph-meta"><b>${esc(a.title || 'Без названия')}</b>
+          <div class="mini">${a.cnt} фото · до ${a.expires_at ? fmt(a.expires_at) : '—'} · 👁 ${a.views || 0}</div>
+          <div class="ph-acts">
+            <button type="button" class="btn ghost sm" data-copy="${esc(albumUrl(a.code))}">Ссылка</button>
+            <a class="btn ghost sm" href="/a/${esc(a.code)}">Открыть</a>
+            <button type="button" class="btn sm" style="background:var(--bad)" data-adel="${esc(a.code)}">✕</button>
+          </div></div></div>`).join('');
+    albumsCard = `<div class="card"><h2>Мои альбомы${total ? ` (${total})` : ''}</h2>
+      ${cards ? `<div class="ph-grid" id="phAlbums">${cards}</div>` : '<p class="mini">Пока нет альбомов — загрузите первые фото выше.</p>'}
+      ${pager('/photo', pageNum, total)}</div>`;
+  }
+  const ttlOpts = photoTtlOptions(!!user).map((d, i, a) => `<option value="${d}" ${i === a.length - 1 ? 'selected' : ''}>${d} ${daysWord(d)}</option>`).join('');
+  return `<h1>📷 Фотообменник</h1>
+  <p class="muted" style="margin-bottom:14px">Загрузите несколько картинок — получите одну ссылку на альбом, которую можно отправить кому угодно. JPG, PNG, GIF, WEBP до 10 МБ, до ${albumMaxPhotos(!!user)} фото в альбоме. Альбомы хранятся ограниченное время и удаляются сами: без входа — до ${photoMaxDays(false)} дн., после входа — до ${photoMaxDays(true)} дн.${user ? '' : ' Войдите, чтобы видеть свои альбомы в профиле.'}</p>
+  ${(!user && !guestsOk) ? '<div class="card">Загрузка доступна после входа на сайт. <a class="btn sm" href="/login">Войти</a></div>' : `
+  <div class="card"><div class="form" style="margin:0">
+    <label>Название альбома (необязательно)<input id="phTitle" maxlength="80" placeholder="Например: Скриншоты с контракта"></label>
+    <label>Хранить<select id="phTtl" style="max-width:200px">${ttlOpts}</select></label>
+  </div></div>
+  <div class="card ph-drop" id="phDrop" tabindex="0">
+    <div style="font-size:34px">📤</div>
+    <div><b>Перетащите фото сюда</b>, нажмите, чтобы выбрать, или вставьте из буфера (Ctrl+V)</div>
+    <input type="file" id="phFile" accept="image/jpeg,image/png,image/gif,image/webp" multiple hidden>
+  </div>
+  <div id="phResults"></div>`}
+  ${albumsCard}
+  ${PHOTO_CSS}
+  <script>(function(){
+    var CSRF=${JSON.stringify(csrf)}, MAX=${PHOTO_MAX}, LOGGED=${user ? 'true' : 'false'};
+    ${PHOTO_JS_COMMON}
+    var drop=document.getElementById('phDrop'), inp=document.getElementById('phFile'), out=document.getElementById('phResults');
     document.addEventListener('click',function(e){
-      var c=e.target.closest&&e.target.closest('[data-copy]'); if(c){copy(c.getAttribute('data-copy'),c);return;}
-      var d=e.target.closest&&e.target.closest('[data-del]'); if(d){ if(!confirm('Удалить картинку? Ссылка перестанет работать.'))return; del(d.getAttribute('data-del'),d.getAttribute('data-token')||'',function(){var card=d.closest('.ph-card')||d.closest('.ph-res');if(card)card.remove();}); }
+      var d=e.target.closest&&e.target.closest('[data-adel]'); if(!d)return;
+      if(!confirm('Удалить альбом целиком? Все ссылки на фото перестанут работать.'))return;
+      var code=d.getAttribute('data-adel');
+      post('/photo/album_delete',{code:code,token:tokens()[code]||'',_csrf:CSRF},function(j){ if(j.ok){var c=d.closest('.ph-card');if(c)c.remove();} else alert(j.err||'Не удалось удалить'); });
     });
-    function del(code,token,ok){ fetch('/photo/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'code='+encodeURIComponent(code)+'&token='+encodeURIComponent(token)+'&_csrf='+encodeURIComponent(CSRF)})
-      .then(function(r){return r.json();}).then(function(j){ if(j.ok)ok(); else alert(j.err||'Не удалось удалить'); }).catch(function(){alert('Ошибка сети');}); }
-    function addRow(label,val){ return '<div class="ph-row"><span>'+label+'</span><input readonly value="'+esc(val)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(val)+'">Копировать</button></div>'; }
-    function upload(file){
-      var box=document.createElement('div'); box.className='card ph-res';
-      box.innerHTML='<div style="width:120px;height:90px;border-radius:10px;background:var(--panel2)"></div><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+(file.size/1024).toFixed(0)+' КБ</span><div class="ph-bar" style="margin-top:8px"><i></i></div><div class="mini st" style="margin-top:6px">Загрузка…</div></div>';
-      out.prepend(box);
-      var st=box.querySelector('.st'), bar=box.querySelector('.ph-bar i');
-      if(file.size>MAX){ st.textContent='⛔ Больше 10 МБ'; return; }
-      var x=new XMLHttpRequest(); x.open('POST','/photo/upload'); x.setRequestHeader('X-Filename',encodeURIComponent(file.name||'image')); x.setRequestHeader('X-Csrf',CSRF); var ts=document.getElementById('phTtl'); if(ts)x.setRequestHeader('X-Ttl',ts.value);
-      x.upload.onprogress=function(e){ if(e.lengthComputable)bar.style.width=Math.round(e.loaded/e.total*100)+'%'; };
-      x.onerror=function(){ st.textContent='⛔ Ошибка сети'; };
-      x.onload=function(){ var j={}; try{j=JSON.parse(x.responseText);}catch(e){}
-        if(!j.ok){ st.textContent='⛔ '+(j.err||'Не удалось загрузить'); return; }
-        box.innerHTML='<img src="'+esc(j.url)+'" alt=""><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+esc(j.size)+' · хранится до '+esc(j.until)+'</span>'
-          +addRow('Прямая ссылка',j.url)+addRow('BB-код','[img]'+j.url+'[/img]')+addRow('HTML','<img src="'+j.url+'" alt="">')+addRow('Markdown','!['+'](' + j.url + ')')
-          +'<div class="ph-acts" style="margin-top:8px"><a class="btn ghost sm" href="'+esc(j.url)+'" target="_blank" rel="noopener">Открыть</a><button type="button" class="btn ghost sm" style="background:var(--bad);color:#fff!important" data-del="'+esc(j.code)+'" data-token="'+esc(j.token||'')+'">Удалить</button></div></div>';
-      };
-      x.send(file);
+    var album=null, albumP=null, queue=Promise.resolve(), box=null, filesBox=null, count=0;
+    function createAlbum(){
+      if(albumP)return albumP;
+      albumP=new Promise(function(resolve,reject){
+        post('/photo/album',{title:(document.getElementById('phTitle').value||'').trim(),ttl:document.getElementById('phTtl').value,_csrf:CSRF},function(j){
+          if(!j.ok){ albumP=null; reject(j.err||'Не удалось создать альбом'); return; }
+          album=j; if(!LOGGED)saveToken(j.code,j.token);
+          box=document.createElement('div'); box.className='card';
+          box.innerHTML='<h2>Ваш альбом'+(j.title?' «'+esc(j.title)+'»':'')+'</h2><div class="ph-row"><span>Ссылка на альбом</span><input readonly value="'+esc(j.url)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url)+'">Копировать</button><a class="btn sm" href="/a/'+esc(j.code)+'" target="_blank" rel="noopener">Открыть</a></div>'
+            +(LOGGED?'':'<div class="ph-row"><span>Управление</span><input readonly value="'+esc(j.url+'?m='+j.token)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url+'?m='+j.token)+'">Копировать</button></div><div class="mini">Сохраните ссылку управления — по ней можно переименовать или удалить альбом. Хранится до '+esc(j.until)+'.</div>':'<div class="mini">Хранится до '+esc(j.until)+'. Альбом появится в «Мои альбомы» и в профиле.</div>')
+            +'<div id="phFiles" style="margin-top:10px"></div><div class="bar" style="margin-top:10px"><button type="button" class="btn ghost sm" id="phNew">Создать новый альбом</button></div>';
+          out.prepend(box); filesBox=box.querySelector('#phFiles');
+          box.querySelector('#phNew').onclick=function(){ album=null;albumP=null;box=null;filesBox=null;count=0;out.innerHTML='';document.getElementById('phTitle').value=''; };
+          resolve(j);
+        });
+      });
+      return albumP;
     }
-    function addFiles(list){ Array.prototype.forEach.call(list||[],function(f){ if(/^image\\/(jpeg|png|gif|webp)$/.test(f.type))upload(f); else { var b=document.createElement('div'); b.className='card'; b.textContent='⛔ '+(f.name||'файл')+': поддерживаются JPG, PNG, GIF, WEBP'; out.prepend(b); } }); }
+    function uploadOne(file){
+      return createAlbum().then(function(a){ return new Promise(function(resolve){
+        var row=document.createElement('div'); row.className='ph-file';
+        row.innerHTML='<div style="width:64px;height:48px;border-radius:8px;background:var(--panel2)"></div><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+(file.size/1024).toFixed(0)+' КБ</span><div class="ph-bar" style="margin-top:6px"><i></i></div><div class="mini st" style="margin-top:4px">Загрузка…</div></div>';
+        filesBox.appendChild(row);
+        var st=row.querySelector('.st'), bar=row.querySelector('.ph-bar i');
+        if(file.size>MAX){ st.textContent='⛔ Больше 10 МБ'; return resolve(); }
+        var x=new XMLHttpRequest(); x.open('POST','/photo/upload'); x.setRequestHeader('X-Filename',encodeURIComponent(file.name||'image')); x.setRequestHeader('X-Csrf',CSRF); x.setRequestHeader('X-Album',a.code); x.setRequestHeader('X-Album-Token',a.token||'');
+        x.upload.onprogress=function(e){ if(e.lengthComputable)bar.style.width=Math.round(e.loaded/e.total*100)+'%'; };
+        x.onerror=function(){ st.textContent='⛔ Ошибка сети'; resolve(); };
+        x.onload=function(){ var j={}; try{j=JSON.parse(x.responseText);}catch(e){}
+          if(!j.ok){ st.textContent='⛔ '+(j.err||'Не удалось загрузить'); return resolve(); }
+          count++;
+          row.innerHTML='<img src="'+esc(j.url)+'" alt=""><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+esc(j.size)+'</span><div class="ph-row"><span>Прямая ссылка</span><input readonly value="'+esc(j.url)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(j.url)+'">Копировать</button></div><div class="ph-row"><span>BB-код</span><input readonly value="[img]'+esc(j.url)+'[/img]" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="[img]'+esc(j.url)+'[/img]">Копировать</button></div></div>';
+          resolve(); };
+        x.send(file);
+      }); });
+    }
+    function addFiles(list){ Array.prototype.forEach.call(list||[],function(f){
+      if(/^image\\/(jpeg|png|gif|webp)$/.test(f.type)){ queue=queue.then(function(){return uploadOne(f);}).catch(function(err){ alert(err); }); }
+      else { var b=document.createElement('div'); b.className='card'; b.textContent='⛔ '+(f.name||'файл')+': поддерживаются JPG, PNG, GIF, WEBP'; out.prepend(b); } }); }
     if(drop){
       drop.addEventListener('click',function(){inp.click();});
       drop.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();inp.click();}});
@@ -1269,6 +1283,102 @@ async function photoBody(user, pageNum) {
       drop.addEventListener('drop',function(e){addFiles(e.dataTransfer&&e.dataTransfer.files);});
       document.addEventListener('paste',function(e){var items=(e.clipboardData&&e.clipboardData.files)||[]; if(items.length)addFiles(items);});
     }
+  })();</script>`;
+}
+
+// Страница альбома /a/<code>: открывается по ссылке любым человеком.
+async function albumBody(client, user, canManage, album, mParam) {
+  const photos = await db.all('SELECT * FROM photos WHERE album_id = ? ORDER BY id', [album.id]).catch(() => []);
+  const totalSize = photos.reduce((s, p) => s + (p.size || 0), 0);
+  const author = album.owner_id ? personLink(client, album.owner_id) : 'гость';
+  const csrf = user ? csrfToken(user) : '';
+  const cards = photos.map((p) => `<div class="ph-card" data-pcode="${esc(p.code)}">
+      <a href="${esc(photoUrl(p))}" data-lb="${esc(photoUrl(p))}"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt=""></a>
+      <div class="ph-meta"><span class="mini">${esc(fmtBytes(p.size))}</span>
+        <div class="ph-acts">
+          <button type="button" class="btn ghost sm" data-copy="${esc(photoUrl(p))}">Ссылка</button>
+          <button type="button" class="btn ghost sm" data-copy="[img]${esc(photoUrl(p))}[/img]">BB</button>
+          <button type="button" class="btn sm mg${canManage ? ' on' : ''}" style="background:var(--bad)" data-pdel="${esc(p.code)}">✕</button>
+        </div></div></div>`).join('');
+  return `<h1 id="alTitle">${esc(album.title || 'Альбом')}</h1>
+  <p class="muted">Автор: ${author} · ${photos.length} фото · ${esc(fmtBytes(totalSize))} · 👁 ${album.views || 0} · создан ${fmt(album.created_at)}${album.expires_at ? ` · хранится до ${fmt(album.expires_at)}` : ''}</p>
+  <div class="card"><div class="bar" style="flex-wrap:wrap;gap:8px">
+    <button type="button" class="btn sm" data-copy="${esc(albumUrl(album.code))}">🔗 Копировать ссылку на альбом</button>
+    <a class="btn ghost sm" href="/photo">Создать свой альбом</a>
+    <span class="mg${canManage ? ' on' : ''}" style="display:none"><input id="alRename" value="${esc(album.title || '')}" maxlength="80" placeholder="Название" style="max-width:240px"> <button type="button" class="btn ghost sm" id="alSave">Переименовать</button>
+      <button type="button" class="btn sm" style="background:var(--bad)" id="alDel">Удалить альбом</button></span>
+  </div></div>
+  ${cards ? `<div class="ph-grid">${cards}</div>` : '<div class="card muted">В альбоме пока нет фото.</div>'}
+  <div class="ph-lb" id="phLb"><img alt=""><button type="button" id="phLbX" style="top:16px;right:16px">✕</button></div>
+  ${PHOTO_CSS}
+  <script>(function(){
+    var CSRF=${JSON.stringify(csrf)}, CODE=${JSON.stringify(album.code)}, SERVER_OK=${canManage ? 'true' : 'false'};
+    ${PHOTO_JS_COMMON}
+    var m=new URLSearchParams(location.search).get('m'); if(m){ saveToken(CODE,m); }
+    var token=tokens()[CODE]||'';
+    if(SERVER_OK||token){ document.querySelectorAll('.mg').forEach(function(e){e.classList.add('on');e.style.display='';}); }
+    var lb=document.getElementById('phLb'), lbi=lb.querySelector('img');
+    document.addEventListener('click',function(e){
+      var a=e.target.closest&&e.target.closest('[data-lb]'); if(a){e.preventDefault();lbi.src=a.getAttribute('data-lb');lb.classList.add('on');return;}
+      if(e.target===lb||e.target.id==='phLbX'){lb.classList.remove('on');}
+      var d=e.target.closest&&e.target.closest('[data-pdel]'); if(d){ if(!confirm('Удалить это фото?'))return;
+        post('/photo/delete',{code:d.getAttribute('data-pdel'),token:token,_csrf:CSRF},function(j){ if(j.ok){var c=d.closest('.ph-card');if(c)c.remove();} else alert(j.err||'Не удалось удалить'); }); }
+    });
+    document.addEventListener('keydown',function(e){ if(e.key==='Escape')lb.classList.remove('on'); });
+    var sv=document.getElementById('alSave'); if(sv)sv.onclick=function(){ post('/photo/album_edit',{code:CODE,title:document.getElementById('alRename').value,token:token,_csrf:CSRF},function(j){ if(j.ok){document.getElementById('alTitle').textContent=j.title||'Альбом';sv.textContent='✓';setTimeout(function(){sv.textContent='Переименовать';},900);} else alert(j.err||'Не удалось'); }); };
+    var dl=document.getElementById('alDel'); if(dl)dl.onclick=function(){ if(!confirm('Удалить альбом целиком?'))return;
+      post('/photo/album_delete',{code:CODE,token:token,_csrf:CSRF},function(j){ if(j.ok){location.href='/photo';} else alert(j.err||'Не удалось удалить'); }); };
+  })();</script>`;
+}
+
+// Карточка «Мои альбомы» в личном кабинете.
+async function meAlbumsCard(user) {
+  const rows = await db.all(
+    `SELECT a.*, (SELECT COUNT(*) FROM photos p WHERE p.album_id = a.id) cnt
+       FROM photo_albums a WHERE a.owner_id = ? ORDER BY a.id DESC LIMIT 6`, [user.id]).catch(() => []);
+  const total = (await db.get('SELECT COUNT(*) c FROM photo_albums WHERE owner_id = ?', [user.id]).catch(() => null) || { c: 0 }).c;
+  const list = rows.map((a) => `<tr><td><a href="/a/${esc(a.code)}">${esc(a.title || 'Без названия')}</a></td><td class="mini">${a.cnt} фото</td><td class="mini">до ${a.expires_at ? fmt(a.expires_at) : '—'}</td>
+      <td><button type="button" class="btn ghost sm" onclick="var b=this;navigator.clipboard&&navigator.clipboard.writeText(${esc(JSON.stringify(albumUrl(a.code)))}).then(function(){var o=b.textContent;b.textContent='✓';setTimeout(function(){b.textContent=o;},900);})">Ссылка</button></td></tr>`).join('');
+  return `<div class="card"><h2>📷 Мои альбомы${total ? ` (${total})` : ''}</h2>
+    ${list ? `<div class="tablewrap"><table>${list}</table></div>` : '<p class="mini">Альбомов пока нет. Фотообменник — быстрый способ поделиться несколькими скриншотами одной ссылкой.</p>'}
+    <div class="bar" style="margin-top:8px"><a class="btn sm" href="/photo">Загрузить фото</a>${total > 6 ? '<a class="btn ghost sm" href="/photo">Все альбомы</a>' : ''}</div></div>`;
+}
+
+// Панель → «Фотоальбомы»: просмотр альбомов всех участников и удаление мусора.
+async function panelAlbums(client, user, pageNum, sp) {
+  const owner = sp && sp.get ? (sp.get('owner') || '').trim() : '';
+  const where = owner ? (owner === 'guest' ? "WHERE (a.owner_id IS NULL OR a.owner_id = '')" : 'WHERE a.owner_id = ?') : '';
+  const params = owner && owner !== 'guest' ? [owner] : [];
+  const total = (await db.get(`SELECT COUNT(*) c FROM photo_albums a ${where}`, params).catch(() => null) || { c: 0 }).c;
+  const stats = await db.get('SELECT COUNT(*) n, COALESCE(SUM(size), 0) s FROM photos').catch(() => null) || { n: 0, s: 0 };
+  const PER = 20;
+  const rows = await db.all(
+    `SELECT a.*, (SELECT COUNT(*) FROM photos p WHERE p.album_id = a.id) cnt,
+            (SELECT COALESCE(SUM(p.size), 0) FROM photos p WHERE p.album_id = a.id) sz,
+            (SELECT p.code || '.' || p.ext FROM photos p WHERE p.album_id = a.id ORDER BY p.id LIMIT 1) cover
+       FROM photo_albums a ${where} ORDER BY a.id DESC LIMIT ? OFFSET ?`, [...params, PER, pageNum * PER]).catch(() => []);
+  const csrf = csrfToken(user);
+  const trs = rows.map((a) => `<tr data-album="${esc(a.code)}">
+      <td>${a.cover ? `<a href="/a/${esc(a.code)}" target="_blank"><img src="/i/${esc(a.cover)}" alt="" style="width:72px;height:54px;object-fit:cover;border-radius:8px;border:1px solid var(--line)"></a>` : '—'}</td>
+      <td><a href="/a/${esc(a.code)}" target="_blank" rel="noopener"><b>${esc(a.title || 'Без названия')}</b></a><div class="mini">${esc(a.code)}</div></td>
+      <td>${a.owner_id ? `${personLink(client, a.owner_id)} <a class="mini" href="/panel?tab=albums&owner=${esc(a.owner_id)}">все</a>` : `<span class="mini">гость · ${esc(a.ip || '—')}</span>`}</td>
+      <td>${a.cnt}</td><td>${esc(fmtBytes(a.sz))}</td><td>${a.views || 0}</td>
+      <td class="muted">${fmt(a.created_at)}</td><td class="muted">${a.expires_at ? fmt(a.expires_at) : '—'}</td>
+      <td><button type="button" class="btn sm" style="background:var(--bad)" data-adel="${esc(a.code)}">Удалить</button></td></tr>`).join('');
+  return `<div class="card"><h2>Фотоальбомы участников</h2>
+    <p class="mini">Всего фото: ${stats.n} · занято ${esc(fmtBytes(stats.s))}. Здесь видны альбомы всех, включая загруженные без входа. Мусорные можно удалить. Лимиты и сроки хранения — в «Админ → Фотообменник».</p>
+    <div class="bar" style="flex-wrap:wrap;gap:6px;margin-bottom:8px">
+      <a class="btn ghost sm" href="/panel?tab=albums">Все</a><a class="btn ghost sm" href="/panel?tab=albums&owner=guest">Без входа</a>
+      <form method="GET" action="/panel" class="bar" style="margin:0;gap:4px"><input type="hidden" name="tab" value="albums"><input name="owner" value="${esc(owner === 'guest' ? '' : owner)}" placeholder="Discord ID автора" pattern="[0-9]*" maxlength="25" style="max-width:200px"><button class="btn sm" type="submit">Найти</button></form>
+    </div>
+    ${pager('/panel?tab=albums' + (owner ? '&owner=' + encodeURIComponent(owner) : ''), pageNum, total)}
+    <div class="tablewrap"><table><tr><th></th><th>Альбом</th><th>Автор</th><th>Фото</th><th>Размер</th><th>Просм.</th><th>Создан</th><th>Удалится</th><th></th></tr>${trs || '<tr><td colspan="9">Альбомов нет.</td></tr>'}</table></div>
+  </div>
+  <script>(function(){var CSRF=${JSON.stringify(csrf)};
+    document.addEventListener('click',function(e){var d=e.target.closest&&e.target.closest('[data-adel]');if(!d)return;
+      if(!confirm('Удалить альбом и все его фото?'))return;
+      fetch('/photo/album_delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'code='+encodeURIComponent(d.getAttribute('data-adel'))+'&_csrf='+encodeURIComponent(CSRF)})
+        .then(function(r){return r.json();}).then(function(j){if(j.ok){var tr=d.closest('tr');if(tr)tr.remove();}else alert(j.err||'Не удалось удалить');}).catch(function(){alert('Ошибка сети');});});
   })();</script>`;
 }
 
@@ -1302,6 +1412,15 @@ body.v2{background:var(--bg)}
 .v2 .sb a.nv.on,.v2 .pnl-nav a.on{background:color-mix(in srgb,var(--accent) 20%,transparent);color:var(--text)}
 .v2 .sb a.nv .ic{width:20px;text-align:center}
 .v2 .nv .ct,.v2 .pnl-nav .ct{margin-left:auto;background:var(--bad);color:#fff;border-radius:999px;font-size:11px;padding:0 7px;line-height:18px;font-weight:700}
+.v2 .sb .nvt{width:100%;background:none;border:0;cursor:pointer;font:inherit;text-align:left;color:var(--muted);font-weight:600;font-size:14px}
+.v2 .nvg .chev{margin-left:auto;transition:transform .15s;font-size:12px}
+.v2 .nvg.open>.nvt .chev{transform:rotate(180deg)}
+.v2 .nvg.open>.nvt{color:var(--text)}
+.v2 .nvt .ct+.chev{margin-left:6px}
+.v2 .nvsub{display:none;flex-direction:column;gap:1px;margin:2px 0 4px 18px;padding-left:8px;border-left:1px solid var(--line)}
+.v2 .nvg.open>.nvsub{display:flex}
+.v2 .nvsub a.nv{padding:6px 10px;font-size:13.5px}
+.v2 .tabs a .ct{margin-left:6px;background:var(--bad);color:#fff;border-radius:999px;font-size:11px;padding:0 6px;line-height:17px;font-weight:700}
 .v2 .sb .sbfoot{margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
 .v2 .mainc{flex:1;min-width:0;display:flex;flex-direction:column}
 .v2 .tb{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:10px;padding:10px 24px;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
@@ -1340,7 +1459,7 @@ body.v2{background:var(--bg)}
 `;
 
 // Меню новой версии. Доски убраны. Фотохостинг у вошедшего — в левом меню.
-function v2NavGroups(level, panelGrant) {
+function v2NavGroups(level, panelGrant, isHavirys) {
   const L = LEVELS[level] || 0;
   const g = [];
   if (SITE.nav && SITE.nav.trim()) {
@@ -1365,11 +1484,16 @@ function v2NavGroups(level, panelGrant) {
     g.push({ title: 'Главное', items: main });
     if (L >= LEVELS.hr || panelGrant) {
       const mng = [];
-      if (L >= LEVELS.hr) mng.push({ href: '/dashboard', label: 'Дашборд', icon: '📊' }, { href: '/tickets', label: 'Тикеты', icon: '🎫' },
-        { href: '/panel?tab=apps', label: 'Заявки', icon: '📥', count: _navCounts.apps },
-        { href: '/panel?tab=queues', label: 'Очереди', icon: '🗂', count: _navCounts.queues },
-        { href: '/panel?tab=contracts_check', label: 'Контракты', icon: '🧾', count: _navCounts.contracts });
-      mng.push({ href: '/panel', label: 'Панель', icon: '🛠' });
+      if (L >= LEVELS.hr) mng.push({ href: '/dashboard', label: 'Дашборд', icon: '📊' }, { href: '/tickets', label: 'Тикеты', icon: '🎫' });
+      if (L >= LEVELS.hr) {
+        // «Панель» раскрывается в левом меню: подпункты = вкладки панели (они же сверху на странице).
+        const fakeAcc = { rank: L, _isHavirys: !!isHavirys };
+        const cnt = { apps: _navCounts.apps, queues: _navCounts.queues, contracts_check: _navCounts.contracts };
+        const children = PANEL_TABS.filter(([id]) => panelCanTab(fakeAcc, null, id)).map(([id, label]) => ({ href: '/panel?tab=' + id, label, count: cnt[id] || 0 }));
+        mng.push({ group: true, href: '/panel', label: 'Панель', icon: '🛠', children, count: (cnt.apps || 0) + (cnt.queues || 0) + (cnt.contracts_check || 0) });
+      } else {
+        mng.push({ href: '/panel', label: 'Панель', icon: '🛠' });
+      }
       if (L >= LEVELS.deputy) mng.push({ href: '/audit', label: 'Аудит', icon: '📜' });
       if (L >= LEVELS.owner) mng.push({ href: '/tools', label: 'Инструменты', icon: '🧰' }, { href: '/health', label: 'Здоровье системы', icon: '💚' });
       g.push({ title: 'Руководство', items: mng });
@@ -1384,19 +1508,28 @@ function v2NavHtml(groups, ctx) {
   // Подсветка: точное совпадение путь+tab важнее совпадения только по пути.
   const params = new URLSearchParams((ctx.search || '').replace(/^\?/, ''));
   const curTab = params.get('tab') || '';
+  const flat = [];
+  for (const gr of groups) for (const it of gr.items) { flat.push(it); if (it.children) flat.push(...it.children); }
   let best = null; let bestScore = 0;
-  for (const gr of groups) for (const it of gr.items) {
+  for (const it of flat) {
     const [p, qsPart] = it.href.split('?');
     if (p !== ctx.path) continue;
     const t = new URLSearchParams(qsPart || '').get('tab') || '';
-    const score = t ? (t === curTab ? 3 : 0) : (curTab ? 1 : 2);
+    const score = it.group ? 0.5 : (t ? (t === curTab ? 3 : 0) : (curTab ? 1 : 2));
     if (score > bestScore) { best = it; bestScore = score; }
   }
-  return groups.map((gr) => `<h4>${esc(gr.title)}</h4>` + gr.items.map((it) =>
-    `<a class="nv${it === best ? ' on' : ''}" href="${esc(it.href)}"><span class="ic">${it.icon || '•'}</span><span>${esc(it.label)}</span>${it.count ? `<span class="ct">${it.count > 99 ? '99+' : it.count}</span>` : ''}</a>`).join('')).join('');
+  const ct = (n) => (n ? `<span class="ct">${n > 99 ? '99+' : n}</span>` : '');
+  const one = (it) => `<a class="nv${it === best ? ' on' : ''}" href="${esc(it.href)}"><span class="ic">${it.icon || '•'}</span><span>${esc(it.label)}</span>${ct(it.count)}</a>`;
+  return groups.map((gr) => `<h4>${esc(gr.title)}</h4>` + gr.items.map((it) => {
+    if (!it.group) return one(it);
+    // Раскрывающийся пункт: открыт, если мы сейчас в этом разделе; по клику раскрывается/сворачивается.
+    const open = ctx.path === '/panel';
+    return `<div class="nvg${open ? ' open' : ''}"><button type="button" class="nv nvt" onclick="this.parentNode.classList.toggle('open')"><span class="ic">${it.icon}</span><span>${esc(it.label)}</span>${ct(it.count)}<span class="chev">▾</span></button>
+      <div class="nvsub">${it.children.map((c) => `<a class="nv${c === best ? ' on' : ''}" href="${esc(c.href)}"><span>${esc(c.label)}</span>${ct(c.count)}</a>`).join('')}</div></div>`;
+  }).join('')).join('');
 }
 
-function layoutV2(opts) {
+function layout(opts) {
   const ctx = skinCtx();
   const override = themeOverrideCss();
   const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())}`;
@@ -1412,7 +1545,7 @@ function layoutV2(opts) {
   let sidebar = '';
   let header;
   if (user) {
-    const groups = v2NavGroups(level, opts.panelGrant);
+    const groups = v2NavGroups(level, opts.panelGrant, user.id === OWNER_ID);
     const csrf = (() => { try { return csrfField(user); } catch (_) { return ''; } })();
     sidebar = `<aside class="sb" id="sb">${brand}${v2NavHtml(groups, ctx)}
       <div class="sbfoot"><div><b>${esc(user.username || user.id)}</b></div><div>${esc(level)}</div>
@@ -1437,12 +1570,11 @@ function layoutV2(opts) {
   }
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-${ctx.prefix ? '<meta name="robots" content="noindex,nofollow">' : ''}
 <title>${esc(opts.title)}</title>
 <link rel="manifest" href="/manifest.webmanifest">
 ${favicon ? `<link rel="icon" href="${favicon}">` : ''}
 <meta name="theme-color" content="${(SITE.color && SITE.color.bg) || '#0f1013'}">
-<style>${STYLE}${override}${V2_STYLE}</style>${customCss}<script>window.FC_PREFIX=${JSON.stringify(ctx.prefix || '')};</script><script>${CLIENT_SCRIPT}</script></head><body class="v2">
+<style>${STYLE}${override}${V2_STYLE}</style>${customCss}<script>${CLIENT_SCRIPT}</script></head><body class="v2">
 <div class="shell">
 ${sidebar}
 <div class="mainc">
@@ -1458,32 +1590,6 @@ ${bannerHtml()}
 </body></html>`;
 }
 
-function layout(opts) {
-  if (skinCtx().skin === 'v2') return layoutV2(opts);
-  const override = themeOverrideCss();
-  const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())} · сайт работает на том же сервере, что и Discord-бот`;
-  const favicon = SITE.logo && /^(https?:|data:image\/)/.test(SITE.logo) ? esc(SITE.logo) : '';
-  const customCss = SITE.css ? `<style>${String(SITE.css)
-    .replace(/@import\b[^;]*;?/gi, '')
-    .replace(/url\(\s*(['"]?)\s*javascript:/gi, 'url($1')
-    .replace(/expression\s*\(/gi, 'x(')
-    .replace(/<\//g, '<\\/').slice(0, 20000)}</style>` : '';
-  return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(opts.title)}</title>
-<link rel="manifest" href="/manifest.webmanifest">
-${favicon ? `<link rel="icon" href="${favicon}">` : ''}
-<meta name="theme-color" content="${(SITE.color && SITE.color.bg) || '#0f1013'}">
-<style>${STYLE}${override}</style>${customCss}<script>${CLIENT_SCRIPT}</script></head><body>
-${topbar(opts.user, opts.level || 'guest', opts.notif || 0, opts.panelGrant)}
-${opts.user && opts.user._viewAsLevel ? `<div style="background:var(--warn);color:#1a1a1a;text-align:center;padding:7px 12px;font-weight:700;font-size:13.5px">👁 Вы смотрите сайт как «${esc(VIEW_AS_LABELS[opts.user._viewAsLevel] || opts.user._viewAsLevel)}» · <a href="/viewas?level=" style="color:#1a1a1a;text-decoration:underline">вернуться к своему виду</a></div>` : ''}
-${bannerHtml()}
-<div class="wrap${opts.wide ? ' wide' : ''}">${opts.body}
-<div class="foot">${foot}</div>
-</div>
-<button id="totop" type="button" title="Наверх" aria-label="Наверх">↑</button>
-</body></html>`;
-}
 
 // ---------- Данные ----------
 async function orgStats() {
@@ -2072,6 +2178,7 @@ async function meBody(client, user) {
         <div class="muted" style="margin-top:6px">Уровень доступа: ${esc(acc.level)}. Роли на сервере: ${roleTags}</div>
       </div>
       <a class="btn" href="/apply">Подать заявку на вступление</a>
+      ${await meAlbumsCard(user)}
       ${loginsCard}`;
   }
 
@@ -2139,6 +2246,7 @@ async function meBody(client, user) {
       </form>
     </div>
     ${ticketCard}
+    ${await meAlbumsCard(user)}
     ${inviteCard}
     ${await myGiveawaysCard(did)}
     ${await memberActionsExtra(client, user, p, passports, acc)}
@@ -2175,6 +2283,7 @@ const PANEL_TABS = [
   ['data', 'База данных'],
   ['grants', 'Доступы'],
   ['accounts', 'Аккаунты'],
+  ['albums', 'Фотоальбомы'],
 ];
 // Разделы, которые havirys может выдавать точечно (без инфраструктурных).
 const GRANTABLE_TABS = new Set([
@@ -2242,7 +2351,7 @@ function panelCanTab(acc, grants, id) {
     perms: isHavirys, admin: isHavirys, data: acc.rank >= LEVELS.owner,
     forms: acc.rank >= LEVELS.hr,
     role_check: acc.rank >= LEVELS.deputy, hr_payouts: acc.rank >= LEVELS.owner,
-    landing: isHavirys, pages: isHavirys, grants: isHavirys, accounts: isHavirys,
+    landing: isHavirys, pages: isHavirys, grants: isHavirys, accounts: isHavirys, albums: acc.rank >= LEVELS.owner,
   };
   if (grants && grants.has(id) && GRANTABLE_TABS.has(id)) return true;
   if (acc.rank < LEVELS.hr) return false; // без ранга HR — только выданные разделы
@@ -2258,9 +2367,6 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   const canOwner = acc.rank >= LEVELS.owner;
   const isHavirys = acc._isHavirys;
 
-  const tabsHtml = PANEL_TABS
-    .filter(([id]) => canTab(id))
-    .map(([id, label]) => `<a class="${id === tab ? 'on' : ''}" href="/panel?tab=${id}">${esc(label)}</a>`).join('');
 
   let body = '';
   if (!canTab(tab)) body = '<div class="card">Раздел недоступен.</div>';
@@ -2288,6 +2394,7 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
   else if (tab === 'pages') body = await panelPages(client, user);
   else if (tab === 'grants') body = await panelGrants(client, user, sp);
   else if (tab === 'accounts') body = await panelAccounts(client, user, pageNum, sp);
+  else if (tab === 'albums') body = await panelAlbums(client, user, pageNum, sp);
   else if (tab === 'data') body = await panelData(client, qtable || 'participants', pageNum, user, sp);
   else body = '<div class="card">Раздел недоступен.</div>';
 
@@ -2300,34 +2407,21 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
     canOwner ? '<a href="/health">💚 Здоровье системы</a>' : '',
   ].filter(Boolean).join(' · ');
   const extraLinksHtml = extraLinks ? `<div class="mini" style="margin:4px 0 10px">${extraLinks}</div>` : '';
-  if (skinCtx().skin === 'v2') {
-    // Новая версия: разделы панели сгруппированы по смыслу, у очередей — счётчики.
+  {
+    // Вкладки сверху со счётчиками; те же разделы дублируются подпунктами в левом меню («Панель»).
     const pc = async (sql) => { const r = await db.get(sql).catch(() => null); return r ? r.c : 0; };
     const counts = {
       apps: _navCounts.apps, contracts_check: _navCounts.contracts, queues: _navCounts.queues,
       forms: await pc("SELECT COUNT(*) c FROM form_submissions WHERE status='pending'"),
     };
-    const GROUPS = [
-      ['Обзор', ['overview', 'sla']],
-      ['Заявки и проверка', ['apps', 'queues', 'forms', 'contracts_check', 'role_check']],
-      ['Люди', ['members', 'contracts', 'invites', 'hr_payouts', 'blacklist', 'accounts']],
-      ['Контент и события', ['giveaways', 'texts', 'faq_manage', 'reasons', 'broadcast', 'landing', 'pages']],
-      ['Система', ['settings', 'perms', 'admin', 'grants', 'data']],
-    ];
-    const label = Object.fromEntries(PANEL_TABS);
-    const navHtml = GROUPS.map(([title, ids]) => {
-      const links = ids.filter((id) => label[id] && canTab(id)).map((id) =>
-        `<a class="${id === tab ? 'on' : ''}" href="/panel?tab=${id}">${esc(label[id])}${counts[id] ? `<span class="ct">${counts[id] > 99 ? '99+' : counts[id]}</span>` : ''}</a>`).join('');
-      return links ? `<h4>${esc(title)}</h4>${links}` : '';
-    }).join('');
-    return `<div class="pnl"><nav class="pnl-nav">${navHtml}${extraLinksHtml ? `<h4>Ещё</h4><div class="mini" style="padding:2px 10px">${extraLinks.replace(/ · /g, '<br>')}</div>` : ''}</nav>
-      <div class="pnl-body"><h1>${esc(label[tab] || 'Панель управления')}</h1>${grantNote}${body}</div></div>`;
-  }
-  return `<h1>Панель управления</h1>
+    const tabsCounted = PANEL_TABS.filter(([id]) => canTab(id)).map(([id, label]) =>
+      `<a class="${id === tab ? 'on' : ''}" href="/panel?tab=${id}">${esc(label)}${counts[id] ? `<span class="ct">${counts[id] > 99 ? '99+' : counts[id]}</span>` : ''}</a>`).join('');
+    return `<h1>Панель управления</h1>
     ${grantNote}
-    <div class="tabs">${tabsHtml}</div>
+    <div class="tabs">${tabsCounted}</div>
     ${extraLinksHtml}
     ${body}`;
+  }
 }
 
 async function panelOverview() {
@@ -2444,6 +2538,77 @@ async function panelInvites(client) {
     <div class="tablewrap"><table><tr><th>#</th><th>Discord</th><th>Приглашений</th></tr>${rows(all) || '<tr><td colspan="3">—</td></tr>'}</table></div></div>`;
 }
 
+// ---------- Выбор роли/канала «как в Discord» вместо ID ----------
+const PICKER_CSS = `
+.pkf{margin:8px 0}.pkf .pkl{display:block;font-size:13.5px;color:var(--muted);margin-bottom:4px}
+.pk{position:relative;display:inline-block;max-width:100%}
+.pk-box{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}
+.pk-chip{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:3px 4px 3px 9px;font-size:13.5px}
+.pk-dot{width:11px;height:11px;border-radius:50%;display:inline-block}
+.pk-x{background:none;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:6px}
+.pk-x:hover{background:var(--bad);color:#fff}
+.pk-add{background:var(--panel2);border:1px dashed var(--line);color:var(--text);border-radius:8px;padding:5px 12px;font-size:13.5px;cursor:pointer}
+.pk-add:hover{border-color:var(--accent)}
+.pk-pop{position:absolute;z-index:80;top:100%;left:0;margin-top:4px;width:min(300px,86vw);background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 34px rgba(0,0,0,.45);padding:8px}
+.pk-pop .pk-s{width:100%;margin-bottom:6px}
+.pk-l{max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:1px}
+.pk-l button{display:flex;align-items:center;gap:8px;text-align:left;background:none;border:0;color:var(--text);padding:6px 8px;border-radius:8px;cursor:pointer;font-size:14px}
+.pk-l button:hover{background:var(--panel2)}
+`;
+const PICKER_JS = `
+(function(){
+  var D=window.FC_PICK||{roles:[],channels:[]};
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function list(kind){return kind==='role'?D.roles:D.channels;}
+  function find(kind,id){var l=list(kind);for(var i=0;i<l.length;i++)if(l[i].id===id)return l[i];return null;}
+  function dot(kind,it){return kind==='role'?'<i class="pk-dot" style="background:'+esc((it&&it.color)||'#99aab5')+'"></i>':'<span style="color:var(--muted)">#</span>';}
+  function render(el){
+    var kind=el.getAttribute('data-kind'),inp=el.querySelector('input[type=hidden]'),box=el.querySelector('.pk-box'),v=inp.value;
+    if(v){var it=find(kind,v);box.innerHTML='<span class="pk-chip">'+dot(kind,it)+'<span>'+esc(it?it.name:v)+'</span><button type="button" class="pk-x" title="Убрать">✕</button></span>';}
+    else{box.innerHTML='<button type="button" class="pk-add">＋ '+(kind==='role'?'Выбрать роль':'Выбрать канал')+'</button>';}
+  }
+  function closePop(){var o=document.querySelector('.pk-pop');if(o)o.remove();}
+  function openPop(el){
+    closePop();
+    var kind=el.getAttribute('data-kind'),inp=el.querySelector('input[type=hidden]'),pop=document.createElement('div');
+    pop.className='pk-pop';pop.innerHTML='<input class="pk-s" placeholder="Поиск…"><div class="pk-l"></div>';
+    el.appendChild(pop);
+    var l=pop.querySelector('.pk-l'),s=pop.querySelector('.pk-s');
+    function fill(q){
+      q=(q||'').toLowerCase();var out='',n=0,arr=list(kind);
+      for(var i=0;i<arr.length;i++){var it=arr[i];if(q&&it.name.toLowerCase().indexOf(q)<0)continue;if(++n>120)break;
+        out+='<button type="button" data-id="'+esc(it.id)+'">'+dot(kind,it)+'<span>'+esc(it.name)+'</span></button>';}
+      l.innerHTML=out||'<div class="mini" style="padding:8px">Ничего не найдено</div>';
+    }
+    fill('');s.addEventListener('input',function(){fill(s.value);});setTimeout(function(){s.focus();},0);
+    l.addEventListener('click',function(e){var b=e.target.closest('button[data-id]');if(!b)return;inp.value=b.getAttribute('data-id');render(el);closePop();inp.dispatchEvent(new Event('input',{bubbles:true}));});
+  }
+  document.addEventListener('click',function(e){
+    var el=e.target.closest&&e.target.closest('.pk');
+    if(e.target.closest&&e.target.closest('.pk-x')&&el){el.querySelector('input[type=hidden]').value='';render(el);return;}
+    if(e.target.closest&&e.target.closest('.pk-add')&&el){openPop(el);return;}
+    if(!(e.target.closest&&e.target.closest('.pk-pop')))closePop();
+  });
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')closePop();});
+  function refreshAll(){var a=document.querySelectorAll('.pk');for(var i=0;i<a.length;i++)render(a[i]);}
+  window.fcPickRefresh=refreshAll;
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',refreshAll);else refreshAll();
+  window.addEventListener('load',refreshAll);
+})();
+`;
+function pickerAssets(client) {
+  const g = guildOf(client);
+  const roles = g ? [...g.roles.cache.values()].filter((r) => r.id !== g.id).sort((a, b) => b.position - a.position)
+    .map((r) => ({ id: r.id, name: r.name, color: r.hexColor && r.hexColor !== '#000000' ? r.hexColor : '' })) : [];
+  const channels = g ? [...g.channels.cache.values()].filter((c) => c.type === 0 || c.type === 5).sort((a, b) => a.rawPosition - b.rawPosition)
+    .map((c) => ({ id: c.id, name: c.name })) : [];
+  return '<style>' + PICKER_CSS + '</style><script>window.FC_PICK=' + JSON.stringify({ roles, channels }).replace(/</g, '\\u003c') + ';' + PICKER_JS + '</script>';
+}
+// Поле выбора роли/канала: хранит ID в скрытом поле, показывает «чип» с названием и крестиком, плюс — выбрать.
+function pickField(kind, name, value, label) {
+  return `<div class="pkf"><span class="pkl">${esc(label)}</span><div class="pk" data-kind="${kind}"><input type="hidden" name="${esc(name)}" value="${esc(value || '')}"><span class="pk-box"></span></div></div>`;
+}
+
 async function panelGiveaways(client, acc, user) {
   let manage = '';
   if (user && (await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) {
@@ -2469,9 +2634,9 @@ async function panelGiveaways(client, acc, user) {
               <label>Приз<input name="prize" required maxlength="200" value="${esc(g.prize)}"></label>
               <label>Число победителей<input name="winners" type="number" min="1" max="50" value="${g.winners_count}" required></label>
               <label>Продлить на (30m, 1h, 2d; пусто — не менять)<input name="extend" maxlength="10"></label>
-              <label>ID обязательной роли (пусто — убрать условие)<input name="role_id" pattern="[0-9]*" maxlength="25" value="${esc(g.required_role_id || '')}"></label>
-              <label>ID минимальной роли (пусто — убрать)<input name="min_role_id" pattern="[0-9]*" maxlength="25" value="${esc(g.min_role_id || '')}"></label>
-              <label>ID запрещённой роли (пусто — убрать)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25" value="${esc(g.blocked_role_id || '')}"></label>
+              ${pickField('role', 'role_id', g.required_role_id || '', "Обязательная роль (необязательно)")}
+              ${pickField('role', 'min_role_id', g.min_role_id || '', "Минимальная роль — этот ранг и выше (необязательно)")}
+              ${pickField('role', 'blocked_role_id', g.blocked_role_id || '', "Запрещённая роль — её обладатели не участвуют, пока роль не снимут")}
               <label>Минимум участников (пусто — без минимума)<input name="min_participants" type="number" min="1" max="1000" value="${g.min_participants || ''}"></label>
               <label>Мин. контрактов за неделю (пусто — без условия)<input name="min_contracts_week" type="number" min="1" max="99" value="${g.min_contracts_week || ''}"></label>
               <label class="chk"><input type="checkbox" name="weight_by_contracts" value="1" ${g.weight_by_contracts ? 'checked' : ''}><span>Бонус-билеты за активность</span></label>
@@ -2498,7 +2663,8 @@ async function panelGiveaways(client, acc, user) {
       <td><form method="POST" action="/panel/giveaway/schedule_cancel" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${s.id}"><button class="btn ghost sm" type="submit">отменить</button></form></td></tr>`).join('');
     const WD = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
     const recur = await db.all("SELECT * FROM giveaway_recurring_rules WHERE status IN ('active','paused') ORDER BY id DESC").catch(() => []);
-    const recurRows = recur.map((r) => `<tr><td>${esc(r.prize)}</td><td>${WD[r.weekday] || '?'}</td><td>${r.winners_count}</td>
+    const recurCond = (r) => [r.required_role_id && `только ${roleTag(client, r.required_role_id)}`, r.blocked_role_id && `⛔ не участвует ${roleTag(client, r.blocked_role_id)}`, r.min_participants && `минимум ${r.min_participants} уч.`].filter(Boolean).join('<br>') || '<span class="mini">без условий</span>';
+    const recurRows = recur.map((r) => `<tr><td>${esc(r.prize)}</td><td>${WD[r.weekday] || '?'} · 12:00 МСК</td><td>${r.winners_count}</td><td>${esc(giveaways.formatDuration(r.duration_ms))}</td><td class="mini">${r.channel_id ? `<code>${esc(r.channel_id)}</code>` : '—'}</td><td class="mini">${recurCond(r)}</td>
       <td><span class="badge ${r.status === 'active' ? 'ok' : 'warn'}">${r.status === 'active' ? 'активно' : 'на паузе'}</span></td>
       <td style="white-space:nowrap">
         <form method="POST" action="/panel/giveaway/recur_toggle" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" type="submit">${r.status === 'active' ? 'пауза' : 'возобновить'}</button></form>
@@ -2509,9 +2675,9 @@ async function panelGiveaways(client, acc, user) {
             <label>Число победителей<input name="winners" type="number" min="1" max="50" value="${r.winners_count}" required></label>
             <label>Длительность каждого запуска (30m, 1h, 2d)<input name="duration" required maxlength="10" value="${esc(giveaways.formatDuration(r.duration_ms))}"></label>
             <label>День недели<select name="weekday">${WD.map((n, i) => `<option value="${i}" ${i === r.weekday ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
-            <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25" value="${esc(r.channel_id)}"></label>
-            <label>ID обязательной роли (пусто — убрать)<input name="role_id" pattern="[0-9]*" maxlength="25" value="${esc(r.required_role_id || '')}"></label>
-            <label>ID запрещённой роли (пусто — убрать)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25" value="${esc(r.blocked_role_id || '')}"></label>
+            ${pickField('channel', 'channel_id', r.channel_id, "Канал")}
+            ${pickField('role', 'role_id', r.required_role_id || '', "Обязательная роль (необязательно)")}
+            ${pickField('role', 'blocked_role_id', r.blocked_role_id || '', "Запрещённая роль — её обладатели не участвуют, пока роль не снимут")}
             <label>Минимум участников (пусто — без минимума)<input name="min_participants" type="number" min="1" max="1000" value="${r.min_participants || ''}"></label>
             <button class="btn sm" type="submit">Сохранить правило</button>
           </form>
@@ -2523,14 +2689,14 @@ async function panelGiveaways(client, acc, user) {
         <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
         <label>Длительность каждого запуска (30m, 1h, 2d)<input name="duration" required maxlength="10"></label>
         <label>День недели<select name="weekday">${WD.map((n, i) => `<option value="${i}">${n}</option>`).join('')}</select></label>
-        <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
-        <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID запрещённой роли (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        ${pickField('channel', 'channel_id', '', "Канал")}
+        ${pickField('role', 'role_id', '', "Обязательная роль (необязательно)")}
+        ${pickField('role', 'blocked_role_id', '', "Запрещённая роль — её обладатели не участвуют, пока роль не снимут")}
         <label>Минимум участников (необязательно)<input name="min_participants" type="number" min="1" max="1000"></label>
         <p class="mini">Повторяющиеся розыгрыши запускаются в 12:00 МСК.</p>
         <button class="btn" type="submit">Создать правило</button>
       </form>
-      <div class="tablewrap" style="margin-top:10px"><table><tr><th>Приз</th><th>День</th><th>Побед.</th><th>Статус</th><th></th></tr>${recurRows || '<tr><td colspan="5">—</td></tr>'}</table></div>
+      <div class="tablewrap" style="margin-top:10px"><table><tr><th>Приз</th><th>Когда запускается</th><th>Побед.</th><th>Длится</th><th>Канал</th><th>Условия</th><th>Статус</th><th></th></tr>${recurRows || '<tr><td colspan="8">—</td></tr>'}</table></div>
     </div>`;
     const tpls = await db.all('SELECT * FROM giveaway_templates ORDER BY name').catch(() => []);
     const tplRows = tpls.map((t) => `<tr>
@@ -2546,26 +2712,27 @@ async function panelGiveaways(client, acc, user) {
         <label>Приз<input name="prize" required maxlength="200"></label>
         <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
         <label>Длительность (30m, 1h, 2d)<input name="duration" maxlength="10"></label>
-        <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID минимальной роли (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID запрещённой роли — её обладатели не участвуют, пока роль не снимут (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        ${pickField('role', 'role_id', '', "Обязательная роль (необязательно)")}
+        ${pickField('role', 'min_role_id', '', "Минимальная роль — этот ранг и выше (необязательно)")}
+        ${pickField('role', 'blocked_role_id', '', "Запрещённая роль — её обладатели не участвуют, пока роль не снимут")}
         <label>Минимум участников (если меньше — розыгрыш отменится)<input name="min_participants" type="number" min="1" max="1000"></label>
         <label>Призовые места (необязательно)<textarea name="prize_tiers" rows="2" maxlength="800"></textarea></label>
         <button class="btn sm" type="submit">Сохранить шаблон</button>
       </form>
-      <script>function fcGwTpl(t){var f=document.getElementById('gwCreateForm');if(!f)return;for(var k in t){if(f[k]!==undefined)f[k].value=t[k];}f.scrollIntoView({behavior:'smooth'});}</script>
+      <script>function fcGwTpl(t){var f=document.getElementById('gwCreateForm');if(!f)return;for(var k in t){if(f[k]!==undefined)f[k].value=t[k];}if(window.fcPickRefresh)window.fcPickRefresh();f.scrollIntoView({behavior:'smooth'});}</script>
     </div>`;
     manage = `
+    ${pickerAssets(client)}
     <div class="card"><h2>Создать розыгрыш</h2>
       <form method="POST" action="/panel/giveaway/create" class="form" id="gwCreateForm">
         ${csrfField(user)}
         <label>Приз<input name="prize" required maxlength="200"></label>
         <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
         <label>Длительность (например 30m, 1h, 2d, 1w)<input name="duration" required maxlength="10"></label>
-        <label>ID канала для публикации<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
-        <label>ID обязательной роли — только эта роль (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID минимальной роли — этот ранг и ВЫШЕ (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID запрещённой роли — её обладатели не участвуют, пока роль не снимут (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        ${pickField('channel', 'channel_id', '', "Канал")}
+        ${pickField('role', 'role_id', '', "Обязательная роль (необязательно)")}
+        ${pickField('role', 'min_role_id', '', "Минимальная роль — этот ранг и выше (необязательно)")}
+        ${pickField('role', 'blocked_role_id', '', "Запрещённая роль — её обладатели не участвуют, пока роль не снимут")}
         <label>Минимум участников (если меньше — розыгрыш отменится)<input name="min_participants" type="number" min="1" max="1000"></label>
         <label>Мин. выполненных контрактов за эту неделю (необязательно)<input name="min_contracts_week" type="number" min="0" max="99"></label>
         <label class="chk"><input type="checkbox" name="weight_by_contracts" value="1"><span>Бонус-билеты за активность: шанс победы растёт с числом контрактов за неделю (1 + контракты, максимум ×10)</span></label>
@@ -2584,10 +2751,10 @@ async function panelGiveaways(client, acc, user) {
         <label>Число победителей<input name="winners" type="number" min="1" max="50" value="1" required></label>
         <label>Длительность розыгрыша (30m, 1h, 2d)<input name="duration" required maxlength="10"></label>
         <label>Старт: ДД.ММ.ГГГГ или дата-время<input name="start_at" required maxlength="30" placeholder="2026-09-01T18:00 или 01.09.2026"></label>
-        <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
-        <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID минимальной роли (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
-        <label>ID запрещённой роли — её обладатели не участвуют, пока роль не снимут (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        ${pickField('channel', 'channel_id', '', "Канал")}
+        ${pickField('role', 'role_id', '', "Обязательная роль (необязательно)")}
+        ${pickField('role', 'min_role_id', '', "Минимальная роль — этот ранг и выше (необязательно)")}
+        ${pickField('role', 'blocked_role_id', '', "Запрещённая роль — её обладатели не участвуют, пока роль не снимут")}
         <label>Минимум участников (если меньше — розыгрыш отменится)<input name="min_participants" type="number" min="1" max="1000"></label>
         <label>Призовые места (необязательно) — строка «место | приз»<textarea name="prize_tiers" rows="3" maxlength="800" placeholder="1 | Главный приз&#10;2-3 | Утешительный приз"></textarea></label>
         <button class="btn" type="submit">Запланировать</button>
@@ -3526,7 +3693,7 @@ async function peopleBody(client, acc, query, pageNum, user) {
   const totalRow = await db.get(`SELECT COUNT(*) c FROM participants ${where}`, params);
   const total = totalRow ? totalRow.c : 0;
   const rows = await db.all(
-    `SELECT discord_id, name, static, role_id, joined_at FROM participants ${where} ORDER BY name LIMIT ? OFFSET ?`,
+    `SELECT discord_id, name, static, role_id, joined_at, hr_position FROM participants ${where} ORDER BY name LIMIT ? OFFSET ?`,
     [...params, PAGE_SIZE, pageNum * PAGE_SIZE],
   );
   const bulk = acc.rank >= LEVELS.deputy && user;
@@ -3535,7 +3702,7 @@ async function peopleBody(client, acc, query, pageNum, user) {
     ${bulk ? `<td class="selcol"><input type="checkbox" class="pchk" name="ids" value="${esc(p.discord_id)}"></td>` : ''}
     <td>${onlineDot(client, p.discord_id)}<a href="/u/${esc(p.discord_id)}">${esc(p.name)}</a></td>
     <td>№ ${esc(p.static)}</td>
-    <td>${esc(roleName(client, p.role_id))}</td>
+    <td>${esc(roleName(client, p.role_id))}${p.hr_position ? ' <span class="badge ok" title="Должность поверх ранга">HR</span>' : ''}</td>
     <td class="muted">${fmt(p.joined_at)}</td>
   </tr>`).join('');
   const head = `${bulk ? '<th class="selcol"><input type="checkbox" id="pchkAll" title="Выбрать всех на странице"></th>' : ''}<th>Имя Фамилия</th><th>Паспорт</th><th>Ранг</th><th>Вступил</th>`;
@@ -3691,11 +3858,11 @@ async function profileBody(client, viewer, acc, targetId) {
         <label>Имя Фамилия<input name="name" required maxlength="60"></label>
         <label>№ Паспорта<input name="static" required pattern="[0-9]+" maxlength="12"></label>
         <button class="btn sm" type="submit">Добавить</button></form>`);
-      const isHrNow = passports.some((pp) => pp.role_id === config.ROLE_HR);
+      const isHrNow = !!p.hr_position || passports.some((pp) => pp.role_id === config.ROLE_HR);
       blocks.push(`<form method="POST" action="/u/hr" class="form" onsubmit="return confirm('${isHrNow ? 'Снять с роли HR-Менеджера?' : 'Назначить HR-Менеджером?'}')">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
         <h3>HR-Менеджер</h3>
         <input type="hidden" name="make" value="${isHrNow ? '0' : '1'}">
-        <p class="mini">${isHrNow ? 'Сейчас — HR-Менеджер.' : 'Сейчас — не HR-Менеджер.'} Меняется ранг паспорта и роль в Discord.</p>
+        <p class="mini">${isHrNow ? 'Сейчас — HR-Менеджер.' : 'Сейчас — не HR-Менеджер.'} Это должность поверх основного ранга: ранг не меняется, ставится/снимается только роль HR-Менеджера.</p>
         <button class="btn sm" ${isHrNow ? 'style="background:var(--bad)"' : ''} type="submit">${isHrNow ? 'Снять с HR' : 'Назначить HR-Менеджером'}</button></form>`);
       if (passports.length > 1) {
         const extraOpts = passports.slice(1).map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('');
@@ -5148,35 +5315,14 @@ async function panelAdmin(client, user) {
     }).join('') || '<tr><td colspan="3">—</td></tr>';
   }
   return `
-  <div class="card" style="border-color:var(--accent)">
-    <h2>🆕 Версии сайта</h2>
-    ${(() => {
-      const sg = skinSegments();
-      const v2on = SITE.v2_enabled !== '0';
-      const mainV2 = SITE.main_version === 'v2';
-      const base = baseUrl();
-      return `<p class="mini">Сейчас основная: <b>${mainV2 ? 'новая версия' : 'старая версия'}</b>.<br>
-        Новая версия (${v2on ? '<span style="color:var(--ok)">включена</span>' : '<span style="color:var(--warn)">выключена</span>'}) открывается только по скрытой ссылке — нигде на сайте её нет: <code>${esc(base)}/${esc(sg.v2)}</code><br>
-        ${mainV2 ? `Старая версия теперь доступна по <code>${esc(base)}/${esc(sg.v1)}</code> (запомните это — через неё можно всё вернуть).` : 'Данные у обеих версий общие: заявки, участники, контракты — всё одно и то же, отличается только оформление.'}</p>
-      <form method="POST" action="/admin/versions" class="form">${csrfField(user)}
-        <label>Скрытый путь новой версии (латиница, цифры, - и _)<input name="v2_path" value="${esc(sg.v2)}" maxlength="40" pattern="[A-Za-z0-9_-]+"></label>
-        <div class="bar" style="flex-wrap:wrap;gap:6px">
-          <button class="btn sm" name="act" value="save_path" type="submit">Сохранить путь</button>
-          ${mainV2
-            ? '<button class="btn sm" style="background:var(--warn);color:#111!important" name="act" value="main_v1" type="submit" onclick="return confirm(\'Вернуть старую версию основной?\')">↩ Вернуть старую основной</button>'
-            : '<button class="btn sm" name="act" value="main_v2" type="submit" onclick="return confirm(\'Сделать новую версию основной для всех?\')">⭐ Сделать новую основной</button>'}
-          ${v2on
-            ? '<button class="btn ghost sm" name="act" value="v2_off" type="submit" onclick="return confirm(\'Отключить новую версию? Её ссылка перестанет открываться.\')">Отключить новую</button>'
-            : '<button class="btn ghost sm" name="act" value="v2_on" type="submit">Включить новую</button>'}
-        </div>
-      </form>`;
-    })()}
-  </div>
   <div class="card">
-    <h2>📷 Фотообменник</h2>
+    <h2>📷 Фотообменник — лимиты и сроки</h2>
     <form method="POST" action="/admin/versions" class="form">${csrfField(user)}
       <label>Хранение без входа, дней<input name="ttl_guest" type="number" min="1" max="3650" value="${photoMaxDays(false)}"></label>
       <label>Хранение после входа, дней<input name="ttl_user" type="number" min="1" max="3650" value="${photoMaxDays(true)}"></label>
+      <label>Максимум фото в альбоме (вошедший)<input name="album_max" type="number" min="1" max="500" value="${albumMaxPhotos(true)}"></label>
+      <label>Максимум фото в альбоме (без входа)<input name="album_max_guest" type="number" min="1" max="500" value="${albumMaxPhotos(false)}"></label>
+      <label>Всего фото на одного участника (0 — без ограничения)<input name="user_total" type="number" min="0" max="100000" value="${userMaxPhotos()}"></label>
       <label class="chk"><input type="checkbox" name="guests" value="1" ${SITE.photo_guests === '0' ? '' : 'checked'}><span>Разрешить загрузку без входа</span></label>
       <button class="btn sm" name="act" value="photo_save" type="submit">Сохранить</button>
     </form>
@@ -5339,6 +5485,33 @@ async function panelAdmin(client, user) {
 }
 
 // ---------- Здоровье системы (Владелец) ----------
+// Размер папки рекурсивно (без симлинков). Результат кэшируется на 5 минут: обход диска не дешёвый.
+const _dirSizeCache = new Map();
+function dirSizeSync(dir, skip = []) {
+  const key = dir + '|' + skip.join(',');
+  const hit = _dirSizeCache.get(key);
+  if (hit && Date.now() - hit.at < 300000) return hit.v;
+  let total = 0; let files = 0; let budget = 300000;
+  const stack = [dir];
+  while (stack.length && budget > 0) {
+    const d = stack.pop();
+    let ents;
+    try { ents = _fsMod.readdirSync(d, { withFileTypes: true }); } catch (_) { continue; }
+    for (const e of ents) {
+      budget--;
+      const full = _pathMod.join(d, e.name);
+      if (skip.some((sk) => full === sk)) continue;
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) stack.push(full);
+      else { try { total += _fsMod.statSync(full).size; files++; } catch (_) {} }
+    }
+  }
+  const v = { bytes: total, files };
+  _dirSizeCache.set(key, { at: Date.now(), v });
+  return v;
+}
+function fmtMb(n) { return n >= 1073741824 ? (n / 1073741824).toFixed(2) + ' ГБ' : (n / 1048576).toFixed(n < 10485760 ? 2 : 1) + ' МБ'; }
+
 async function healthBody(client) {
   const fs = require('fs');
   const c = (sql, p = []) => db.get(sql, p).then((r) => (r ? r.c : 0));
@@ -5391,6 +5564,33 @@ async function healthBody(client) {
     const mc = require('path').join(db.dataDir || 'data', 'media_cache');
     for (const f of fs.readdirSync(mc)) { try { cacheBytes += fs.statSync(require('path').join(mc, f)).size; cacheFiles++; } catch (_) {} }
   } catch (_) {}
+  // «Сколько весит проект»: код, зависимости, данные (БД, скрины, фото, бэкапы, кэш) — по папкам.
+  const codeDir = __dirname;
+  const dataRoot = db.dataDir || _pathMod.join(codeDir, 'data');
+  const nm = _pathMod.join(codeDir, 'node_modules');
+  const dataInsideCode = dataRoot === codeDir || dataRoot.startsWith(codeDir + _pathMod.sep);
+  const codeOnly = dirSizeSync(codeDir, [nm, ...(dataInsideCode && dataRoot !== codeDir ? [dataRoot] : [])]);
+  const depsSize = dirSizeSync(nm);
+  const dataSize = dataRoot === codeDir ? { bytes: 0, files: 0 } : dirSizeSync(dataRoot);
+  const part = (sub) => dirSizeSync(_pathMod.join(dataRoot, sub));
+  const photosSz = part('uploads/photos');
+  const uploadsAll = part('uploads');
+  const backupsSz = part('backups');
+  const mediaSz = part('media_cache');
+  const grand = codeOnly.bytes + depsSize.bytes + dataSize.bytes;
+  const weightRows = [
+    ['Код проекта (js-файлы, без зависимостей)', codeOnly],
+    ['Зависимости (node_modules)', depsSize],
+    ['Данные целиком (папка с БД)', dataSize],
+    ['— в т.ч. база данных', { bytes: dbSize, files: 1 }],
+    ['— в т.ч. скрины и файлы сайта', { bytes: Math.max(0, uploadsAll.bytes - photosSz.bytes), files: Math.max(0, uploadsAll.files - photosSz.files) }],
+    ['— в т.ч. фотообменник', photosSz],
+    ['— в т.ч. резервные копии БД', backupsSz],
+    ['— в т.ч. кэш вложений Discord', mediaSz],
+  ].map(([n, v]) => '<tr><td>' + esc(n) + '</td><td>' + esc(fmtMb(v.bytes)) + '</td><td class="muted">' + v.files + '</td></tr>').join('');
+  const weightCard = '<div class="card"><h2>Сколько весит проект: ' + esc(fmtMb(grand)) + '</h2>' +
+    '<div class="tablewrap"><table><tr><th>Часть</th><th>Размер</th><th>Файлов</th></tr>' + weightRows + '</table></div>' +
+    '<p class="mini">Считается обходом папок, обновляется раз в 5 минут. Папка данных: <code>' + esc(dataRoot) + '</code>. Если место на диске заканчивается — смотрите «резервные копии» и «фотообменник».</p></div>';
   const err24 = _errLog.filter((e) => e.at >= _since24());
   const slow24 = _slowLog.filter((e) => e.at >= _since24());
   const tile = (n, l) => `<div class="tile"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`;
@@ -5410,6 +5610,7 @@ async function healthBody(client) {
     ${tile(err24.length, 'ошибок 5xx за 24ч')}
     ${tile(slow24.length, 'медленных запросов (>1.5с) за 24ч')}
   </div></div>
+  ${weightCard}
   ${err24.length ? `<div class="card"><h2>Последние ошибки веб-сервера</h2>
     <div class="tablewrap"><table><tr><th>Когда</th><th>Путь</th><th>Ошибка</th></tr>
       ${err24.slice(-15).reverse().map((e) => `<tr><td class="muted">${fmt(new Date(e.at).toISOString())}</td><td class="mini">${esc(e.path)}</td><td class="mini">${esc(String(e.msg).split('\n')[0].slice(0, 160))}</td></tr>`).join('')}
@@ -5430,1199 +5631,6 @@ async function healthBody(client) {
     })()}
   </div></div>`;
 }
-
-// ---------- Доски (визуальные схемы / оргструктуры, упрощённый аналог Miro) ----------
-// Этап 1: доступ только у havirys. Данные — JSON в boards.data. Мультиплеер
-// (WebSocket, курсоры) — отдельный этап 2, когда доски откроют другим.
-
-function boardBlank(kind) {
-  const nodes = kind === 'orgchart'
-    ? [{ id: 'n1', x: 340, y: 40, w: 180, h: 56, text: 'Руководитель', parent: null, ref: null }]
-    : [];
-  return JSON.stringify({ nodes, edges: [], view: { zoom: 1, panX: 0, panY: 0 } });
-}
-
-// Безопасный разбор и нормализация модели (чужой ввод — из редактора).
-function boardParse(str) {
-  let o;
-  try { o = JSON.parse(str || '{}'); } catch (_) { o = {}; }
-  if (!o || typeof o !== 'object') o = {};
-  const hex6 = (v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v)) ? v.toLowerCase() : null;
-  const nodes = (Array.isArray(o.nodes) ? o.nodes : []).slice(0, 800).map((n, i) => ({
-    id: String((n && n.id) || ('n' + i)).slice(0, 40),
-    x: Math.round(Number(n && n.x) || 0),
-    y: Math.round(Number(n && n.y) || 0),
-    w: Math.max(80, Math.min(1200, Math.round(Number(n && n.w) || 200))),
-    h: Math.max(36, Math.min(1200, Math.round(Number(n && n.h) || 56))),
-    text: String((n && n.text) || '').slice(0, 2000),
-    color: hex6(n && n.color),
-    fontSize: Math.max(9, Math.min(48, Math.round(Number(n && n.fontSize) || 14))),
-    align: (n && n.align === 'left') ? 'left' : 'center',
-    autoH: (n && n.autoH === false) ? false : true,
-    parent: (n && n.parent) ? String(n.parent).slice(0, 40) : null,
-    ref: (n && n.ref && n.ref.id)
-      ? { type: n.ref.type === 'role' ? 'role' : 'user', id: String(n.ref.id).replace(/[^0-9]/g, '').slice(0, 25) }
-      : null,
-  }));
-  const ids = new Set(nodes.map((n) => n.id));
-  const edges = (Array.isArray(o.edges) ? o.edges : []).slice(0, 1000).map((e, i) => ({
-    id: String((e && e.id) || ('e' + i)).slice(0, 40),
-    from: String((e && e.from) || '').slice(0, 40),
-    to: String((e && e.to) || '').slice(0, 40),
-  })).filter((e) => ids.has(e.from) && ids.has(e.to) && e.from !== e.to);
-  for (const n of nodes) if (n.parent && !ids.has(n.parent)) n.parent = null;
-  const v = (o.view && typeof o.view === 'object') ? o.view : {};
-  const view = {
-    zoom: Math.max(0.2, Math.min(3, Number(v.zoom) || 1)),
-    panX: Math.round(Number(v.panX) || 0),
-    panY: Math.round(Number(v.panY) || 0),
-  };
-  return { nodes, edges, view };
-}
-
-// Раскладка оргструктуры сверху вниз по полю parent (простое tidy-дерево).
-// Мутирует переданную модель: перезаписывает x/y/w/h узлов и edges.
-function boardOrgLayout(model) {
-  const nodes = model.nodes;
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  for (const n of nodes) { // разрываем циклы в цепочке родителей
-    const chain = new Set([n.id]);
-    let p = n.parent;
-    while (p) {
-      if (chain.has(p)) { n.parent = null; break; }
-      chain.add(p);
-      p = (byId.get(p) || {}).parent;
-    }
-  }
-  const kids = new Map(nodes.map((n) => [n.id, []]));
-  const roots = [];
-  for (const n of nodes) {
-    if (n.parent && kids.has(n.parent)) kids.get(n.parent).push(n.id);
-    else roots.push(n.id);
-  }
-  const NW = 230, GX = 34, GY = 150, TOP = 40;
-  let cursor = 40;
-  const place = (id, depth) => {
-    const n = byId.get(id);
-    n.w = NW; n.h = Math.max(52, boardFitH(n.text, NW)); n.y = TOP + depth * GY;
-    const ch = kids.get(id) || [];
-    if (!ch.length) { n.x = cursor; cursor += NW + GX; return; }
-    let first = null, last = null;
-    for (const c of ch) { place(c, depth + 1); if (first === null) first = byId.get(c).x; last = byId.get(c).x; }
-    n.x = Math.round((first + last) / 2);
-  };
-  for (const r of roots) { place(r, 0); cursor += GX; }
-  model.edges = nodes.filter((n) => n.parent).map((n) => ({ id: 'e_' + n.parent + '_' + n.id, from: n.parent, to: n.id }));
-  return model;
-}
-
-// Явный sans-стек: при рендере SVG в PNG вне страницы font-family:inherit даёт serif.
-const BOARD_FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Helvetica,Arial,'Noto Sans','DejaVu Sans',sans-serif";
-// Эмодзи / стрелки / пиктограммы / CJK — рендерятся примерно вдвое шире буквы.
-function boardCharW(ch) {
-  const c = ch.codePointAt(0);
-  if (c >= 0x1F000 || (c >= 0x2190 && c <= 0x2BFF) || (c >= 0x2600 && c <= 0x27BF) || (c >= 0x3000 && c <= 0x9FFF) || c === 0x2022) return 2;
-  return 1;
-}
-function boardStrW(s) { let w = 0; for (const ch of String(s || '')) w += boardCharW(ch); return w; }
-function boardWrap(text, maxW) {
-  const out = [];
-  for (const raw of String(text || '').split('\n')) {
-    const words = raw.split(/\s+/).filter(Boolean);
-    if (!words.length) { out.push(''); continue; }
-    let line = '';
-    for (const w of words) {
-      const cand = line ? line + ' ' + w : w;
-      if (line && boardStrW(cand) > maxW) { out.push(line); line = w; }
-      else line = cand;
-    }
-    if (line) out.push(line);
-  }
-  return out.length ? out.slice(0, 16) : [''];
-}
-// Высота строки и «весовой лимит» строки — с учётом кегля.
-function boardLineH(fs) { return Math.round((fs || 14) * 1.34); }
-function boardMaxW(w, fs) { return Math.max(4, Math.floor((w - 24) / ((fs || 14) * 0.56))); }
-// Нужная высота блока, чтобы весь текст поместился.
-function boardFitH(text, w, fs) {
-  return Math.max(Math.round((fs || 14) * 2.4), boardWrap(text, boardMaxW(w, fs)).length * boardLineH(fs) + 20);
-}
-
-// SSR-рендер доски в <svg> (страница просмотра и стартовый холст редактора).
-function boardSvg(model, opts) {
-  opts = opts || {};
-  const m = (opts.layout && model.nodes.some((n) => n.parent))
-    ? boardOrgLayout({ nodes: model.nodes.map((n) => ({ ...n })), edges: [] })
-    : model;
-  // высоту считаем по тексту (блок всегда вмещает содержимое), если не задана вручную
-  const nodes = m.nodes.map((n) => {
-    const fs = n.fontSize || 14;
-    const head = /^#\s/.test(n.text || '');
-    const text = head ? n.text.replace(/^#\s+/, '') : (n.text || '');
-    const lines = boardWrap(text, boardMaxW(n.w, fs));
-    const fitH = lines.length * boardLineH(fs) + 20;
-    const _h = (n.autoH === false) ? Math.max(n.h || 40, 36) : Math.max(fitH, Math.round(fs * 2.4));
-    return { ...n, _fs: fs, _head: head, _text: text, _lines: lines, _h };
-  });
-  const edges = m.edges;
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n._h); }
-  if (!nodes.length) { minX = 0; minY = 0; maxX = 480; maxY = 240; }
-  const pad = 44;
-  const vb = `${minX - pad} ${minY - pad} ${(maxX - minX) + pad * 2} ${(maxY - minY) + pad * 2}`;
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const eEls = edges.map((e) => {
-    const a = byId.get(e.from), b = byId.get(e.to);
-    if (!a || !b) return '';
-    const ax = a.x + a.w / 2, ay = a.y + a._h, bx = b.x + b.w / 2, by = b.y, my = (ay + by) / 2;
-    return `<path d="M${ax} ${ay} C ${ax} ${my}, ${bx} ${my}, ${bx} ${by - 8}" fill="none" stroke="var(--muted)" stroke-width="1.75" marker-end="url(#bar)"/>`;
-  }).join('');
-  const nEls = nodes.map((n) => {
-    const lh = boardLineH(n._fs);
-    const left = n.align === 'left';
-    const tx = left ? n.x + 14 : n.x + n.w / 2;
-    const ty = left ? n.y + 14 + n._fs : n.y + n._h / 2 - (n._lines.length - 1) * (lh / 2);
-    const anchor = left ? 'start' : 'middle';
-    const baseFill = n.color ? '#20242c' : 'var(--text)';
-    const headFill = n.color ? '#20242c' : 'var(--accent2)';
-    const tsp = n._lines.map((ln, i) => (i === 0 && n._head)
-      ? `<tspan x="${tx}" dy="0" font-weight="700" fill="${headFill}">${esc(ln)}</tspan>`
-      : `<tspan x="${tx}" dy="${i ? lh : 0}">${esc(ln)}</tspan>`).join('');
-    const fill = n.color || 'var(--panel2)';
-    const stroke = n.color ? 'rgba(0,0,0,.18)' : 'var(--line)';
-    const clip = `bclip_${esc(n.id)}`;
-    return `<g data-id="${esc(n.id)}">
-      <clipPath id="${clip}"><rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n._h}" rx="12"/></clipPath>
-      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n._h}" rx="12" fill="${fill}" stroke="${stroke}" stroke-width="1.25" filter="url(#bsh)"/>
-      ${(!n.color && !n._head) ? `<rect x="${n.x}" y="${n.y + 10}" width="4" height="${Math.max(0, n._h - 20)}" rx="2" fill="var(--accent)" fill-opacity=".65"/>` : ''}
-      <text clip-path="url(#${clip})" x="${tx}" y="${ty}" text-anchor="${anchor}" ${left ? '' : 'dominant-baseline="middle"'} font-size="${n._fs}" fill="${baseFill}">${tsp}</text>
-      ${n.ref ? `<circle cx="${n.x + n.w - 12}" cy="${n.y + 12}" r="3.5" fill="${n.color ? '#20242c' : 'var(--accent2)'}"></circle>` : ''}
-    </g>`;
-  }).join('');
-  return `<svg class="bsvg" xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="xMidYMid meet" font-family="${esc(BOARD_FONT)}">
-    <defs>
-      <marker id="bar" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker>
-      <filter id="bsh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/></filter>
-    </defs>
-    ${eEls}${nEls}
-  </svg>`;
-}
-
-function boardsListBody(rows, user, showArch, bacc) {
-  const canCreate = user && (user.id === OWNER_ID || (bacc && bacc.rank >= LEVELS.deputy));
-  const cards = rows.map((b) => {
-    const kindL = b.kind === 'orgchart' ? '🌳 оргструктура' : '🖊️ свободная';
-    const ed = b._mode === 'edit';
-    return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0">
-      <div>
-        <div style="font-weight:700;font-size:15px">${esc(b.title || 'Без названия')}${b.onboarding ? ' <span class="badge">🖼 в профиль новичку</span>' : ''}</div>
-        <div class="mini">${kindL} · v${b.version || 1} · изменено ${fmt(b.updated_at)} · ${ed ? '✏️ можно редактировать' : '👁 только просмотр'}</div>
-      </div>
-      <div class="bar" style="margin:0">
-        ${showArch ? `<form method="POST" action="/board/${b.id}/unarchive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">Вернуть из архива</button></form>` : `
-        ${ed ? `<a class="btn sm" href="/board/${b.id}/edit">Открыть</a>` : ''}
-        <a class="btn ghost sm" href="/board/${b.id}">Просмотр</a>
-        <a class="btn ghost sm" href="/board/${b.id}/versions">Версии</a>
-        ${ed ? `<a class="btn ghost sm" href="/board/${b.id}/settings">Настройки</a>` : ''}`}
-      </div>
-    </div>`;
-  }).join('');
-  return `<h1>Доски</h1>
-  <p class="muted">Визуальные схемы и оргструктуры. havirys видит все и всё может; остальным доска открывается по гранту (просмотр / редактирование).</p>
-  ${!showArch && canCreate ? `<div class="card"><h2>Новая доска</h2>
-    <form method="POST" action="/board/create" class="form">${csrfField(user)}
-      <label>Название<input name="title" maxlength="80" placeholder="Оргструктура организации" required></label>
-      <label>Тип
-        <select name="kind">
-          <option value="freeform">Свободная доска (блоки и стрелки вручную)</option>
-          <option value="orgchart">Оргструктура (дерево, автораскладка)</option>
-        </select>
-      </label>
-      <button class="btn" type="submit">Создать</button>
-    </form>
-  </div>` : ''}
-  ${cards || `<div class="card muted">${showArch ? 'В архиве пусто.' : 'Пока нет доступных досок.'}</div>`}
-  ${user && user.id === OWNER_ID ? `<p class="mini">${showArch ? '<a href="/boards">← активные доски</a>' : '<a href="/boards?arch=1">Архив</a>'}</p>` : ''}`;
-}
-
-function boardViewBody(board, user, canEdit) {
-  const model = boardParse(board.data);
-  const svg = boardSvg(model, { layout: board.kind === 'orgchart' });
-  return `<div class="bar" style="justify-content:space-between">
-      <h1 style="margin:0">${esc(board.title || 'Доска')}</h1>
-      <div class="bar" style="margin:0">
-        ${canEdit ? `<a class="btn sm" href="/board/${board.id}/edit">Редактировать</a>` : ''}
-        <a class="btn ghost sm" href="/board/${board.id}/export.json">Экспорт JSON</a>
-        <a class="btn ghost sm" href="/boards">← к списку</a>
-      </div>
-    </div>
-    ${board.onboarding ? '<div class="card" style="border-color:var(--accent2)"><b>🖼 Памятка новичку.</b> PNG этой доски прикладывается к сообщению при создании профиля. Обнови PNG кнопкой «Сохранить» в редакторе.</div>' : ''}
-    <div class="card" style="padding:0;overflow:hidden"><div id="bview" class="bview">${svg}</div></div>
-    <p class="mini">Колесо — масштаб, перетаскивание — панорама.${board.image_file ? ` · <a href="/board/${board.id}/image.png" target="_blank" rel="noopener">PNG-снимок</a>` : ''}</p>
-    <script>${BOARD_VIEW_JS}</script>`;
-}
-
-function boardEditBody(board, user) {
-  const model = boardParse(board.data);
-  const payload = JSON.stringify({ id: board.id, kind: board.kind, version: board.version || 1, model })
-    .replace(/</g, '\\u003c');
-  return `<div class="beditbar">
-      <a class="btn ghost sm" href="/boards">←</a>
-      <b>${esc(board.title || 'Доска')}</b>
-      <span class="mini">${board.kind === 'orgchart' ? 'оргструктура' : 'свободная'}</span>
-      <span class="beditsp"></span>
-      <button class="btn sm" type="button" data-act="add">+ блок</button>
-      <button class="btn ghost sm" type="button" data-act="connect">↳ связь</button>
-      <button class="btn ghost sm" type="button" data-act="undo">↶</button>
-      <button class="btn ghost sm" type="button" data-act="redo">↷</button>
-      <button class="btn ghost sm" type="button" data-act="fit">⤢ вписать</button>
-      <span class="beditsp"></span>
-      <button class="btn sm" type="button" data-act="save" id="bsave">Сохранить</button>
-      <span class="mini" id="bstatus"></span>
-      <span class="beditsp"></span>
-      <button class="btn ghost sm" type="button" data-act="png">PNG</button>
-      <a class="btn ghost sm" href="/board/${board.id}/export.json">JSON</a>
-      <a class="btn ghost sm" href="/board/${board.id}/versions">версии</a>
-    </div>
-    <div class="beditwrap">
-      <div id="bcanvas" class="bcanvas">
-        <div id="bctx" class="bctx" hidden></div>
-        <div id="bedit" class="bedit" contenteditable="true" spellcheck="false" hidden></div>
-      </div>
-      <div id="binspect" class="binspect" hidden>
-        <div class="mini">Выбранный блок</div>
-        <textarea id="bi_text" rows="3" placeholder="текст блока (или дв. клик по блоку)"></textarea>
-        <label class="mini" id="bi_parentrow" hidden>Подчинён<select id="bi_parent"></select></label>
-        <label class="mini">Ссылка на Discord — ID участника/роли<input id="bi_ref" maxlength="25" inputmode="numeric" placeholder="напр. 652927337016328212"></label>
-        <label class="mini">Тип ссылки<select id="bi_reftype"><option value="user">участник</option><option value="role">роль</option></select></label>
-        <div class="bar" style="margin:4px 0 0">
-          <button class="btn ghost sm" type="button" id="bi_dup">Дублировать</button>
-          <button class="btn ghost sm" type="button" id="bi_del" style="color:var(--bad)">Удалить</button>
-        </div>
-      </div>
-    </div>
-    <p class="mini">Двойной клик по блоку — редактировать текст. Тащить угол/край выделенного — менять размер. Плашка над блоком — цвет, кегль, выравнивание. Двойной клик по пустому месту — новый блок. «↳ связь» — соединить/разорвать. Колесо — масштаб. Del — удалить блок. Ctrl+S — сохранить.</p>
-    <form method="POST" action="/board/${board.id}/save" id="bform" style="display:none">${csrfField(user)}</form>
-    <script>window.__BOARD__=${payload};</script>
-    <script src="/board-editor.js"></script>`;
-}
-
-const BOARD_LEVEL_LABELS = { member: 'Участники (member+)', hr: 'HR-менеджеры (hr+)', deputy: 'Заместители (deputy+)', owner: 'Владельцы (owner)' };
-function boardSettingsBody(board, user, grants, isOwner) {
-  const grRows = (grants || []).map((g) => {
-    const who = g.subject_type === 'user' ? ('участник ' + esc(g.subject_id)) : esc(BOARD_LEVEL_LABELS[g.subject_id] || g.subject_id);
-    return `<tr><td>${who}</td><td>${g.mode === 'edit' ? '✏️ редактирование' : '👁 просмотр'}</td>
-      <td><form method="POST" action="/board/${board.id}/grant_del" style="display:inline">${csrfField(user)}<input type="hidden" name="grant_id" value="${g.id}"><button class="btn ghost sm" type="submit">убрать</button></form></td></tr>`;
-  }).join('');
-  return `<h1>Настройки доски</h1>
-  <div class="card">
-    <form method="POST" action="/board/${board.id}/settings" class="form">${csrfField(user)}
-      <label>Название<input name="title" maxlength="80" value="${esc(board.title || '')}"></label>
-      <label>Тип
-        <select name="kind">
-          <option value="freeform"${board.kind !== 'orgchart' ? ' selected' : ''}>Свободная доска</option>
-          <option value="orgchart"${board.kind === 'orgchart' ? ' selected' : ''}>Оргструктура (автораскладка)</option>
-        </select>
-      </label>
-      <p class="mini">В режиме «оргструктура» позиции блоков считаются автоматически по полю «Подчинён»; вручную нарисованные стрелки не показываются.</p>
-      <label class="chk"><input type="checkbox" name="onboarding" value="1"${board.onboarding ? ' checked' : ''}> Отправлять PNG этой доски новичку при создании профиля</label>
-      <p class="mini">Такой может быть только одна доска. PNG пересобирается ТОЛЬКО когда открываешь доску в редакторе и жмёшь «Сохранить». Пока свежего PNG нет — новичку уходит текст без картинки.</p>
-      <button class="btn" type="submit">Сохранить</button>
-    </form>
-  </div>
-  ${isOwner && BOARD_SEEDS.some((s) => s.slug === board.slug) ? `<div class="card" style="border-color:var(--warn)">
-    <h2>Стандартное содержимое</h2>
-    <p class="mini">Это стандартная доска (<code>${esc(board.slug)}</code>). Кнопка вернёт её содержимое к актуальному шаблону из кода и сбросит PNG-снимок — потом открой в редакторе и нажми «Сохранить», чтобы пересобрать картинку.</p>
-    <form method="POST" action="/board/${board.id}/reseed" onsubmit="return confirm('Заменить всё содержимое доски стандартным шаблоном? Текущая версия сохранится в истории.')">${csrfField(user)}
-      <button class="btn sm" type="submit">🔄 Восстановить стандартное содержимое</button>
-    </form>
-  </div>` : ''}
-  ${isOwner ? `<div class="card">
-    <h2>Доступ к доске</h2>
-    <p class="mini">havirys всегда имеет полный доступ. Ниже — кому ещё открыта доска.</p>
-    <div class="tablewrap"><table><tr><th>Кому</th><th>Режим</th><th></th></tr>${grRows || '<tr><td colspan="3">Только havirys.</td></tr>'}</table></div>
-    <form method="POST" action="/board/${board.id}/grant_add" class="form" style="margin-top:12px">${csrfField(user)}
-      <div class="bar">
-        <select name="subject_type" onchange="var f=this.form;f.querySelector('[data-w=level]').style.display=this.value==='user'?'none':'';f.querySelector('[data-w=user]').style.display=this.value==='user'?'':'none';">
-          <option value="level">Уровень доступа</option>
-          <option value="user">Конкретный участник</option>
-        </select>
-        <span data-w="level"><select name="subject_level">
-          <option value="member">Участники (member+)</option>
-          <option value="hr">HR-менеджеры (hr+)</option>
-          <option value="deputy">Заместители (deputy+)</option>
-          <option value="owner">Владельцы (owner)</option>
-        </select></span>
-        <span data-w="user" style="display:none"><input name="subject_user" maxlength="25" inputmode="numeric" placeholder="Discord ID участника"></span>
-        <select name="mode"><option value="view">просмотр</option><option value="edit">редактирование</option></select>
-        <button class="btn sm" type="submit">Дать доступ</button>
-      </div>
-    </form>
-  </div>` : ''}
-  <div class="card"><div class="bar" style="margin:0">
-    <a class="btn ghost sm" href="/board/${board.id}/edit">← в редактор</a>
-    <form method="POST" action="/board/${board.id}/archive" style="display:inline">${csrfField(user)}<button class="btn ghost sm" type="submit">В архив</button></form>
-    ${isOwner ? `<form method="POST" action="/board/${board.id}/delete" style="display:inline" onsubmit="return confirm('Удалить доску без возможности восстановления?')">${csrfField(user)}<button class="btn ghost sm" type="submit" style="color:var(--bad)">Удалить</button></form>` : ''}
-  </div></div>`;
-}
-
-function boardVersionsBody(board, vs, user, canEdit) {
-  const rows = vs.map((v) => `<tr>
-    <td>v${v.version}</td>
-    <td class="muted">${fmt(v.saved_at)}</td>
-    <td>${canEdit ? `<form method="POST" action="/board/${board.id}/restore" style="display:inline" onsubmit="return confirm('Восстановить v${v.version}? Текущее состояние станет новой версией.')">${csrfField(user)}<input type="hidden" name="version_id" value="${v.id}"><button class="btn ghost sm" type="submit">Восстановить</button></form>` : '—'}</td>
-  </tr>`).join('');
-  return `<h1>Версии — ${esc(board.title || 'Доска')}</h1>
-  <p><a href="/board/${board.id}${canEdit ? '/edit' : ''}">← ${canEdit ? 'в редактор' : 'к доске'}</a></p>
-  <div class="card"><div class="tablewrap"><table>
-    <tr><th>Версия</th><th>Сохранена</th><th></th></tr>
-    ${rows || '<tr><td colspan="3">Пока одна версия.</td></tr>'}
-  </table></div></div>`;
-}
-
-// Доступ пользователя к доске: 'edit' | 'view' | null. havirys — всегда 'edit'.
-async function boardAccess(client, user, board) {
-  if (!user || !board) return null;
-  if (user.id === OWNER_ID) return 'edit';
-  const grants = await db.all('SELECT subject_type, subject_id, mode FROM board_grants WHERE board_id = ?', [board.id]).catch(() => []);
-  if (!grants.length) return null;
-  const acc = await accessFor(client, user.id).catch(() => ({ level: 'guest' }));
-  let best = null;
-  for (const g of grants) {
-    let hit = false;
-    if (g.subject_type === 'user') {
-      hit = g.subject_id === user.id
-        || (user.localId && g.subject_id === user.localId)
-        || (user.oauthDiscordId && g.subject_id === user.oauthDiscordId);
-    } else {
-      hit = (LEVELS[acc.level] || 0) >= (LEVELS[g.subject_id] || 99);
-    }
-    if (hit) { if (g.mode === 'edit') return 'edit'; best = 'view'; }
-  }
-  return best;
-}
-
-// ---- Стандартные доски: сидятся при старте (идемпотентно по slug) ----
-// Это КАРТА СТРУКТУРЫ САЙТА для настройки, а не гайды для участников.
-// Форматы узла:
-//   'строка'            — авто-стек в один столбец (x=40, w=560);
-//   [col, 'строка']     — авто-стек в столбец col (0..N), w=280;
-//   [x, y, 'строка', w] — явные координаты (для схем со стрелками).
-// Высота блока считается по тексту автоматически (boardFitH).
-const BOARD_SEED_VERSION = 5; // ↑ при правке содержимого — нетронутые доски (version<=1) обновятся
-const BOARD_SEEDS = [
-  {
-    slug: 'site-map', title: 'Карта сайта — страницы по уровням', kind: 'freeform',
-    grants: [['level', 'member', 'view'], ['level', 'hr', 'edit']],
-    nodes: [
-      [0, 'ГОСТЬ — без входа'],
-      [0, '/ — лендинг (заголовок, текст, кнопки)'],
-      [0, '/login · /register · /forgot · /account'],
-      [0, '/faq — гайды и поиск'],
-      [0, '/text/rules · /text/agitation'],
-      [0, '/p/<slug> — доп. страницы, если опубликованы'],
-      [1, 'УЧАСТНИК (member) — есть паспорт'],
-      [1, '/me — личный кабинет: паспорт, контракты, отпуск, тикеты, заявка в HR, экспорт'],
-      [1, '/people · /u/<id> — участники и профили'],
-      [1, '/giveaways · /g/<id> — розыгрыши'],
-      [1, '/commands — команды бота по тирам'],
-      [1, '/boards — доски (по гранту на доску)'],
-      [1, '/notifications · /search · /calendar · /leaderboards · /compare'],
-      [1, '/ticket/<id> — свой тикет'],
-      [2, 'HR И ВЫШЕ (hr)'],
-      [2, '/dashboard — статистика и здоровье системы'],
-      [2, '/tickets — все тикеты'],
-      [2, '/audit — журнал действий'],
-      [2, '/panel — панель управления (вкладки в столбце справа)'],
-      [2, 'Заместитель (deputy): + массовые действия в /people, создание досок'],
-      [2, 'Владелец роль (owner): + все вкладки панели, черновики страниц'],
-      [3, 'ПАНЕЛЬ /panel — вкладки (HR+ или точечный грант)'],
-      [3, 'apps · queues · contracts_check · role_check — очереди и проверка'],
-      [3, 'overview · sla · members · contracts · invites · hr_payouts — аналитика'],
-      [3, 'forms · giveaways · faq_manage · texts · reasons · broadcast — контент'],
-      [3, 'blacklist — чёрный список'],
-      [4, 'HAVIRYS — плюс только эти вкладки панели'],
-      [4, 'data — редактор БД (любые таблицы, откат правок)'],
-      [4, 'accounts — локальные аккаунты и привязка к паспорту'],
-      [4, 'grants — выдача вкладок панели ролям и людям'],
-      [4, 'perms — тиры команд бота'],
-      [4, 'admin — бренд, тексты, меню, цвета, тема'],
-      [4, 'landing — блоки главной страницы'],
-      [4, 'pages — доп. страницы /p/<slug>'],
-      [4, 'settings — флаги функций, автобэкап, ключи'],
-      [4, '/tools · откат правок БД из /audit'],
-    ],
-  },
-  {
-    slug: 'access-model', title: 'Модель доступа', kind: 'freeform',
-    grants: [['level', 'member', 'view'], ['level', 'deputy', 'edit']],
-    nodes: [
-      'МОДЕЛЬ ДОСТУПА. Уровень вычисляет accessFor() из Discord-ролей. По возрастанию: guest, member, hr, deputy, owner, havirys.',
-      'guest — публичные страницы: лендинг, вход и регистрация, FAQ, правила, опубликованные доп. страницы.',
-      'member — выдаётся, если у человека есть паспорт (строка в participants). Открывает /me, /people, /giveaways, /commands, /boards, свои тикеты.',
-      'hr — роль ROLE_HR. Плюс /dashboard, /tickets, /audit и вкладки панели из набора GRANTABLE_TABS.',
-      'deputy — роль ROLE_DEPUTY. Плюс массовые действия в /people и создание досок.',
-      'owner — роль ROLE_OWNER (или бот-доступ). Плюс весь набор вкладок панели.',
-      'havirys — Discord ID 652927337016328212 = config.OWNER_USER_ID. Плюс инфраструктурные вкладки: data, accounts, grants, perms, admin, landing, pages.',
-      'Точечная выдача: havirys на /panel?tab=grants даёт роли или конкретному человеку отдельные вкладки панели, можно со сроком действия.',
-      'Доски: доступ отдельно, таблица board_grants — по уровню (member/hr/deputy/owner) или по человеку, режим просмотр или редактирование. Настройка на /board/<id>/settings.',
-    ],
-  },
-  {
-    slug: 'admin-controls', title: 'Где что настраивается', kind: 'freeform',
-    grants: [['level', 'deputy', 'view'], ['level', 'owner', 'edit']],
-    nodes: [
-      'ИСТОЧНИКИ НАСТРОЕК: 1) таблица settings — правится на сайте, применяется сразу или в течение часа; 2) config.js — правится в коде, нужен перезапуск; 3) board_grants и panel_grants — доступы.',
-      '/panel?tab=admin — название организации, ссылка-приглашение, заголовок и текст главной, подвал, меню сайта (SITE.nav), свой CSS.',
-      '/panel?tab=admin — цвета сайта: 11 переменных и 21 готовый пресет темы. Светлая тема остаётся стандартной.',
-      '/panel?tab=landing — плитки-блоки на главной странице (landing_blocks).',
-      '/panel?tab=pages — произвольные страницы /p/<slug>: черновик и публикация, отложенная публикация, версии и дифф.',
-      '/panel?tab=settings — переключатели функций: приём заявок (applications), приём контрактов по скринам (contracts), напоминания SLA/отпуска/HR (reminders).',
-      '/panel?tab=settings — время ежедневного автобэкапа (ключ backup.time) и любые произвольные ключи settings.',
-      '/panel?tab=perms — тир каждой команды бота и синхронизация видимости команд в Discord.',
-      '/panel?tab=grants — кому открыты вкладки панели: роль или человек, срок действия, пресеты наборов.',
-      '/panel?tab=accounts — локальные логины: привязка к паспорту, сброс пароля по заявке.',
-      'config.js (перезапуск): STUCK_CONTRACT_HOURS, CONTRACT_ABANDON_DAYS, REVIEW_SLA_HOURS, VACATION_REMINDER_HOURS, HR_REMINDER_INTERVAL_DAYS.',
-      'config.js: WEEKLY_PROMOTION_CONTRACT_THRESHOLD (контрактов на повышение), WEEKLY_RANK_ADJUSTMENT_DAY, CODEWORD_REFUND_AMOUNT, HR_PAYOUT_CONFIRMED, HR_PAYOUT_OTHER.',
-      'config.js: ENABLE_PRESENCE (онлайн-точки, нужен привилегированный интент), BADGE_AUTO_ROLES, ROLE_* и CHANNEL_* — id ролей и каналов.',
-      'Доски: /boards → «Настройки доски» — доступ (гранты) и флаг «отправлять PNG новичку в профиль».',
-    ],
-  },
-  {
-    slug: 'panel-tabs', title: 'Панель: все вкладки', kind: 'freeform',
-    grants: [['level', 'hr', 'view'], ['level', 'owner', 'edit']],
-    nodes: [
-      [0, 'РАБОТА С ОЧЕРЕДЯМИ — HR+ или грант вкладки'],
-      [0, 'apps — заявки на вступление: принять/отклонить, шаблоны причин, комментарии, массовое отклонение, добавить вручную'],
-      [0, 'queues — прочие очереди: паспорта, изменение данных, отпуска, апелляции, кодовые слова, заявки в HR'],
-      [0, 'contracts_check — вердикт по контрактам + список «в работе» с кнопкой снять'],
-      [0, 'role_check — сверка Discord-ролей с паспортами'],
-      [0, 'blacklist — чёрный список организации'],
-      [1, 'АНАЛИТИКА И КОНТЕНТ — HR+ или грант вкладки'],
-      [1, 'overview · sla — сводка и просроченные задачи'],
-      [1, 'members · contracts · invites — списки и статистика'],
-      [1, 'hr_payouts — выплаты HR за принятых участников'],
-      [1, 'giveaways — создать разовый и повторяющийся розыгрыш'],
-      [1, 'forms — конструктор форм и разбор поданных заявок'],
-      [1, 'faq_manage · texts · reasons — гайды, тексты, причины отказа'],
-      [1, 'broadcast — массовая рассылка в личные сообщения'],
-      [2, 'ИНФРАСТРУКТУРА — только havirys'],
-      [2, 'data — редактор БД: любые таблицы, откат правок'],
-      [2, 'accounts — локальные аккаунты и привязка'],
-      [2, 'grants — выдача вкладок панели'],
-      [2, 'perms — тиры команд бота'],
-      [2, 'admin — бренд, тексты, меню, цвета, тема'],
-      [2, 'landing — блоки главной страницы'],
-      [2, 'pages — доп. страницы /p/<slug>'],
-      [2, 'settings — флаги функций, автобэкап, произвольные ключи'],
-    ],
-  },
-  {
-    slug: 'onboarding', title: 'Памятка новичка', kind: 'freeform', onboarding: 1,
-    grants: [['level', 'member', 'view']],
-    nodes: [
-      'ДОБРО ПОЖАЛОВАТЬ! Это ваш профиль-канал — присылайте сюда только скриншоты контрактов.',
-      'По каждому контракту нужно 2 скриншота на весь экран: 1 — когда ВЗЯЛИ контракт, 2 — когда ВЫПОЛНИЛИ или не выполнили.',
-      'Можно одним сообщением, можно двумя подряд. Бот сам соберёт пару и отправит карточку руководству на проверку.',
-      'Итог проверки: засчитан, не засчитан или «не контракт». Придёт уведомление, всё видно в личном кабинете на сайте — /me.',
-      'Один незакрытый контракт на паспорт. Не бросайте взятый: через 2 дня он сгорит автоматически, либо его раньше снимет руководство.',
-      'Личный кабинет /me — паспорт, контракты, отпуск, тикеты, уведомления.',
-      'Вопросы — команда /сайт в Discord или тикет на сайте.',
-    ],
-  },
-];
-
-function boardSeedModel(seed) {
-  const colY = {};
-  let stackY = 30;
-  const nodes = seed.nodes.map((a, i) => {
-    let x, y, w, text;
-    if (typeof a === 'string') {
-      x = 40; w = 560; text = a; y = stackY;
-      stackY += boardFitH(text, w) + 22;
-    } else if (a.length === 2 && typeof a[0] === 'number') {
-      const col = a[0]; text = a[1]; w = 280; x = 30 + col * 312;
-      y = (colY[col] == null ? 30 : colY[col]);
-      colY[col] = y + boardFitH(text, w) + 16;
-    } else {
-      x = a[0]; y = a[1]; text = a[2]; w = a[3] || 320;
-    }
-    return { id: 'n' + i, x, y, w, h: boardFitH(text, w), text, parent: null, ref: null };
-  });
-  if (seed.kind === 'orgchart' && seed.edges) {
-    for (const [f, t] of seed.edges) if (nodes[t] && !nodes[t].parent) nodes[t].parent = nodes[f].id;
-  }
-  const edges = (seed.kind === 'orgchart' ? [] : (seed.edges || [])).map((e, i) => ({ id: 'e' + i, from: 'n' + e[0], to: 'n' + e[1] }));
-  return { nodes, edges, view: { zoom: 1, panX: 0, panY: 0 } };
-}
-
-// Сидинг стандартных досок. Новые — создаёт; нетронутые (version <= 1) —
-// обновляет содержимым при росте BOARD_SEED_VERSION. Отредактированные не трогает.
-async function seedBoards() {
-  let cur = 0;
-  try { cur = parseInt((await db.getSetting('boards_seed_version')) || '0', 10) || 0; } catch (_) {}
-  const refresh = cur < BOARD_SEED_VERSION;
-  for (const s of BOARD_SEEDS) {
-    try {
-      const ex = await db.get('SELECT id, version FROM boards WHERE slug = ?', [s.slug]);
-      const data = JSON.stringify(boardParse(JSON.stringify(boardSeedModel(s))));
-      const now = new Date().toISOString();
-      if (ex) {
-        if (refresh && (ex.version || 1) <= 1) {
-          await db.run('UPDATE boards SET title = ?, kind = ?, data = ?, onboarding = ?, image_file = NULL, updated_at = ? WHERE id = ?',
-            [s.title, s.kind, data, s.onboarding ? 1 : 0, now, ex.id]);
-          console.log(`[доски] обновлена стандартная доска «${s.title}»`);
-        }
-        continue;
-      }
-      const r = await db.run(
-        "INSERT INTO boards (slug, title, kind, data, visibility, onboarding, archived, version, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, 'owner', ?, 0, 1, ?, ?, ?, ?)",
-        [s.slug, s.title, s.kind, data, s.onboarding ? 1 : 0, OWNER_ID, now, OWNER_ID, now],
-      );
-      for (const gr of (s.grants || [])) {
-        await db.run(
-          'INSERT INTO board_grants (board_id, subject_type, subject_id, mode, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
-          [r.lastID, gr[0], gr[1], gr[2], OWNER_ID, now],
-        ).catch(() => {});
-      }
-      console.log(`[доски] создана стандартная доска «${s.title}»`);
-    } catch (e) {
-      console.error('[доски] не удалось создать/обновить доску', s.slug, e.message);
-    }
-  }
-  if (refresh) {
-    // Убираем стандартные доски прошлых версий, которых больше нет в списке
-    // и которые не редактировали вручную (version <= 1).
-    try {
-      const keep = BOARD_SEEDS.map((s) => s.slug);
-      const ph = keep.map(() => '?').join(',');
-      const stale = await db.all(
-        `SELECT id, slug FROM boards WHERE slug IS NOT NULL AND slug != '' AND version <= 1 AND slug NOT IN (${ph})`,
-        keep,
-      ).catch(() => []);
-      for (const b of stale) {
-        await db.run('DELETE FROM boards WHERE id = ?', [b.id]).catch(() => {});
-        await db.run('DELETE FROM board_versions WHERE board_id = ?', [b.id]).catch(() => {});
-        await db.run('DELETE FROM board_grants WHERE board_id = ?', [b.id]).catch(() => {});
-        console.log(`[доски] удалена устаревшая стандартная доска «${b.slug}»`);
-      }
-    } catch (_) {}
-    try { await db.setSetting('boards_seed_version', String(BOARD_SEED_VERSION)); } catch (_) {}
-  }
-}
-
-// Пан/зум для страницы просмотра доски (только чтение).
-const BOARD_VIEW_JS = `(function(){
-  var box=document.getElementById('bview'); if(!box) return;
-  var svg=box.querySelector('svg'); if(!svg) return;
-  var p=(svg.getAttribute('viewBox')||'0 0 800 500').split(' ').map(Number);
-  var x=p[0],y=p[1],w=p[2],h=p[3];
-  function set(){ svg.setAttribute('viewBox',x+' '+y+' '+w+' '+h); }
-  box.addEventListener('wheel',function(e){ e.preventDefault();
-    var r=box.getBoundingClientRect(), mx=x+(e.clientX-r.left)/r.width*w, my=y+(e.clientY-r.top)/r.height*h;
-    var k=e.deltaY>0?1.1:0.9; w*=k; h*=k;
-    x=mx-(e.clientX-r.left)/r.width*w; y=my-(e.clientY-r.top)/r.height*h; set();
-  },{passive:false});
-  var drag=null;
-  box.addEventListener('pointerdown',function(e){ drag={px:e.clientX,py:e.clientY,x:x,y:y}; try{box.setPointerCapture(e.pointerId);}catch(_){}});
-  box.addEventListener('pointermove',function(e){ if(!drag) return; var r=box.getBoundingClientRect();
-    x=drag.x-(e.clientX-drag.px)/r.width*w; y=drag.y-(e.clientY-drag.py)/r.height*h; set(); });
-  box.addEventListener('pointerup',function(){ drag=null; });
-  box.addEventListener('pointercancel',function(){ drag=null; });
-})();`;
-
-// Редактор досок целиком (без внешних зависимостей). Отдаётся как /board-editor.js.
-// ВНИМАНИЕ: это шаблонная строка web.js — внутри нельзя использовать обратные
-// кавычки и подстановки шаблонных строк; спецсимволы regex/строк удваиваем.
-const BOARD_EDITOR_JS = `'use strict';
-(function(){
-var D=window.__BOARD__; if(!D){ return; }
-var NS='http://www.w3.org/2000/svg';
-var boardId=D.id, kind=D.kind, model=D.model, serverVersion=D.version;
-var canvas=document.getElementById('bcanvas');
-var inspect=document.getElementById('binspect');
-var statusEl=document.getElementById('bstatus');
-var bar=document.querySelector('.beditbar');
-var bctx=document.getElementById('bctx');
-var bedit=document.getElementById('bedit');
-if(!canvas){ return; }
-
-var dirty=false, mode='select', connectFrom=null, sel=null;
-var undoStack=[], redoStack=[];
-var view={ x:20, y:20, k:1 };
-var pan=null, ndrag=null, resize=null, editing=null, editSnap=null;
-var COLORS=['#fff9b1','#d5f692','#a6ccf5','#f7c6d9','#e2c3f7','#ffd8a8','#ffb3b3','#c8e6c9'];
-var FONT="-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Ubuntu,Helvetica,Arial,'Noto Sans','DejaVu Sans',sans-serif";
-
-var svg=document.createElementNS(NS,'svg');
-svg.setAttribute('class','beditsvg');
-svg.setAttribute('font-family',FONT);
-var defs=document.createElementNS(NS,'defs');
-defs.innerHTML='<marker id="bea" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/></marker><filter id="besh" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.28"/></filter>';
-var gEdges=document.createElementNS(NS,'g');
-var gNodes=document.createElementNS(NS,'g');
-svg.appendChild(defs); svg.appendChild(gEdges); svg.appendChild(gNodes);
-canvas.appendChild(svg);
-
-function uid(p){ return p+Math.random().toString(36).slice(2,8); }
-function byId(id){ for(var i=0;i<model.nodes.length;i++){ if(model.nodes[i].id===id) return model.nodes[i]; } return null; }
-function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function oneline(s){ return String(s||'').replace(/\\s+/g,' ').trim().slice(0,40)||'(без текста)'; }
-function setStatus(t){ if(statusEl) statusEl.textContent=t||''; }
-function markDirty(){ dirty=true; setStatus('не сохранено'); }
-function cssv(name,fb){ var v=getComputedStyle(document.documentElement).getPropertyValue(name).trim(); return v||fb; }
-
-function screenToWorld(sx,sy){
-  var r=canvas.getBoundingClientRect();
-  return { x:(sx-r.left-view.x)/view.k, y:(sy-r.top-view.y)/view.k };
-}
-function applyView(){
-  var t='translate('+view.x+','+view.y+') scale('+view.k+')';
-  gEdges.setAttribute('transform',t); gNodes.setAttribute('transform',t);
-  placeCtx();
-}
-
-function snapshot(){ return JSON.stringify(model); }
-function pushUndo(){ undoStack.push(snapshot()); if(undoStack.length>80) undoStack.shift(); redoStack.length=0; markDirty(); }
-function undo(){ if(!undoStack.length) return; commitEdit(); redoStack.push(snapshot()); model=JSON.parse(undoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
-function redo(){ if(!redoStack.length) return; commitEdit(); undoStack.push(snapshot()); model=JSON.parse(redoStack.pop()); sel=null; render(); dirty=true; setStatus('не сохранено'); }
-
-function isDescendant(id, ancestorId){
-  var n=byId(id), guard=0;
-  while(n && n.parent && guard++<300){ if(n.parent===ancestorId) return true; n=byId(n.parent); }
-  return false;
-}
-
-// ---- перенос строк и высота с учётом кегля ----
-function chW(ch){ var c=ch.codePointAt(0); return (c>=0x1F000||(c>=0x2190&&c<=0x2BFF)||(c>=0x2600&&c<=0x27BF)||(c>=0x3000&&c<=0x9FFF)||c===0x2022)?2:1; }
-function strW(s){ var w=0,a=String(s||''); for(var i=0;i<a.length;i++) w+=chW(a[i]); return w; }
-function lineH(fs){ return Math.round((fs||14)*1.34); }
-function maxW(w,fs){ return Math.max(4, Math.floor((w-24)/((fs||14)*0.56))); }
-function wrap(text,mw){
-  var out=[];
-  String(text||'').split('\\n').forEach(function(raw){
-    var words=raw.split(/\\s+/).filter(Boolean);
-    if(!words.length){ out.push(''); return; }
-    var line='';
-    words.forEach(function(w){
-      var cand=line?line+' '+w:w;
-      if(line&&strW(cand)>mw){ out.push(line); line=w; }
-      else line=cand;
-    });
-    if(line) out.push(line);
-  });
-  return out.length?out.slice(0,40):[''];
-}
-function fitH(text,w,fs){ return Math.max(Math.round((fs||14)*2.4), wrap(text,maxW(w,fs)).length*lineH(fs)+20); }
-
-function orgLayout(){
-  var byid={}; model.nodes.forEach(function(n){ byid[n.id]=n; });
-  model.nodes.forEach(function(n){
-    var chain={}; chain[n.id]=1; var p=n.parent;
-    while(p){ if(chain[p]){ n.parent=null; break; } chain[p]=1; p=byid[p]?byid[p].parent:null; }
-  });
-  var kids={}; model.nodes.forEach(function(n){ kids[n.id]=[]; });
-  var roots=[];
-  model.nodes.forEach(function(n){ if(n.parent&&kids[n.parent]) kids[n.parent].push(n.id); else roots.push(n.id); });
-  var NW=240,GX=34,GY=155,TOP=40, cursor=40;
-  function place(id,depth){
-    var n=byid[id]; n.w=NW; n.h=Math.max(54,fitH(n.text,NW,n.fontSize)); n.y=TOP+depth*GY;
-    var ch=kids[id]||[];
-    if(!ch.length){ n.x=cursor; cursor+=NW+GX; return; }
-    var first=null,last=null;
-    ch.forEach(function(c){ place(c,depth+1); if(first===null)first=byid[c].x; last=byid[c].x; });
-    n.x=Math.round((first+last)/2);
-  }
-  roots.forEach(function(r){ place(r,0); cursor+=GX; });
-  model.edges=model.nodes.filter(function(n){ return n.parent; }).map(function(n){ return { id:'e_'+n.parent+'_'+n.id, from:n.parent, to:n.id }; });
-}
-
-function measure(n){
-  var fs=n.fontSize||14;
-  var head=/^#\\s/.test(n.text||'');
-  var txt=head?n.text.replace(/^#\\s+/,''):(n.text||'');
-  var lines=wrap(txt, maxW(n.w,fs));
-  var dh=(n.autoH===false)?Math.max(n.h||40,40):Math.max(lines.length*lineH(fs)+20, Math.round(fs*2.4));
-  n._fs=fs; n._head=head; n._lines=lines; n._dh=dh;
-}
-
-function render(skipInspect){
-  if(kind==='orgchart') orgLayout();
-  model.nodes.forEach(measure);
-  gEdges.textContent=''; gNodes.textContent='';
-  model.edges.forEach(function(e){
-    var a=byId(e.from), b=byId(e.to); if(!a||!b) return;
-    var ax=a.x+a.w/2, ay=a.y+(a._dh||a.h), bx=b.x+b.w/2, by=b.y, my=(ay+by)/2;
-    var d='M'+ax+' '+ay+' C '+ax+' '+my+', '+bx+' '+my+', '+bx+' '+(by-8);
-    if(kind!=='orgchart'){
-      var hit=document.createElementNS(NS,'path');
-      hit.setAttribute('d',d); hit.setAttribute('class','beedge'); hit.style.cursor='pointer'; hit.setAttribute('data-eid',e.id);
-      hit.setAttribute('fill','none'); hit.setAttribute('stroke','var(--muted)'); hit.setAttribute('stroke-opacity','0');
-      hit.setAttribute('stroke-width','18'); hit.setAttribute('pointer-events','stroke');
-      var vt=document.createElementNS(NS,'title'); vt.textContent='клик — удалить связь'; hit.appendChild(vt);
-      var vis=document.createElementNS(NS,'path');
-      vis.setAttribute('d',d); vis.setAttribute('fill','none'); vis.setAttribute('stroke','var(--muted)'); vis.setAttribute('stroke-width','1.75'); vis.setAttribute('marker-end','url(#bea)'); vis.style.pointerEvents='none';
-      gEdges.appendChild(vis); gEdges.appendChild(hit);
-    } else {
-      var p=document.createElementNS(NS,'path');
-      p.setAttribute('d',d); p.setAttribute('fill','none'); p.setAttribute('stroke','var(--muted)'); p.setAttribute('stroke-width','1.75'); p.setAttribute('marker-end','url(#bea)');
-      gEdges.appendChild(p);
-    }
-  });
-  model.nodes.forEach(function(n){
-    var dh=n._dh, fs=n._fs, head=n._head, lines=n._lines, left=(n.align==='left');
-    var g=document.createElementNS(NS,'g'); g.setAttribute('class','benode'+(sel===n.id?' sel':'')); g.setAttribute('data-id',n.id);
-    var rect=document.createElementNS(NS,'rect');
-    rect.setAttribute('x',n.x); rect.setAttribute('y',n.y); rect.setAttribute('width',n.w); rect.setAttribute('height',dh); rect.setAttribute('rx','12');
-    rect.setAttribute('fill', n.color||'var(--panel2)');
-    rect.setAttribute('stroke', sel===n.id?'var(--accent)':(n.color?'rgba(0,0,0,.18)':'var(--line)'));
-    rect.setAttribute('stroke-width', sel===n.id?'2':'1.25');
-    rect.setAttribute('filter','url(#besh)');
-    g.appendChild(rect);
-    if(!n.color && !head){
-      var strip=document.createElementNS(NS,'rect');
-      strip.setAttribute('x',n.x); strip.setAttribute('y',n.y+10); strip.setAttribute('width',4); strip.setAttribute('height',Math.max(0,dh-20));
-      strip.setAttribute('rx',2); strip.setAttribute('fill','var(--accent)'); strip.setAttribute('fill-opacity','.65');
-      g.appendChild(strip);
-    }
-    var clip=document.createElementNS(NS,'clipPath'); clip.setAttribute('id','bec_'+n.id);
-    var cr=document.createElementNS(NS,'rect'); cr.setAttribute('x',n.x); cr.setAttribute('y',n.y); cr.setAttribute('width',n.w); cr.setAttribute('height',dh); cr.setAttribute('rx','12');
-    clip.appendChild(cr); g.appendChild(clip);
-    var tx=left?n.x+14:n.x+n.w/2;
-    var lh=lineH(fs);
-    var ty=left?(n.y+14+fs):(n.y+dh/2-(lines.length-1)*(lh/2));
-    var t=document.createElementNS(NS,'text');
-    t.setAttribute('x',tx); t.setAttribute('y',ty); t.setAttribute('text-anchor',left?'start':'middle');
-    if(!left) t.setAttribute('dominant-baseline','middle');
-    t.setAttribute('font-size',fs); t.setAttribute('fill', n.color?'#20242c':'var(--text)');
-    t.setAttribute('clip-path','url(#bec_'+n.id+')');
-    lines.forEach(function(ln,i){
-      var ts=document.createElementNS(NS,'tspan'); ts.setAttribute('x',tx); ts.setAttribute('dy',i?lh:0); ts.textContent=ln;
-      if(i===0&&head){ ts.setAttribute('font-weight','700'); ts.setAttribute('fill',n.color?'#20242c':'var(--accent2)'); }
-      t.appendChild(ts);
-    });
-    g.appendChild(t);
-    if(n.ref&&n.ref.id){
-      var c=document.createElementNS(NS,'circle');
-      c.setAttribute('cx',n.x+n.w-12); c.setAttribute('cy',n.y+12); c.setAttribute('r','3.5'); c.setAttribute('fill',n.color?'#20242c':'var(--accent2)');
-      g.appendChild(c);
-    }
-    gNodes.appendChild(g);
-  });
-  if(sel && !editing && mode!=='connect'){
-    var sn=byId(sel);
-    if(sn){
-      var hs=Math.max(6, 9/view.k), dh2=sn._dh||sn.h;
-      var pts=[['nw',sn.x,sn.y],['n',sn.x+sn.w/2,sn.y],['ne',sn.x+sn.w,sn.y],['e',sn.x+sn.w,sn.y+dh2/2],['se',sn.x+sn.w,sn.y+dh2],['s',sn.x+sn.w/2,sn.y+dh2],['sw',sn.x,sn.y+dh2],['w',sn.x,sn.y+dh2/2]];
-      pts.forEach(function(pt){
-        var hr=document.createElementNS(NS,'rect');
-        hr.setAttribute('x',pt[1]-hs/2); hr.setAttribute('y',pt[2]-hs/2); hr.setAttribute('width',hs); hr.setAttribute('height',hs);
-        hr.setAttribute('rx',hs*0.25); hr.setAttribute('class','bhandle'); hr.setAttribute('data-h',pt[0]);
-        gNodes.appendChild(hr);
-      });
-    }
-  }
-  applyView();
-  placeCtx();
-  if(!skipInspect) syncInspect();
-}
-
-// ---- плашка над блоком (цвет / кегль / выравнивание) ----
-function buildCtx(){
-  if(!bctx || bctx._built) return;
-  var h='';
-  for(var i=0;i<COLORS.length;i++) h+='<button class="sw" data-c="'+COLORS[i]+'" style="background:'+COLORS[i]+'"></button>';
-  h+='<button class="sw" data-c="" style="background:var(--panel2)" title="без цвета">×</button>';
-  h+='<span class="sep"></span><button data-a="fsm" title="мельче">A−</button><button data-a="fsp" title="крупнее">A+</button>';
-  h+='<span class="sep"></span><button data-a="all" title="по левому краю">⯇</button><button data-a="alc" title="по центру">≡</button>';
-  h+='<span class="sep"></span><button data-a="edit" title="править текст">✎</button><button data-a="dup" title="дублировать">⧉</button><button data-a="del" title="удалить" style="color:var(--bad)">🗑</button>';
-  bctx.innerHTML=h; bctx._built=true;
-  bctx.addEventListener('pointerdown',function(e){ e.stopPropagation(); });
-  bctx.addEventListener('click',function(e){
-    var b=e.target.closest?e.target.closest('button'):null; if(!b) return;
-    var n=sel&&byId(sel); if(!n) return;
-    if(b.hasAttribute('data-c')){ pushUndo(); n.color=b.getAttribute('data-c')||null; render(); return; }
-    var a=b.getAttribute('data-a');
-    if(a==='edit'){ startEdit(sel); return; }
-    if(a==='dup'){ dupSel(); return; }
-    if(a==='del'){ delSelected(); return; }
-    pushUndo();
-    if(a==='fsm') n.fontSize=Math.max(9,(n.fontSize||14)-2);
-    else if(a==='fsp') n.fontSize=Math.min(48,(n.fontSize||14)+2);
-    else if(a==='all') n.align='left';
-    else if(a==='alc') n.align='center';
-    render();
-  });
-}
-function placeCtx(){
-  if(!bctx) return;
-  var n=(sel && !editing && mode!=='connect')?byId(sel):null;
-  if(!n){ bctx.hidden=true; return; }
-  buildCtx();
-  bctx.hidden=false;
-  // отметить активный цвет
-  var sws=bctx.querySelectorAll('.sw');
-  for(var i=0;i<sws.length;i++){ sws[i].className='sw'+((sws[i].getAttribute('data-c')||null)===(n.color||null)?' on':''); }
-  var sx=n.x*view.k+view.x, sy=n.y*view.k+view.y, sw=n.w*view.k;
-  var cw=bctx.offsetWidth||300, ch=bctx.offsetHeight||36;
-  var r=canvas.getBoundingClientRect();
-  var left=Math.max(6, Math.min(r.width-cw-6, sx+sw/2-cw/2));
-  var top=sy-ch-10;
-  if(top<6) top=sy+(n._dh||n.h)*view.k+10;
-  bctx.style.left=left+'px'; bctx.style.top=top+'px';
-}
-
-// ---- редактирование текста прямо в блоке ----
-function startEdit(id){
-  var n=byId(id); if(!n) return;
-  commitEdit();
-  sel=id; editing=id; editSnap=snapshot();
-  render(true);
-  if(!bedit) return;
-  var sx=n.x*view.k+view.x, sy=n.y*view.k+view.y;
-  bedit.hidden=false;
-  bedit.style.left=sx+'px'; bedit.style.top=sy+'px';
-  bedit.style.width=(n.w*view.k)+'px';
-  bedit.style.minHeight=((n._dh||n.h)*view.k)+'px';
-  bedit.style.fontSize=((n.fontSize||14)*view.k)+'px';
-  bedit.style.fontFamily=FONT;
-  bedit.style.textAlign=(n.align==='left')?'left':'center';
-  bedit.style.background=n.color||cssv('--panel2','#1e2025');
-  bedit.style.color=n.color?'#20242c':cssv('--text','#e9e9ee');
-  bedit.innerText=n.text||'';
-  bedit.focus();
-  try{ var rg=document.createRange(); rg.selectNodeContents(bedit); var s=window.getSelection(); s.removeAllRanges(); s.addRange(rg); }catch(_){}
-  placeCtx();
-}
-function commitEdit(){
-  if(!editing || !bedit) { editing=null; return; }
-  var n=byId(editing);
-  var v=bedit.innerText.replace(/\\r/g,'').slice(0,2000);
-  if(n && v!==n.text){
-    if(editSnap){ undoStack.push(editSnap); if(undoStack.length>80) undoStack.shift(); redoStack.length=0; }
-    n.text=v; markDirty();
-  }
-  editing=null; editSnap=null; bedit.hidden=true;
-  render();
-}
-if(bedit){
-  bedit.addEventListener('blur',commitEdit);
-  bedit.addEventListener('pointerdown',function(e){ e.stopPropagation(); });
-  bedit.addEventListener('keydown',function(e){
-    if(e.key==='Escape'){ e.preventDefault(); commitEdit(); }
-    else if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){ e.preventDefault(); commitEdit(); save(); }
-    else if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); commitEdit(); }
-  });
-}
-
-function syncInspect(){
-  var n=sel?byId(sel):null;
-  if(!n || editing){ inspect.hidden=true; return; }
-  inspect.hidden=false;
-  var ti=document.getElementById('bi_text');
-  if(document.activeElement!==ti) ti.value=n.text||'';
-  var pr=document.getElementById('bi_parentrow');
-  if(kind==='orgchart'){
-    pr.hidden=false;
-    var sc=document.getElementById('bi_parent');
-    var opts='<option value="">— нет (корень) —</option>';
-    model.nodes.forEach(function(m){
-      if(m.id===n.id || isDescendant(m.id,n.id)) return;
-      opts+='<option value="'+esc(m.id)+'"'+(n.parent===m.id?' selected':'')+'>'+esc(oneline(m.text))+'</option>';
-    });
-    sc.innerHTML=opts;
-  } else { pr.hidden=true; }
-  document.getElementById('bi_ref').value=(n.ref&&n.ref.id)||'';
-  document.getElementById('bi_reftype').value=(n.ref&&n.ref.type)||'user';
-}
-
-function addNodeAt(wx,wy,edit){
-  pushUndo();
-  var n={ id:uid('n'), x:Math.round(wx/8)*8, y:Math.round(wy/8)*8, w:200, h:56, text:'Текст', color:null, fontSize:14, align:'center', autoH:true, parent:null, ref:null };
-  model.nodes.push(n); sel=n.id; render();
-  if(edit!==false) setTimeout(function(){ startEdit(n.id); },0);
-}
-function dupSel(){
-  var n=sel&&byId(sel); if(!n) return;
-  pushUndo();
-  var c=JSON.parse(JSON.stringify(n)); c.id=uid('n'); c.x=(n.x||0)+24; c.y=(n.y||0)+24;
-  if(kind!=='orgchart') c.parent=null;
-  model.nodes.push(c); sel=c.id; render();
-}
-function delSelected(){
-  if(!sel) return;
-  commitEdit();
-  pushUndo();
-  model.nodes=model.nodes.filter(function(n){ return n.id!==sel; });
-  model.nodes.forEach(function(n){ if(n.parent===sel) n.parent=null; });
-  model.edges=model.edges.filter(function(e){ return e.from!==sel && e.to!==sel; });
-  sel=null; render();
-}
-function addEdge(from,to){
-  if(from===to) return;
-  var dup=model.edges.filter(function(e){ return (e.from===from&&e.to===to)||(e.from===to&&e.to===from); });
-  pushUndo();
-  if(dup.length){
-    model.edges=model.edges.filter(function(e){ return dup.indexOf(e)<0; });
-    setStatus('связь между блоками убрана');
-  } else {
-    model.edges.push({ id:uid('e'), from:from, to:to });
-    setStatus('связь добавлена');
-  }
-  render();
-}
-function fit(){
-  var r=canvas.getBoundingClientRect(), pad=40;
-  model.nodes.forEach(measure);
-  if(!model.nodes.length){ view={x:pad,y:pad,k:1}; applyView(); return; }
-  var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+(n._dh||n.h)); });
-  var bw=Math.max(1,maxX-minX), bh=Math.max(1,maxY-minY);
-  var k=Math.min((r.width-pad*2)/bw,(r.height-pad*2)/bh,2);
-  k=Math.max(0.15,Math.min(2,k||1));
-  view.k=k;
-  view.x=(r.width-bw*k)/2-minX*k;
-  view.y=(r.height-bh*k)/2-minY*k;
-  applyView();
-}
-
-var SAVE_ERR={ csrf:'сессия формы устарела — обновите страницу', forbidden:'нет доступа', notfound:'доска не найдена', too_big:'слишком большая доска', bad_json:'ошибка данных — не сохранено', bad_shape:'ошибка данных — не сохранено' };
-function renderBoardPng(cb){
-  commitEdit();
-  var keepSel=sel; sel=null; render(true); // без выделения и ручек в PNG
-  var bb=computeBBox(), pad=30, W=Math.max(1,bb.w+pad*2), H=Math.max(1,bb.h+pad*2);
-  var clone=svg.cloneNode(true);
-  sel=keepSel; render(true);
-  clone.setAttribute('xmlns',NS);
-  clone.setAttribute('width',W); clone.setAttribute('height',H);
-  clone.setAttribute('viewBox',(bb.x-pad)+' '+(bb.y-pad)+' '+W+' '+H);
-  for(var i=0;i<clone.childNodes.length;i++){ var ch=clone.childNodes[i]; if(ch.tagName==='g') ch.removeAttribute('transform'); }
-  var s=new XMLSerializer().serializeToString(clone);
-  s=s.replace(/var\\(--(bg|panel|panel2|line|text|muted|accent|accent2|ok|bad|warn)\\)/g,function(_m,k){ return cssv('--'+k,'#888'); });
-  var src='data:image/svg+xml;base64,'+btoa(unescape(encodeURIComponent('<?xml version="1.0"?>'+s)));
-  var img=new Image();
-  img.onload=function(){
-    var scl=2, cnv=document.createElement('canvas'); cnv.width=W*scl; cnv.height=H*scl;
-    var cx=cnv.getContext('2d'); cx.fillStyle=cssv('--bg','#0f1013'); cx.fillRect(0,0,cnv.width,cnv.height);
-    cx.drawImage(img,0,0,cnv.width,cnv.height);
-    cnv.toBlob(function(blob){ cb(blob||null); });
-  };
-  img.onerror=function(){ cb(null); };
-  img.src=src;
-}
-function blobToDataUrl(blob,cb){
-  try{ var fr=new FileReader(); fr.onload=function(){ cb(String(fr.result||'')); }; fr.onerror=function(){ cb(''); }; fr.readAsDataURL(blob); }
-  catch(e){ cb(''); }
-}
-function postSave(pngDataUrl){
-  var btn=document.getElementById('bsave');
-  var form=document.getElementById('bform');
-  var csrfEl=form?form.querySelector('input[name=_csrf]'):null;
-  var body='_csrf='+encodeURIComponent(csrfEl?csrfEl.value:'')+'&data='+encodeURIComponent(JSON.stringify(model));
-  if(pngDataUrl && pngDataUrl.length<4000000) body+='&png='+encodeURIComponent(pngDataUrl);
-  fetch('/board/'+boardId+'/save',{ method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:body, credentials:'same-origin' })
-    .then(function(r){ return r.json(); })
-    .then(function(j){
-      if(btn) btn.disabled=false;
-      if(j&&j.ok){ dirty=false; serverVersion=j.version; setStatus('сохранено (v'+j.version+') '+new Date().toLocaleTimeString()); try{ localStorage.removeItem('fc_board_'+boardId); }catch(e){} }
-      else setStatus('не сохранено: '+(SAVE_ERR[j&&j.err]||(j&&j.err)||'ошибка'));
-    })
-    .catch(function(){ if(btn) btn.disabled=false; setStatus('ошибка сети — не сохранено'); });
-}
-function save(){
-  commitEdit();
-  var btn=document.getElementById('bsave'); if(btn) btn.disabled=true; setStatus('сохранение…');
-  if(JSON.stringify(model).length>2500000){ if(btn) btn.disabled=false; setStatus('доска слишком большая — не сохранено'); return; }
-  try{
-    renderBoardPng(function(blob){
-      if(!blob){ postSave(null); return; }
-      blobToDataUrl(blob,function(u){ postSave(u||null); });
-    });
-  }catch(e){ postSave(null); }
-}
-function computeBBox(){
-  model.nodes.forEach(measure);
-  var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
-  model.nodes.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+(n._dh||n.h)); });
-  if(!model.nodes.length){ minX=0;minY=0;maxX=400;maxY=200; }
-  return { x:minX, y:minY, w:maxX-minX, h:maxY-minY };
-}
-function exportPng(){
-  setStatus('готовлю PNG…');
-  renderBoardPng(function(blob){
-    if(!blob){ setStatus('не удалось сделать PNG'); return; }
-    var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='board-'+boardId+'.png';
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(function(){ URL.revokeObjectURL(a.href); },2000);
-    setStatus('PNG сохранён');
-  });
-}
-
-canvas.addEventListener('wheel',function(e){
-  if(e.target.closest && e.target.closest('#bctx,#bedit')) return;
-  e.preventDefault();
-  if(editing) commitEdit();
-  var r=canvas.getBoundingClientRect();
-  var wx=(e.clientX-r.left-view.x)/view.k, wy=(e.clientY-r.top-view.y)/view.k;
-  var k2=view.k*(e.deltaY>0?0.9:1.1); k2=Math.max(0.15,Math.min(3,k2));
-  view.x=(e.clientX-r.left)-wx*k2; view.y=(e.clientY-r.top)-wy*k2; view.k=k2;
-  applyView();
-},{passive:false});
-
-canvas.addEventListener('pointerdown',function(e){
-  if(e.target.closest && e.target.closest('#bctx,#bedit')) return;
-  var hDir=e.target.getAttribute && e.target.getAttribute('data-h');
-  if(hDir && sel){
-    var rn=byId(sel);
-    if(rn){ pushUndo(); resize={ id:sel, dir:hDir, x0:e.clientX, y0:e.clientY, ow:rn.w, oh:(rn._dh||rn.h), ox:rn.x, oy:rn.y }; try{ canvas.setPointerCapture(e.pointerId); }catch(_){} }
-    return;
-  }
-  if(editing) commitEdit();
-  var eEl=e.target && e.target.closest ? e.target.closest('.beedge') : null;
-  var edge=eEl ? eEl.getAttribute('data-eid') : (e.target && e.target.getAttribute && e.target.getAttribute('data-eid'));
-  if(edge){ pushUndo(); model.edges=model.edges.filter(function(x){ return x.id!==edge; }); render(); setStatus('связь удалена (Ctrl+Z — вернуть)'); return; }
-  var g=e.target.closest ? e.target.closest('.benode') : null;
-  if(mode==='connect'){
-    if(g){
-      var id=g.getAttribute('data-id');
-      if(!connectFrom){ connectFrom=id; setStatus('связь: выберите второй блок (повторно между теми же — разорвать)'); }
-      else if(connectFrom!==id){ addEdge(connectFrom,id); connectFrom=null; mode='select'; }
-    }
-    return;
-  }
-  if(g){
-    var n=byId(g.getAttribute('data-id')); if(!n) return;
-    sel=n.id; render();
-    var w0=screenToWorld(e.clientX,e.clientY);
-    ndrag={ id:n.id, dx:w0.x-n.x, dy:w0.y-n.y, moved:false, org:null };
-    try{ canvas.setPointerCapture(e.pointerId); }catch(_){}
-  } else {
-    sel=null; render();
-    pan={ px:e.clientX, py:e.clientY, x:view.x, y:view.y };
-    try{ canvas.setPointerCapture(e.pointerId); }catch(_){}
-  }
-});
-canvas.addEventListener('pointermove',function(e){
-  if(pan){ view.x=pan.x+(e.clientX-pan.px); view.y=pan.y+(e.clientY-pan.py); applyView(); return; }
-  if(resize){
-    var rn=byId(resize.id); if(!rn) return;
-    var dx=(e.clientX-resize.x0)/view.k, dy=(e.clientY-resize.y0)/view.k, d=resize.dir;
-    if(d.indexOf('e')>=0) rn.w=Math.max(90,Math.round(resize.ow+dx));
-    if(d.indexOf('w')>=0){ var nw=Math.max(90,Math.round(resize.ow-dx)); rn.x=Math.round(resize.ox+(resize.ow-nw)); rn.w=nw; }
-    if(d.indexOf('s')>=0){ rn.autoH=false; rn.h=Math.max(40,Math.round(resize.oh+dy)); }
-    if(d==='n'||d==='nw'||d==='ne'){ rn.autoH=false; var nh=Math.max(40,Math.round(resize.oh-dy)); rn.y=Math.round(resize.oy+(resize.oh-nh)); rn.h=nh; }
-    render(true);
-    return;
-  }
-  if(ndrag){
-    var n=byId(ndrag.id); if(!n) return;
-    if(!ndrag.moved){ pushUndo(); ndrag.moved=true; }
-    if(kind==='orgchart'){
-      var el=document.elementFromPoint(e.clientX,e.clientY);
-      var tg=el&&el.closest?el.closest('.benode'):null;
-      ndrag.org=(tg && tg.getAttribute('data-id')!==n.id) ? tg.getAttribute('data-id') : '__root__';
-      setStatus(ndrag.org==='__root__'?'отпустите — блок станет корневым':'отпустите — подчинить выбранному');
-    } else {
-      var w=screenToWorld(e.clientX,e.clientY);
-      n.x=Math.round((w.x-ndrag.dx)/8)*8; n.y=Math.round((w.y-ndrag.dy)/8)*8;
-      render(true);
-    }
-  }
-});
-function endDrag(){
-  if(ndrag && kind==='orgchart' && ndrag.moved && ndrag.org){
-    var n=byId(ndrag.id);
-    if(n){ if(ndrag.org==='__root__') n.parent=null; else if(!isDescendant(ndrag.org, n.id)) n.parent=ndrag.org; }
-    render(); setStatus('не сохранено');
-  } else if((ndrag && !ndrag.moved) || resize){
-    render();
-  }
-  pan=null; ndrag=null; resize=null;
-}
-canvas.addEventListener('pointerup',endDrag);
-canvas.addEventListener('pointercancel',endDrag);
-canvas.addEventListener('dblclick',function(e){
-  if(e.target.closest && e.target.closest('#bctx,#bedit')) return;
-  var g=e.target.closest?e.target.closest('.benode'):null;
-  if(g){ startEdit(g.getAttribute('data-id')); return; }
-  var w=screenToWorld(e.clientX,e.clientY);
-  addNodeAt(w.x,w.y);
-});
-
-if(bar) bar.addEventListener('click',function(e){
-  var b=e.target.closest?e.target.closest('[data-act]'):null; if(!b) return;
-  var a=b.getAttribute('data-act');
-  if(a==='add'){ var r=canvas.getBoundingClientRect(); var w=screenToWorld(r.left+r.width/2,r.top+r.height/2); addNodeAt(w.x,w.y); }
-  else if(a==='connect'){
-    if(kind==='orgchart'){ setStatus('в оргрежиме связи задаются полем «Подчинён»'); return; }
-    commitEdit();
-    mode=(mode==='connect')?'select':'connect'; connectFrom=null;
-    setStatus(mode==='connect'?'связь: выберите два блока — соединить или разорвать':'');
-    render();
-  }
-  else if(a==='undo'){ undo(); }
-  else if(a==='redo'){ redo(); }
-  else if(a==='fit'){ fit(); }
-  else if(a==='save'){ save(); }
-  else if(a==='png'){ exportPng(); }
-});
-
-var textTimer=null;
-document.getElementById('bi_text').addEventListener('input',function(){
-  var n=sel&&byId(sel); if(!n) return;
-  n.text=this.value.slice(0,2000); markDirty();
-  clearTimeout(textTimer); textTimer=setTimeout(function(){ render(true); },220);
-});
-document.getElementById('bi_parent').addEventListener('change',function(){
-  var n=sel&&byId(sel); if(!n) return;
-  pushUndo(); n.parent=this.value||null; render();
-});
-function applyRef(){
-  var n=sel&&byId(sel); if(!n) return;
-  var id=document.getElementById('bi_ref').value.replace(/[^0-9]/g,'').slice(0,25);
-  n.ref=id?{ type:document.getElementById('bi_reftype').value==='role'?'role':'user', id:id }:null;
-  markDirty(); render(true);
-}
-document.getElementById('bi_ref').addEventListener('change',applyRef);
-document.getElementById('bi_reftype').addEventListener('change',applyRef);
-document.getElementById('bi_dup').addEventListener('click',dupSel);
-document.getElementById('bi_del').addEventListener('click',delSelected);
-
-document.addEventListener('keydown',function(e){
-  if(editing){
-    if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){ e.preventDefault(); commitEdit(); save(); }
-    return;
-  }
-  var tag=(e.target&&e.target.tagName)||'';
-  if(/^(INPUT|TEXTAREA|SELECT)$/.test(tag)) return;
-  var k=e.key.toLowerCase();
-  if((e.key==='Delete'||e.key==='Backspace')&&sel){ e.preventDefault(); delSelected(); }
-  else if((e.key==='Enter'||e.key==='F2')&&sel){ e.preventDefault(); startEdit(sel); }
-  else if((e.ctrlKey||e.metaKey)&&k==='z'){ e.preventDefault(); if(e.shiftKey) redo(); else undo(); }
-  else if((e.ctrlKey||e.metaKey)&&k==='y'){ e.preventDefault(); redo(); }
-  else if((e.ctrlKey||e.metaKey)&&k==='s'){ e.preventDefault(); save(); }
-  else if((e.ctrlKey||e.metaKey)&&k==='d'&&sel){ e.preventDefault(); dupSel(); }
-});
-window.addEventListener('beforeunload',function(e){ if(dirty){ e.preventDefault(); e.returnValue=''; } });
-setInterval(function(){
-  if(!dirty) return;
-  try{ localStorage.setItem('fc_board_'+boardId, JSON.stringify({ v:serverVersion, at:Date.now(), model:model })); }catch(e){}
-},5000);
-
-try{
-  var raw=localStorage.getItem('fc_board_'+boardId);
-  if(raw){
-    var dr=JSON.parse(raw);
-    if(dr && dr.model && dr.v===serverVersion && window.confirm('Есть несохранённый черновик этой доски в браузере. Восстановить его?')){
-      model=dr.model; dirty=true;
-    } else { localStorage.removeItem('fc_board_'+boardId); }
-  }
-}catch(e){}
-
-render();
-fit();
-setStatus(dirty?'восстановлен черновик — не сохранён':'');
-})();`;
 
 // ---------- FAQ + реакции ----------
 async function faqBody(client, acc, user) {
@@ -7202,44 +6210,74 @@ async function panelReasons(user) {
 async function panelRoleCheck(client, user, pageNum = 0) {
   const g = guildOf(client);
   if (!g) return '<div class="card">Бот офлайн.</div>';
-  const parts = await db.all('SELECT discord_id, name FROM participants ORDER BY name');
+  const parts = await db.all('SELECT discord_id, name, hr_position FROM participants ORDER BY name');
   const rows = [];
   for (const p of parts) {
     const ident = await passportsLib.computeEffectiveIdentity(p.discord_id).catch(() => null);
     if (!ident) continue;
     const m = g.members.cache.get(p.discord_id);
-    if (!m) { rows.push({ id: p.discord_id, name: p.name, issue: 'нет на сервере' }); continue; }
+    if (!m) { rows.push({ id: p.discord_id, name: p.name, issue: 'нет на сервере', fixes: [], offServer: true }); continue; }
     const wantNick = `${ident.name} | ${ident.static}`;
-    const problems = [];
-    if ((m.nickname || '') !== wantNick) problems.push(`ник: «${m.nickname || m.user.username}» → «${wantNick}»`);
+    const problems = []; const fixes = [];
+    if ((m.nickname || '') !== wantNick) {
+      const cur = m.nickname || m.user.username;
+      problems.push(`ник: «${cur}» → «${wantNick}»`);
+      fixes.push(`Ник изменится: «${cur}» → «${wantNick}»`);
+    }
     if (ident.roleId) {
       const hasRight = m.roles.cache.has(ident.roleId);
       let extraRank = (config.ROLE_IDS || []).filter((r) => r !== ident.roleId && m.roles.cache.has(r));
-      // HR-Менеджер, одобренный по заявке, раньше получал только Discord-роль — это не «лишняя»
-      // роль, а ранг, не закреплённый в паспорте; «Починить» закрепит его (adoptDiscordHr).
-      const hrIdx = (config.ROLE_IDS || []).indexOf(config.ROLE_HR);
-      const curIdx = (config.ROLE_IDS || []).indexOf(ident.roleId);
-      if (extraRank.includes(config.ROLE_HR) && (curIdx === -1 || curIdx > hrIdx)) {
+      // HR-Менеджер — должность поверх ранга (participants.hr_position), её роль не «лишняя».
+      if (extraRank.includes(config.ROLE_HR)) {
         extraRank = extraRank.filter((r) => r !== config.ROLE_HR);
-        problems.push('роль HR-Менеджера выдана, но ранг паспорта ниже — нажмите «Починить», чтобы закрепить HR');
+        if (!p.hr_position && ident.roleId !== config.ROLE_HR) {
+          problems.push('роль HR-Менеджера есть, но должность не закреплена');
+          fixes.push('Должность HR-Менеджера закрепится в базе, роль останется как есть');
+        }
       }
-      if (!hasRight) problems.push(`нет роли ранга ${roleName(client, ident.roleId)}`);
-      if (extraRank.length) problems.push(`лишние роли ранга: ${extraRank.map((r) => roleName(client, r)).join(', ')}`);
+      if (p.hr_position && !m.roles.cache.has(config.ROLE_HR)) {
+        problems.push('нет роли HR-Менеджера (должность назначена)');
+        fixes.push(`Участнику будет выдана роль «${roleName(client, config.ROLE_HR)}»`);
+      }
+      if (!hasRight) {
+        problems.push(`нет роли ранга ${roleName(client, ident.roleId)}`);
+        fixes.push(`Будет выдана роль ранга «${roleName(client, ident.roleId)}»`);
+      }
+      if (extraRank.length) {
+        const names = extraRank.map((r) => roleName(client, r)).join(', ');
+        problems.push(`лишние роли ранга: ${names}`);
+        fixes.push(`Будут сняты лишние роли ранга: ${names}`);
+      }
     }
-    if (config.ROLE_ORGANIZATION && !m.roles.cache.has(config.ROLE_ORGANIZATION)) problems.push('нет роли организации');
-    if (problems.length) rows.push({ id: p.discord_id, name: p.name, issue: problems.join('; ') });
+    if (config.ROLE_ORGANIZATION && !m.roles.cache.has(config.ROLE_ORGANIZATION)) {
+      problems.push('нет роли организации');
+      fixes.push(`Будет выдана роль организации «${roleName(client, config.ROLE_ORGANIZATION)}»`);
+    }
+    if (problems.length) rows.push({ id: p.discord_id, name: p.name, issue: problems.join('; '), fixes });
   }
   const total = rows.length;
   const pageRows = rows.slice(pageNum * PAGE_SIZE, pageNum * PAGE_SIZE + PAGE_SIZE);
-  const list = pageRows.map((r) => `<tr>
+  const tip = (lines) => esc(lines.join('\n')).replace(/\n/g, '&#10;');
+  const list = pageRows.map((r) => {
+    let action;
+    if (r.offServer) {
+      const t = tip(['Участника нет на сервере — бот не может ему ничего выдать или переименовать.', 'Кнопка «Уволить»: участник будет уволен из организации (роли сняты, паспорта и каналы-профили заархивированы), запись попадёт в историю.', 'Если человек просто вышел и должен вернуться — ничего не нажимайте и пригласите его на сервер.']);
+      action = `<form method="POST" action="/panel/rolecheck/kick" style="display:inline" onsubmit="return confirm('Уволить из организации: ${esc(r.name).replace(/'/g, '')}? Его нет на сервере.')">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.id)}"><button class="btn ghost sm" style="background:var(--bad);color:#fff!important" type="submit" title="${t}">Уволить</button></form>`;
+    } else {
+      const t = tip(['Что изменится при нажатии:', ...r.fixes.map((f) => '• ' + f)]);
+      action = `<form method="POST" action="/panel/rolecheck/fix" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.id)}"><button class="btn ghost sm" type="submit" title="${t}">Починить</button></form>`;
+    }
+    return `<tr>
     <td>${personLink(client, r.id)}</td>
-    <td class="mini">${esc(r.issue)}</td>
-    <td><form method="POST" action="/panel/rolecheck/fix" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${esc(r.id)}"><button class="btn ghost sm" type="submit">Починить</button></form></td>
-  </tr>`).join('');
+    <td class="mini">${esc(r.issue)}${r.fixes.length ? `<div class="mini" style="opacity:.75;margin-top:2px">→ ${esc(r.fixes.join('; '))}</div>` : ''}</td>
+    <td style="white-space:nowrap">${action}</td>
+  </tr>`;
+  }).join('');
+  const allTip = tip(['Для каждого участника применит исправления из строки (ник, роли ранга, роль организации, должность HR).', 'Тех, кого нет на сервере, не затронет.']);
   return `<div class="card"><h2>Расхождения ролей / ников (${total})</h2>
-    ${total ? `<form method="POST" action="/panel/rolecheck/fixall" style="margin-bottom:10px" onsubmit="return confirm('Пересинхронизировать всех перечисленных?')">${csrfField(user)}<button class="btn sm" type="submit">Починить всех</button></form>
+    ${total ? `<form method="POST" action="/panel/rolecheck/fixall" style="margin-bottom:10px" onsubmit="return confirm('Применить исправления ко всем перечисленным участникам?')">${csrfField(user)}<button class="btn sm" type="submit" title="${allTip}">Починить всех</button></form>
     ${pager('/panel?tab=role_check', pageNum, total)}
-    <div class="tablewrap"><table><tr><th>Участник</th><th>Проблема</th><th></th></tr>${list}</table></div>
+    <div class="tablewrap"><table><tr><th>Участник</th><th>Проблема → что будет сделано</th><th></th></tr>${list}</table></div>
     ${pager('/panel?tab=role_check', pageNum, total)}` : '<p class="mini">Все ники и роли совпадают с эффективной личностью 👍</p>'}
   </div>`;
 }
@@ -7691,100 +6729,6 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (!rateOk('act:' + pathName + ':' + user.id, lim, win)) {
       const back = pathName === '/apply' ? '/apply?' : pathName.startsWith('/u/') ? '/people?' : '/me?';
       return back + qs({ err: 'Слишком часто — попробуйте позже.' });
-    }
-  }
-
-  // ===== доски (только havirys) =====
-  if (pathName === '/board/create') {
-    if (user.id !== OWNER_ID && (acc.rank || 0) < LEVELS.deputy) return '/boards?' + qs({ err: 'Создавать доски может заместитель+ или havirys.' });
-    const title = (body.get('title') || '').trim().slice(0, 80) || 'Без названия';
-    const kindB = body.get('kind') === 'orgchart' ? 'orgchart' : 'freeform';
-    const now = new Date().toISOString();
-    const r = await db.run(
-      "INSERT INTO boards (title, kind, data, visibility, archived, version, created_by, created_at, updated_by, updated_at) VALUES (?, ?, ?, 'owner', 0, 1, ?, ?, ?, ?)",
-      [title, kindB, boardBlank(kindB), user.id, now, user.id, now],
-    );
-    // автор создаваемой доски получает право редактирования (если не havirys)
-    if (user.id !== OWNER_ID) {
-      await db.run('INSERT INTO board_grants (board_id, subject_type, subject_id, mode, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
-        [r.lastID, 'user', user.id, 'edit', user.id, now]).catch(() => {});
-    }
-    return '/board/' + r.lastID + '/edit';
-  }
-  {
-    const bm = pathName.match(/^\/board\/(\d+)\/(settings|archive|unarchive|delete|restore|grant_add|grant_del|reseed)$/);
-    if (bm) {
-      const bid = parseInt(bm[1], 10) || 0;
-      const op = bm[2];
-      const board = await db.get('SELECT * FROM boards WHERE id = ?', [bid]).catch(() => null);
-      if (!board) return '/boards?' + qs({ err: 'Доска не найдена.' });
-      const isOwner = user.id === OWNER_ID;
-      const bmode = await boardAccess(client, user, board);
-      // выдача/снятие грантов, удаление, сброс к шаблону — только havirys
-      if ((op === 'grant_add' || op === 'grant_del' || op === 'delete' || op === 'reseed') && !isOwner) {
-        return '/board/' + bid + '/settings?' + qs({ err: 'Это может только havirys.' });
-      }
-      if (op === 'reseed') {
-        const seed = BOARD_SEEDS.find((s) => s.slug === board.slug);
-        if (!seed) return '/board/' + bid + '/settings?' + qs({ err: 'Это не стандартная доска.' });
-        const data = JSON.stringify(boardParse(JSON.stringify(boardSeedModel(seed))));
-        const now = new Date().toISOString();
-        const nv = (board.version || 1) + 1;
-        await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, board.version || 1, board.data, user.id, now]).catch(() => {});
-        await db.run('UPDATE boards SET title = ?, kind = ?, data = ?, onboarding = ?, image_file = NULL, version = ?, updated_by = ?, updated_at = ? WHERE id = ?',
-          [seed.title, seed.kind, data, seed.onboarding ? 1 : 0, nv, user.id, now, bid]);
-        return '/board/' + bid + '/edit?' + qs({ ok: 'Содержимое сброшено к шаблону. Нажми «Сохранить», чтобы пересобрать PNG.' });
-      }
-      // остальное — нужен режим редактирования
-      if (op !== 'grant_add' && op !== 'grant_del' && op !== 'delete' && bmode !== 'edit') {
-        return '/board/' + bid + '?' + qs({ err: 'Нет прав на изменение этой доски.' });
-      }
-      if (op === 'settings') {
-        const title = (body.get('title') || '').trim().slice(0, 80) || 'Без названия';
-        const kindB = body.get('kind') === 'orgchart' ? 'orgchart' : 'freeform';
-        const onb = body.get('onboarding') === '1' ? 1 : 0;
-        await db.run('UPDATE boards SET title = ?, kind = ? WHERE id = ?', [title, kindB, bid]);
-        if (isOwner) {
-          if (onb) await db.run('UPDATE boards SET onboarding = CASE WHEN id = ? THEN 1 ELSE 0 END', [bid]);
-          else await db.run('UPDATE boards SET onboarding = 0 WHERE id = ?', [bid]);
-        }
-        return '/board/' + bid + '/settings?' + qs({ ok: 'Сохранено.' });
-      }
-      if (op === 'grant_add') {
-        const st = body.get('subject_type') === 'user' ? 'user' : 'level';
-        const mode = body.get('mode') === 'edit' ? 'edit' : 'view';
-        let sid = st === 'user'
-          ? (body.get('subject_user') || '').replace(/[^0-9]/g, '').slice(0, 25)
-          : (['member', 'hr', 'deputy', 'owner'].includes(body.get('subject_level')) ? body.get('subject_level') : '');
-        if (!sid) return '/board/' + bid + '/settings?' + qs({ err: 'Укажите, кому выдать доступ.' });
-        await db.run('DELETE FROM board_grants WHERE board_id = ? AND subject_type = ? AND subject_id = ?', [bid, st, sid]).catch(() => {});
-        await db.run('INSERT INTO board_grants (board_id, subject_type, subject_id, mode, granted_by, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
-          [bid, st, sid, mode, user.id, new Date().toISOString()]);
-        return '/board/' + bid + '/settings?' + qs({ ok: 'Доступ выдан.' });
-      }
-      if (op === 'grant_del') {
-        const gidn = parseInt(body.get('grant_id'), 10) || 0;
-        await db.run('DELETE FROM board_grants WHERE id = ? AND board_id = ?', [gidn, bid]).catch(() => {});
-        return '/board/' + bid + '/settings?' + qs({ ok: 'Доступ убран.' });
-      }
-      if (op === 'delete') {
-        await db.run('DELETE FROM boards WHERE id = ?', [bid]);
-        await db.run('DELETE FROM board_versions WHERE board_id = ?', [bid]).catch(() => {});
-        await db.run('DELETE FROM board_grants WHERE board_id = ?', [bid]).catch(() => {});
-        return '/boards?' + qs({ ok: 'Доска удалена.' });
-      }
-      if (op === 'restore') {
-        const vid = parseInt(body.get('version_id'), 10) || 0;
-        const v = await db.get('SELECT data FROM board_versions WHERE id = ? AND board_id = ?', [vid, bid]).catch(() => null);
-        if (!v) return '/board/' + bid + '/versions?' + qs({ err: 'Версия не найдена.' });
-        const nv = ((board.version) || 1) + 1;
-        const now = new Date().toISOString();
-        await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [v.data, nv, user.id, now, bid]);
-        await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, v.data, user.id, now]).catch(() => {});
-        return '/board/' + bid + '/edit?' + qs({ ok: 'Версия восстановлена.' });
-      }
-      await db.run('UPDATE boards SET archived = ? WHERE id = ?', [op === 'archive' ? 1 : 0, bid]);
-      return '/boards?' + qs({ ok: op === 'archive' ? 'Доска в архиве.' : 'Доска восстановлена.' });
     }
   }
 
@@ -9784,31 +8728,15 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     if (pathName === '/admin/versions') {
       const act = body.get('act') || '';
       const back = '/panel?tab=admin&';
-      const RESERVED = ['v1', 'v2', 'admin', 'panel', 'me', 'login', 'logout', 'people', 'photo', 'i', 'auth', 'cimg', 'asset', 'p', 'g', 'u', 'api', 'faq', 'apply', 'ticket', 'tickets', 'text', 'audit', 'tools', 'health', 'oldsite'];
-      if (act === 'save_path') {
-        const p = (body.get('v2_path') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
-        if (!p || RESERVED.includes(p.toLowerCase())) return back + qs({ err: 'Путь пустой или занят служебным разделом сайта.' });
-        await db.setSetting('site.v2_path', p);
-        await loadSite(true);
-        await webAuditMeta(client, user, 'Путь новой версии сайта изменён', `/${p}`);
-        return back + qs({ ok: `Теперь новая версия открывается по /${p}.` });
-      }
-      if (act === 'main_v2' || act === 'main_v1') {
-        await db.setSetting('site.main_version', act === 'main_v2' ? 'v2' : '');
-        await loadSite(true);
-        await webAuditMeta(client, user, 'Основная версия сайта изменена', act === 'main_v2' ? 'новая' : 'старая');
-        return (act === 'main_v2' ? '/' + skinSegments().v1 : '') + '/panel?tab=admin&' + qs({ ok: act === 'main_v2' ? 'Новая версия теперь основная. Старая доступна по скрытой ссылке.' : 'Основной снова старая версия.' });
-      }
-      if (act === 'v2_on' || act === 'v2_off') {
-        await db.setSetting('site.v2_enabled', act === 'v2_off' ? '0' : '');
-        await loadSite(true);
-        return back + qs({ ok: act === 'v2_off' ? 'Новая версия отключена.' : 'Новая версия включена.' });
-      }
       if (act === 'photo_save') {
         const clampDays = (v) => String(Math.min(3650, Math.max(1, parseInt(v, 10) || 1)));
         await db.setSetting('site.photo_ttl_guest', clampDays(body.get('ttl_guest')));
         await db.setSetting('site.photo_ttl_user', clampDays(body.get('ttl_user')));
         await db.setSetting('site.photo_guests', body.get('guests') === '1' ? '' : '0');
+        const clampN = (v, d, mx) => String(Math.min(mx, Math.max(0, parseInt(v, 10) >= 0 ? parseInt(v, 10) : d)));
+        await db.setSetting('site.photo_album_max', String(Math.max(1, parseInt(clampN(body.get('album_max'), 40, 500), 10))));
+        await db.setSetting('site.photo_album_max_guest', String(Math.max(1, parseInt(clampN(body.get('album_max_guest'), 10, 500), 10))));
+        await db.setSetting('site.photo_user_total', clampN(body.get('user_total'), 500, 100000));
         await loadSite(true);
         return back + qs({ ok: 'Настройки фотообмена сохранены.' });
       }
@@ -10232,6 +9160,22 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   }
 
   // ===== сверка ролей: починить (Зам.+) =====
+  if (pathName === '/panel/rolecheck/kick') {
+    if (!(await panelTabAllowed(client, user, acc, 'role_check', LEVELS.deputy))) return '/panel?tab=role_check&' + qs({ err: 'Недостаточно прав.' });
+    if (!g) return '/panel?tab=role_check&' + qs({ err: 'Бот недоступен.' });
+    const kid = (body.get('id') || '').trim();
+    if (!/^\d{5,25}$/.test(kid)) return '/panel?tab=role_check&' + qs({ err: 'Неверный ID.' });
+    if (kid === OWNER_ID) return '/panel?tab=role_check&' + qs({ err: 'С этим участником нельзя взаимодействовать.' });
+    // Защита: увольняем только того, кого действительно нет на сервере.
+    const stillThere = g.members.cache.get(kid) || await g.members.fetch(kid).catch(() => null);
+    if (stillThere) return '/panel?tab=role_check&' + qs({ err: 'Участник на сервере — используйте «Починить».' });
+    const kp = await db.get('SELECT * FROM participants WHERE discord_id = ?', [kid]);
+    if (!kp) return '/panel?tab=role_check&' + qs({ err: 'Участник уже не в организации.' });
+    await hook('removeParticipant')(g, kp, 'Нет на сервере (сверка ролей)');
+    await webAudit(client, user, 'Увольнение: нет на сервере (сверка ролей, сайт)', `<@${kid}> ${kp.name}`);
+    return '/panel?tab=role_check&' + qs({ ok: 'Участник уволен из организации.' });
+  }
+
   if (pathName === '/panel/rolecheck/fix' || pathName === '/panel/rolecheck/fixall') {
     if (!(await panelTabAllowed(client, user, acc, 'role_check', LEVELS.deputy))) return '/panel?tab=role_check&' + qs({ err: 'Недостаточно прав.' });
     if (!g) return '/panel?tab=role_check&' + qs({ err: 'Бот недоступен.' });
@@ -10334,46 +9278,18 @@ function start(client, hooks = {}) {
 
   const server = http.createServer(async (req, res) => {
     const _reqStart = Date.now();
-    let _skinPrefix = ''; // '/NEWSITE' или '/OLDSITE' — если страница открыта по скрытой ссылке
-    const done = (code, headers, body) => {
-      if (_skinPrefix) {
-        const ct = String(headers['Content-Type'] || '');
-        if (typeof body === 'string' && ct.startsWith('text/html')) body = rewriteSkinLinks(body, _skinPrefix);
-        if (headers.Location && /^\/(?!\/)/.test(headers.Location)) headers = { ...headers, Location: prefixSkinUrl(headers.Location, _skinPrefix) };
-        headers = { ...headers, 'X-Robots-Tag': 'noindex, nofollow' };
-      }
-      res.writeHead(code, headers); res.end(body);
-    };
+    const done = (code, headers, body) => { res.writeHead(code, headers); res.end(body); };
     const html = (code, body, extra = {}) => done(code, { 'Content-Type': 'text/html; charset=utf-8', ...extra }, body);
     const redirect = (loc, extra = {}) => done(302, { Location: loc, ...extra }, '');
 
     try {
       const u = new URL(req.url, baseUrl());
       await loadSite();
-      // Две версии сайта: старая (v1) и новая (v2). Новая открывается по скрытой
-      // ссылке (/NEWSITE, путь настраивается), нигде не анонсируется. Какая из
-      // версий «основная» (без префикса) — настройка site.main_version.
-      const segs = skinSegments();
-      let path = u.pathname;
-      let skin = SITE.main_version === 'v2' ? 'v2' : 'v1';
-      const segM = /^\/([^/]+)(\/.*)?$/.exec(path);
-      if (segM) {
-        const lower = segM[1].toLowerCase();
-        if (lower === segs.v2.toLowerCase() || lower === segs.v1.toLowerCase()) {
-          skin = lower === segs.v2.toLowerCase() ? 'v2' : 'v1';
-          _skinPrefix = '/' + (skin === 'v2' ? segs.v2 : segs.v1);
-          path = segM[2] || '/';
-        }
-      }
-      if (_skinPrefix && skin === 'v2' && SITE.v2_enabled === '0') {
-        return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Not found');
-      }
-      skinALS.enterWith({ skin, prefix: _skinPrefix, path, search: u.search });
+      const path = u.pathname;
+      // Старые скрытые ссылки (/NEWSITE, /OLDSITE) ведут на обычные адреса.
+      if (LEGACY_SKIN_PREFIX.test(path)) return redirect((path.replace(LEGACY_SKIN_PREFIX, '') || '/') + u.search);
+      skinALS.enterWith({ path, search: u.search });
       if (Date.now() - _photoSweepAt > 600000) sweepPhotos().catch(() => {}); // убираем просроченные фото
-      // Доски в новой версии убраны.
-      if (skin === 'v2' && (path === '/boards' || path.startsWith('/board/'))) {
-        return html(404, layout({ title: 'Раздел убран', user: null, level: 'guest', body: '<h1>Раздел «Доски» убран в новой версии сайта</h1><a class="btn" href="/">На главную</a>' }));
-      }
       let user = readSession(req.headers.cookie);
       if (user && !(await sessionFresh(user))) user = null; // «выйти со всех устройств»
       // Локальный аккаунт (логин/пароль, без Discord). Если havirys привязал его
@@ -10403,7 +9319,7 @@ function start(client, hooks = {}) {
       const pageNum = Math.max(0, parseInt(u.searchParams.get('page') || '0', 10) || 0);
       const flash = flashBanner(u);
       const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
-      if (user && skin === 'v2') await refreshNavCounts();
+      if (user) await refreshNavCounts();
       const notif = user ? await unreadCount(user.id).catch(() => 0) : 0;
       const panelGrant = user ? (await getPanelGrants(client, user.id)).size > 0 : false;
       const L = (o) => layout({ notif, panelGrant, ...o }); // layout с колокольчиком
@@ -10456,18 +9372,58 @@ function start(client, hooks = {}) {
           "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});self.addEventListener('fetch',function(){});");
       }
 
-      // ----- Фотохостинг -----
+      // ----- Фотообменник (альбомы) -----
+      const pj = (code, obj) => done(code, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
+      const isPhotoAdmin = async () => {
+        if (!user) return false;
+        if (user.id === OWNER_ID) return true;
+        return ((await accessFor(client, user.id)).rank || 0) >= LEVELS.owner;
+      };
+      // Может ли текущий посетитель управлять альбомом: владелец, админ или с секретным токеном.
+      const canManageAlbum = async (album, token) => {
+        if (token && album.del_token && token === album.del_token) return true;
+        if (user && album.owner_id && album.owner_id === user.id) return true;
+        return isPhotoAdmin();
+      };
+
       if (path === '/photo' && req.method === 'GET') {
         let plevel = 'guest';
         if (user) plevel = (await accessFor(client, user.id)).level;
-        return html(200, L({ title: 'Фотохостинг', user, level: plevel, wide: true, body: flash + await photoBody(user, pageNum) }));
+        return html(200, L({ title: 'Фотообменник', user, level: plevel, wide: true, body: flash + await photoBody(user, pageNum) }));
+      }
+
+      if (path === '/photo/album' && req.method === 'POST') {
+        const b = await readBody(req);
+        if (!user && SITE.photo_guests === '0') return pj(403, { ok: false, err: 'Загрузка доступна после входа на сайт.' });
+        if (user && !csrfOk(user, b.get('_csrf'))) return pj(403, { ok: false, err: 'Сессия устарела — обновите страницу.' });
+        if (!photoRateOk('alb:' + (user ? user.id : clientIp), user ? 40 : 6)) return pj(429, { ok: false, err: 'Слишком много альбомов за час — попробуйте позже.' });
+        const maxDays = photoMaxDays(!!user);
+        let ttl = parseInt(b.get('ttl'), 10);
+        if (!(ttl >= 1)) ttl = maxDays;
+        ttl = Math.min(ttl, maxDays);
+        const title = (b.get('title') || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 80);
+        const acode = crypto.randomBytes(6).toString('base64url').replace(/[-_]/g, 'x');
+        const atoken = crypto.randomBytes(12).toString('base64url');
+        const expiresAt = new Date(Date.now() + ttl * 86400e3).toISOString();
+        await db.run('INSERT INTO photo_albums (code, title, owner_id, del_token, ip, views, expires_at, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)',
+          [acode, title, user ? user.id : '', atoken, clientIp, expiresAt, new Date().toISOString()]);
+        return pj(200, { ok: true, code: acode, title, url: albumUrl(acode), token: atoken, until: fmt(expiresAt) });
       }
 
       if (path === '/photo/upload' && req.method === 'POST') {
-        const pj = (code, obj) => done(code, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
         if (!user && SITE.photo_guests === '0') return pj(403, { ok: false, err: 'Загрузка доступна после входа на сайт.' });
         if (user && !csrfOk(user, req.headers['x-csrf'])) return pj(403, { ok: false, err: 'Сессия устарела — обновите страницу.' });
-        if (!photoRateOk(user ? 'u:' + user.id : 'ip:' + clientIp, user ? 80 : 12)) return pj(429, { ok: false, err: 'Слишком много загрузок за час — попробуйте позже.' });
+        const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [String(req.headers['x-album'] || '')]).catch(() => null);
+        if (!album) return pj(404, { ok: false, err: 'Альбом не найден или срок его хранения истёк.' });
+        const tokenOk = album.del_token && String(req.headers['x-album-token'] || '') === album.del_token;
+        if (!tokenOk && !(user && album.owner_id === user.id)) return pj(403, { ok: false, err: 'Нет прав добавлять фото в этот альбом.' });
+        if (!photoRateOk(user ? 'u:' + user.id : 'ip:' + clientIp, user ? 200 : 40)) return pj(429, { ok: false, err: 'Слишком много загрузок за час — попробуйте позже.' });
+        const inAlbum = (await db.get('SELECT COUNT(*) c FROM photos WHERE album_id = ?', [album.id]).catch(() => null) || { c: 0 }).c;
+        if (inAlbum >= albumMaxPhotos(!!album.owner_id)) return pj(400, { ok: false, err: `В альбоме уже максимум фото (${albumMaxPhotos(!!album.owner_id)}).` });
+        if (user && userMaxPhotos() > 0) {
+          const mine = (await db.get('SELECT COUNT(*) c FROM photos WHERE owner_id = ?', [user.id]).catch(() => null) || { c: 0 }).c;
+          if (mine >= userMaxPhotos()) return pj(400, { ok: false, err: `Достигнут лимит ваших фото (${userMaxPhotos()}). Удалите старые альбомы.` });
+        }
         const buf = await readRaw(req, PHOTO_MAX);
         if (!buf) return pj(413, { ok: false, err: 'Файл больше 10 МБ.' });
         const kind = sniffImage(buf);
@@ -10475,36 +9431,71 @@ function start(client, hooks = {}) {
         let origName = 'image';
         try { origName = decodeURIComponent(String(req.headers['x-filename'] || 'image')).replace(/[^\p{L}\p{N}._ -]/gu, '').slice(0, 80) || 'image'; } catch (_) {}
         const pcode = crypto.randomBytes(6).toString('base64url').replace(/[-_]/g, 'x');
-        const token = crypto.randomBytes(12).toString('base64url');
-        const maxDays = photoMaxDays(!!user);
-        let ttlDays = parseInt(req.headers['x-ttl'], 10);
-        if (!(ttlDays >= 1)) ttlDays = maxDays;
-        ttlDays = Math.min(ttlDays, maxDays);
-        const expiresAt = new Date(Date.now() + ttlDays * 86400e3).toISOString();
         try {
           await _fsMod.promises.writeFile(_pathMod.join(photosDir(), `${pcode}.${kind.ext}`), buf);
           await db.run(
-            'INSERT INTO photos (code, owner_id, ext, mime, orig_name, size, ip, del_token, expires_at, views, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
-            [pcode, user ? user.id : '', kind.ext, kind.mime, origName, buf.length, clientIp, token, expiresAt, new Date().toISOString()],
+            'INSERT INTO photos (code, owner_id, ext, mime, orig_name, size, ip, del_token, expires_at, album_id, views, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+            [pcode, album.owner_id || '', kind.ext, kind.mime, origName, buf.length, clientIp, '', album.expires_at, album.id, new Date().toISOString()],
           );
         } catch (e) {
           console.error('[web] photo upload:', e.message);
           return pj(500, { ok: false, err: 'Не удалось сохранить файл.' });
         }
-        return pj(200, { ok: true, code: pcode, url: `${baseUrl()}/i/${pcode}.${kind.ext}`, size: fmtBytes(buf.length), token, until: fmt(expiresAt) });
+        return pj(200, { ok: true, code: pcode, url: `${baseUrl()}/i/${pcode}.${kind.ext}`, size: fmtBytes(buf.length) });
+      }
+
+      if (path === '/photo/album_edit' && req.method === 'POST') {
+        const b = await readBody(req);
+        const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
+        if (!album) return pj(404, { ok: false, err: 'Альбом не найден.' });
+        const tokenOk = !!(b.get('token') && b.get('token') === album.del_token);
+        const userOk = user && csrfOk(user, b.get('_csrf')) && ((album.owner_id && album.owner_id === user.id) || (await isPhotoAdmin()));
+        if (!tokenOk && !userOk) return pj(403, { ok: false, err: 'Нет прав.' });
+        const title = (b.get('title') || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 80);
+        await db.run('UPDATE photo_albums SET title = ? WHERE id = ?', [title, album.id]);
+        return pj(200, { ok: true, title });
+      }
+
+      if (path === '/photo/album_delete' && req.method === 'POST') {
+        const b = await readBody(req);
+        const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
+        if (!album) return pj(404, { ok: false, err: 'Альбом не найден.' });
+        const tokenOk = !!(b.get('token') && b.get('token') === album.del_token);
+        const userOk = user && csrfOk(user, b.get('_csrf')) && ((album.owner_id && album.owner_id === user.id) || (await isPhotoAdmin()));
+        if (!tokenOk && !userOk) return pj(403, { ok: false, err: 'Нет прав на удаление.' });
+        await deleteAlbum(album.id);
+        if (user && album.owner_id !== user.id) await webAudit(client, user, 'Фотоальбом удалён (модерация)', `${album.code} «${album.title || ''}» автор ${album.owner_id || 'гость'}`).catch(() => {});
+        return pj(200, { ok: true });
       }
 
       if (path === '/photo/delete' && req.method === 'POST') {
-        const pj = (code, obj) => done(code, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
         const b = await readBody(req);
         const row = await db.get('SELECT * FROM photos WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
         if (!row) return pj(404, { ok: false, err: 'Картинка не найдена.' });
-        const byToken = row.del_token && (b.get('token') || '') === row.del_token;
-        const byOwner = user && csrfOk(user, b.get('_csrf')) && (row.owner_id === user.id || user.id === OWNER_ID);
-        if (!byToken && !byOwner) return pj(403, { ok: false, err: 'Нет прав на удаление.' });
-        await _fsMod.promises.unlink(_pathMod.join(photosDir(), `${row.code}.${row.ext}`)).catch(() => {});
+        const album = row.album_id ? await db.get('SELECT * FROM photo_albums WHERE id = ?', [row.album_id]).catch(() => null) : null;
+        const tokenOk = !!(b.get('token') && ((album && b.get('token') === album.del_token) || (row.del_token && b.get('token') === row.del_token)));
+        const userOk = user && csrfOk(user, b.get('_csrf')) && ((row.owner_id && row.owner_id === user.id) || (await isPhotoAdmin()));
+        if (!tokenOk && !userOk) return pj(403, { ok: false, err: 'Нет прав на удаление.' });
+        await removePhotoFiles([row]);
         await db.run('DELETE FROM photos WHERE id = ?', [row.id]);
         return pj(200, { ok: true });
+      }
+
+      {
+        const am = /^\/a\/([A-Za-z0-9]{6,16})$/.exec(path);
+        if (am && req.method === 'GET') {
+          const album = await db.get('SELECT * FROM photo_albums WHERE code = ?', [am[1]]).catch(() => null);
+          const expired = album && album.expires_at && album.expires_at <= new Date().toISOString();
+          if (expired) sweepPhotos().catch(() => {});
+          let alevel = 'guest';
+          if (user) alevel = (await accessFor(client, user.id)).level;
+          if (!album || expired) {
+            return html(404, L({ title: 'Альбом не найден', user, level: alevel, body: '<h1>Альбом не найден</h1><div class="card">Ссылка неверная, или срок хранения альбома истёк, или его удалили.</div><a class="btn" href="/photo">Создать свой альбом</a>' }));
+          }
+          db.run('UPDATE photo_albums SET views = COALESCE(views, 0) + 1 WHERE id = ?', [album.id]).catch(() => {});
+          const manage = (user && album.owner_id && album.owner_id === user.id) || await isPhotoAdmin();
+          return html(200, L({ title: album.title || 'Альбом', user, level: alevel, wide: true, body: flash + await albumBody(client, user, !!manage, album, u.searchParams.get('m')) }));
+        }
       }
 
       {
@@ -10529,51 +9520,6 @@ function start(client, hooks = {}) {
         if (!user) return done(401, { 'Content-Type': 'text/plain' }, '');
         const b = await readBody(req);
         return done(200, { 'Content-Type': 'text/html; charset=utf-8' }, mdToHtml((b.get('text') || '').slice(0, 20000)));
-      }
-
-      // Сохранение доски из редактора (AJAX, отвечает JSON, не редиректом).
-      if (/^\/board\/\d+\/save$/.test(path) && req.method === 'POST') {
-        const jr = (obj) => done(200, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
-        if (!user) return done(403, { 'Content-Type': 'application/json; charset=utf-8' }, '{"ok":false,"err":"forbidden"}');
-        const bid = parseInt(path.split('/')[2], 10) || 0;
-        const b = await readBody(req);
-        if (!csrfOk(user, b.get('_csrf'))) return jr({ ok: false, err: 'csrf' });
-        const board = await db.get('SELECT id, version, data FROM boards WHERE id = ?', [bid]).catch(() => null);
-        if (!board) return jr({ ok: false, err: 'notfound' });
-        if ((await boardAccess(client, user, board)) !== 'edit') return jr({ ok: false, err: 'forbidden' });
-        const raw = b.get('data') || '';
-        if (!raw || raw.length > 3_000_000) return jr({ ok: false, err: 'too_big' });
-        // Явно проверяем, что тело — валидный JSON (обрезанное при передаче
-        // тело не должно молча сохраниться как пустая доска).
-        let parsed;
-        try { parsed = JSON.parse(raw); } catch (_) { return jr({ ok: false, err: 'bad_json' }); }
-        if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.nodes)) return jr({ ok: false, err: 'bad_shape' });
-        const clean = JSON.stringify(boardParse(raw));
-        const now = new Date().toISOString();
-        // PNG-снимок доски (из клиентского рендера) — кладём в data/uploads/board-<id>.png
-        let imgFile = null;
-        const png = b.get('png') || '';
-        if (png.startsWith('data:image/png;base64,')) {
-          try {
-            const buf = Buffer.from(png.slice('data:image/png;base64,'.length), 'base64');
-            if (buf.length > 50 && buf.length < 4_000_000) {
-              imgFile = 'board-' + bid + '.png';
-              await _fsMod.promises.writeFile(_pathMod.join(uploadsDir(), imgFile), buf);
-            }
-          } catch (_) { imgFile = null; }
-        }
-        // Содержимое не менялось (сохранение ради PNG) — версию не плодим,
-        // чтобы стандартная доска не «залипала» для авто-обновления по seed.
-        if (clean === board.data) {
-          if (imgFile) await db.run('UPDATE boards SET image_file = ?, updated_at = ? WHERE id = ?', [imgFile, now, bid]).catch(() => {});
-          return jr({ ok: true, version: board.version || 1, at: now, nochange: true });
-        }
-        const nv = (board.version || 1) + 1;
-        await db.run('UPDATE boards SET data = ?, version = ?, updated_by = ?, updated_at = ? WHERE id = ?', [clean, nv, user.id, now, bid]);
-        if (imgFile) await db.run('UPDATE boards SET image_file = ? WHERE id = ?', [imgFile, bid]).catch(() => {});
-        await db.run('INSERT INTO board_versions (board_id, version, data, saved_by, saved_at) VALUES (?, ?, ?, ?, ?)', [bid, nv, clean, user.id, now]).catch(() => {});
-        await db.run('DELETE FROM board_versions WHERE board_id = ? AND id NOT IN (SELECT id FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 50)', [bid, bid]).catch(() => {});
-        return jr({ ok: true, version: nv, at: now });
       }
 
       // Выход через POST (CSRF-безопасно). GET /logout ниже оставлен для
@@ -10611,13 +9557,7 @@ function start(client, hooks = {}) {
             [localId, login, now, now, login, email, rec.hash, rec.salt],
           );
           const cookie = await issueWebSession(req, client, localId);
-          {
-            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
-            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
-            const sg = skinSegments();
-            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
-            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
-          }
+          return redirect('/me', { 'Set-Cookie': cookie });
         }
 
         if (path === '/login/local') {
@@ -10629,13 +9569,7 @@ function start(client, hooks = {}) {
             return redirect('/login/local?' + qs({ err: 'Неверный логин или пароль.' }));
           }
           const cookie = await issueWebSession(req, client, row.discord_id);
-          {
-            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
-            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
-            const sg = skinSegments();
-            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
-            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
-          }
+          return redirect('/me', { 'Set-Cookie': cookie });
         }
 
         // /forgot
@@ -10710,57 +9644,6 @@ function start(client, hooks = {}) {
         return html(200, L({ title: TITLES[key], user, level: acc.level, wide: true, body: flash + `<h1>${esc(TITLES[key])}</h1>${strip}<div class="card">${mdToHtml(txt)}</div>` }));
       }
 
-      // ----- Доски (havirys + по гранту view/edit) -----
-      if (path === '/board-editor.js' && req.method === 'GET') {
-        return done(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }, BOARD_EDITOR_JS);
-      }
-      if (path === '/boards' && req.method === 'GET') {
-        if (!user) return redirect('/login');
-        const bacc = await accessFor(client, user.id).catch(() => ({ level: 'guest', rank: 0 }));
-        const showArch = u.searchParams.get('arch') === '1';
-        const all = await db.all('SELECT * FROM boards WHERE archived = ? ORDER BY updated_at DESC, id DESC', [showArch ? 1 : 0]).catch(() => []);
-        const rows = [];
-        for (const b of all) { const m = await boardAccess(client, user, b); if (m) { b._mode = m; rows.push(b); } }
-        if (!rows.length && user.id !== OWNER_ID && bacc.rank < LEVELS.deputy) {
-          return html(403, L({ title: 'Доски', user, level: bacc.level, body: '<h1>Доски</h1><div class="card">Вам не открыта ни одна доска.</div>' }));
-        }
-        return html(200, L({ title: 'Доски', user, level: bacc.level, wide: true, body: flash + boardsListBody(rows, user, showArch, bacc) }));
-      }
-      if (path.startsWith('/board/') && req.method === 'GET') {
-        if (!user) return redirect('/login');
-        const bacc = await accessFor(client, user.id).catch(() => ({ level: 'guest', rank: 0 }));
-        const seg = path.slice(7).split('/');
-        const bid = parseInt(seg[0], 10) || 0;
-        const sub = seg[1] || '';
-        const board = await db.get('SELECT * FROM boards WHERE id = ?', [bid]).catch(() => null);
-        if (!board) return html(404, L({ title: 'Доска', user, level: bacc.level, body: '<h1>Доска не найдена</h1><a class="btn" href="/boards">← к списку</a>' }));
-        const mode = await boardAccess(client, user, board);
-        if (!mode) return html(403, L({ title: 'Доска', user, level: bacc.level, body: '<h1>Нет доступа к этой доске</h1><a class="btn" href="/boards">← к списку</a>' }));
-        const isOwner = user.id === OWNER_ID;
-        if (sub === 'image.png') {
-          if (!board.image_file) return done(404, { 'Content-Type': 'text/plain' }, 'no image');
-          const buf = await readUploadFile(board.image_file);
-          if (!buf) return done(404, { 'Content-Type': 'text/plain' }, 'no image');
-          return done(200, { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=60' }, buf);
-        }
-        if (sub === 'export.json') {
-          return done(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="board-${bid}.json"` }, JSON.stringify(boardParse(board.data)));
-        }
-        if ((sub === 'edit' || sub === 'settings') && mode !== 'edit') {
-          return html(403, L({ title: 'Доска', user, level: bacc.level, body: '<h1>Доска открыта только для просмотра</h1><a class="btn" href="/board/' + bid + '">Открыть просмотр</a>' }));
-        }
-        if (sub === 'edit') return html(200, L({ title: '✎ ' + (board.title || 'Доска'), user, level: bacc.level, wide: true, body: boardEditBody(board, user) }));
-        if (sub === 'settings') {
-          const grants = isOwner ? await db.all('SELECT * FROM board_grants WHERE board_id = ? ORDER BY id', [bid]).catch(() => []) : [];
-          return html(200, L({ title: 'Доска — настройки', user, level: bacc.level, wide: true, body: flash + boardSettingsBody(board, user, grants, isOwner) }));
-        }
-        if (sub === 'versions') {
-          const vs = await db.all('SELECT id, version, saved_by, saved_at FROM board_versions WHERE board_id = ? ORDER BY version DESC LIMIT 100', [bid]).catch(() => []);
-          return html(200, L({ title: 'Доска — версии', user, level: bacc.level, wide: true, body: flash + boardVersionsBody(board, vs, user, mode === 'edit') }));
-        }
-        return html(200, L({ title: board.title || 'Доска', user, level: bacc.level, wide: true, body: flash + boardViewBody(board, user, mode === 'edit') }));
-      }
-
       if (path.startsWith('/form/') && req.method === 'GET') {
         if (!user) return redirect('/login');
         const acc = await accessFor(client, user.id);
@@ -10785,7 +9668,7 @@ function start(client, hooks = {}) {
           if (!process.env.CLIENT_ID) return html(500, L({ title: 'Ошибка', body: '<h1>CLIENT_ID не задан</h1>' }));
           const params = new URLSearchParams({ client_id: process.env.CLIENT_ID, redirect_uri: redirectUri(), response_type: 'code', scope: 'identify' });
           if (u.searchParams.get('go') === 'link') params.set('state', 'link');
-          return redirect(`${DISCORD_API}/oauth2/authorize?${params.toString()}`, _skinPrefix ? { 'Set-Cookie': `fc_skin=${_skinPrefix.slice(1)}; Path=/; Max-Age=900; HttpOnly; Secure; SameSite=Lax` } : {});
+          return redirect(`${DISCORD_API}/oauth2/authorize?${params.toString()}`);
         }
         if (user) return redirect('/me');
         return html(200, L({ title: 'Вход', user: null, level: 'guest', body: flash + `
@@ -10891,13 +9774,7 @@ function start(client, hooks = {}) {
         await db.run('UPDATE magic_links SET used_at = ? WHERE token = ?', [new Date().toISOString(), token]).catch(() => {});
         try {
           const cookie = await issueWebSession(req, client, row.discord_id);
-          {
-            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
-            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
-            const sg = skinSegments();
-            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
-            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
-          }
+          return redirect('/me', { 'Set-Cookie': cookie });
         } catch (err) {
           console.error('[web] magic-link вход:', err.message);
           return html(500, L({ title: 'Ошибка входа', body: '<h1>Не удалось войти по ссылке</h1><a class="btn" href="/login">Войти через Discord</a>' }));
@@ -10989,13 +9866,7 @@ function start(client, hooks = {}) {
             await dmTo(client, me.id, `🔐 Новый вход на сайт «${siteBrand()}»\nУстройство: ${short}\nIP: ${ip || '—'}\nВремя: ${new Date().toLocaleString('ru-RU')}\n\nЕсли это не вы — зайдите в «Мой профиль» → «Активные сессии» и нажмите «Выйти со всех устройств».`).catch(() => {});
           }
           const cookie = `fc_sess=${makeSession({ id: me.id, username: uname, avatar: me.avatar || '', sv: svRow ? (svRow.sess_ver || 0) : 0, sid })}; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`;
-          {
-            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
-            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
-            const sg = skinSegments();
-            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
-            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
-          }
+          return redirect('/me', { 'Set-Cookie': cookie });
         } catch (err) {
           console.error('[web] OAuth ошибка:', err.message);
           return html(502, L({ title: 'Ошибка входа', body: `<h1>Не удалось войти через Discord</h1><p class="muted">${esc(err.message)}</p><a class="btn" href="/">На главную</a>` }));
@@ -11476,4 +10347,4 @@ function invalidateAccess(discordId) {
   _grantsCache.delete(id);
   _frozenCache.delete(id);
 }
-module.exports = { start, createMagicLink, invalidateAccess, seedBoards };
+module.exports = { start, createMagicLink, invalidateAccess };
