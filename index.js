@@ -54,7 +54,7 @@ const invitationsDisplay = require('./invitations_display');
 const acceptances = require('./acceptances');
 const applicationsDisplay = require('./applications_display');
 const badges = require('./badges');
-const { notify, isMuted } = require('./notify');
+const { notify, isMuted, isDmOff, KINDS: NOTIF_KINDS, getPrefs: getNotifPrefs, setPrefs: setNotifPrefs, setDmSender, markDirectDm } = require('./notify');
 const web = require('./web');
 
 const client = new Client({
@@ -181,7 +181,7 @@ function claimButtonRow(type, r) {
 const COMMAND_CATEGORIES = [
   {
     title: '👤 Участники и паспорта',
-    commands: ['история', 'кто_это', 'паспорт_история', 'ник_история', 'профиль_экспорт', 'отпуска_календарь', 'список_afk', 'отпуск_статистика', 'повышения_история', 'команды_человека'],
+    commands: ['уведомления', 'история', 'кто_это', 'паспорт_история', 'ник_история', 'профиль_экспорт', 'отпуска_календарь', 'список_afk', 'отпуск_статистика', 'повышения_история', 'команды_человека'],
   },
   {
     title: '📄 Контракты и приглашения',
@@ -263,6 +263,7 @@ const COMMAND_DEFAULT_TIERS = {
   аудит_поиск: 'hr', кто_это: 'hr', история: 'hr', помощь: 'hr', сверка_ролей: 'hr', поиск_везде: 'hr',
   отпуск_статистика: 'hr', повышения_история: 'hr', ник_история: 'hr', профиль_экспорт: 'hr',
   ранги_пересчитать_сейчас: 'hr', тикеты: 'hr',
+  уведомления: 'everyone',
 
   // --- Только аккаунт владельца (без обхода через роли) ---
   discord_права_настроить: 'owner_account_only', discord_права_синхронизировать: 'owner_account_only', discord_права_статус: 'owner_account_only',
@@ -974,6 +975,67 @@ async function sendWeeklyDigest(guild) {
 
   await dmUser(guild, config.OWNER_USER_ID, { embeds: [embed] });
   await db.setSetting('weekly_digest_last_sent', new Date().toISOString());
+}
+
+// Личный еженедельный отчёт в ЛС — только тем, кто сам включил его (/уведомления или сайт → Уведомления).
+async function sendPersonalWeeklyDigests(guild) {
+  const lastSent = await db.getSetting('personal_digest_last_sent');
+  if (lastSent && Date.now() - new Date(lastSent).getTime() < 6.5 * 24 * 60 * 60 * 1000) return;
+  const range = contracts.getWeekRange(1); // прошлая полная неделя
+  const weekTag = range.start.toISOString().slice(0, 10);
+  const label = contracts.formatWeekLabel(range);
+  const parts = await db.all(
+    'SELECT p.discord_id, p.name, p.last_weekly_digest FROM participants p JOIN notif_prefs n ON n.discord_id = p.discord_id WHERE n.weekly_report = 1',
+  ).catch(() => []);
+  let sent = 0;
+  for (const p of parts) {
+    if (p.last_weekly_digest === weekTag) continue;
+    try {
+      const w = await contracts.getUserWeekStats(p.discord_id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
+      const inv = await db.get(
+        "SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed' AND joined_at BETWEEN ? AND ?",
+        [p.discord_id, range.start.toISOString(), range.end.toISOString()],
+      ).catch(() => null);
+      let streak = 0;
+      try { streak = (await badges.compute(p.discord_id)).streak || 0; } catch (_) {}
+      const f = w.fulfilled.length; const uf = w.unfulfilled.length;
+      await dmUser(guild, p.discord_id,
+        `📊 Ваш отчёт за ${label}\n`
+        + `Контракты: ✅ ${f} / ❌ ${uf}\n`
+        + `Подтверждённых приглашений: ${inv ? inv.c : 0}\n`
+        + `Недельный стрик: ${streak} ${streak === 1 ? 'неделя' : 'нед.'}${streak >= 2 ? ' 🔥' : ''}\n`
+        + `${f === 0 && uf === 0 ? 'На прошлой неделе контрактов не было — самое время начать!' : 'Так держать!'}\n`
+        + '_Отключить отчёт: команда /уведомления или сайт → «Уведомления»._');
+      await db.run('UPDATE participants SET last_weekly_digest = ? WHERE discord_id = ?', [weekTag, p.discord_id]).catch(() => {});
+      sent++;
+      await new Promise((r) => setTimeout(r, 600));
+    } catch (_) { /* участник закрыл ЛС и т.п. */ }
+  }
+  await db.setSetting('personal_digest_last_sent', new Date().toISOString());
+  if (sent) console.log(`Личный еженедельный отчёт отправлен ${sent} участникам.`);
+}
+
+// Панель настроек уведомлений для команды /уведомления (Discord).
+async function buildNotifPanel(userId) {
+  const prefs = await getNotifPrefs(userId);
+  const siteOn = NOTIF_KINDS.filter(([k]) => !prefs.muted.has(k)).map(([, l]) => l);
+  const dmOn = NOTIF_KINDS.filter(([k]) => prefs.dmKinds.has(k)).map(([, l]) => l);
+  const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('🔔 Мои уведомления')
+    .setDescription('Выберите, что показывать на сайте (🔔 колокольчик) и что присылать вам в личные сообщения. То же самое можно настроить на сайте → «Уведомления».')
+    .addFields(
+      { name: '🔔 На сайте', value: siteOn.length ? siteOn.join(', ').slice(0, 1024) : 'ничего', inline: false },
+      { name: '✉ В ЛС', value: prefs.dmOff ? 'ЛС от бота выключены полностью' : (dmOn.length ? dmOn.join(', ').slice(0, 1024) : 'ничего дополнительно'), inline: false },
+      { name: '📊 Еженедельный отчёт', value: prefs.weekly ? 'включён' : 'выключен', inline: true },
+    );
+  const siteSel = new StringSelectMenuBuilder().setCustomId('notifp_site').setPlaceholder('🔔 Что показывать на сайте').setMinValues(0).setMaxValues(NOTIF_KINDS.length)
+    .addOptions(NOTIF_KINDS.map(([k, l]) => new StringSelectMenuOptionBuilder().setLabel(l).setValue(k).setDefault(!prefs.muted.has(k))));
+  const dmSel = new StringSelectMenuBuilder().setCustomId('notifp_dm').setPlaceholder('✉ Что присылать в ЛС').setMinValues(0).setMaxValues(NOTIF_KINDS.length)
+    .addOptions(NOTIF_KINDS.map(([k, l]) => new StringSelectMenuOptionBuilder().setLabel(l).setValue(k).setDefault(prefs.dmKinds.has(k))));
+  const btns = row(
+    new ButtonBuilder().setCustomId('notifp_dmoff').setLabel(prefs.dmOff ? '🔕 ЛС от бота выключены — включить' : '🔔 ЛС от бота включены — выключить').setStyle(prefs.dmOff ? ButtonStyle.Danger : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('notifp_weekly').setLabel(prefs.weekly ? '📊 Отчёт: включён — выключить' : '📊 Отчёт: выключен — включить').setStyle(prefs.weekly ? ButtonStyle.Success : ButtonStyle.Secondary),
+  );
+  return { embeds: [embed], components: [row(siteSel), row(dmSel), btns] };
 }
 
 async function checkStuckContracts(guild) {
@@ -1992,6 +2054,9 @@ const commands = [
     .setDescription('Выгрузить лог аудита в .csv за период')
     .addIntegerOption((opt) => opt.setName('дней').setDescription('За сколько последних дней (по умолчанию 30)').setRequired(false).setMinValue(1)),
   new SlashCommandBuilder()
+    .setName('уведомления')
+    .setDescription('Мои уведомления: что показывать на сайте и что присылать в ЛС'),
+  new SlashCommandBuilder()
     .setName('помощь')
     .setDescription('Список всех команд бота по темам'),
   new SlashCommandBuilder()
@@ -2902,10 +2967,13 @@ function actionSummary(actorId, label, extra) {
   return `${label} — <@${actorId}>${extra ? `: ${extra}` : ''}`;
 }
 
-async function dmUser(guild, discordId, content) {
+// force = true — важное ЛС, которое шлём даже тем, кто выключил ЛС от бота.
+async function dmUser(guild, discordId, content, force = false) {
   try {
+    if (!force && await isDmOff(discordId)) return; // участник выключил ЛС от бота (/уведомления или сайт)
     const member = await guild.members.fetch(discordId);
     await member.send(content);
+    markDirectDm(discordId);
   } catch (_) {
     // пользователь может иметь закрытые ЛС
   }
@@ -5201,6 +5269,10 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
+      if (cmd === 'уведомления') {
+        return interaction.reply({ ...(await buildNotifPanel(interaction.user.id)), flags: MessageFlags.Ephemeral });
+      }
+
       if (cmd === 'помощь') {
         if (!(await checkCommandAccess('помощь', interaction.member))) {
           return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
@@ -6253,6 +6325,13 @@ client.on('interactionCreate', async (interaction) => {
     // ----- Кнопки -----
     if (interaction.isButton()) {
       const id = interaction.customId;
+
+      if (id === 'notifp_dmoff' || id === 'notifp_weekly') {
+        const cur = await getNotifPrefs(interaction.user.id);
+        if (id === 'notifp_dmoff') await setNotifPrefs(interaction.user.id, { dmOff: !cur.dmOff });
+        else await setNotifPrefs(interaction.user.id, { weekly: !cur.weekly });
+        return interaction.update(await buildNotifPanel(interaction.user.id));
+      }
 
       if (id === 'magic_link_request') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -7820,6 +7899,14 @@ client.on('interactionCreate', async (interaction) => {
     // ----- Select-меню -----
     if (interaction.isAnySelectMenu()) {
       const customId = interaction.customId;
+
+      // Настройки уведомлений (/уведомления): что на сайте / что в ЛС
+      if (customId === 'notifp_site' || customId === 'notifp_dm') {
+        const chosen = new Set(interaction.values);
+        if (customId === 'notifp_site') await setNotifPrefs(interaction.user.id, { muted: NOTIF_KINDS.map(([k]) => k).filter((k) => !chosen.has(k)) });
+        else await setNotifPrefs(interaction.user.id, { dmKinds: [...chosen] });
+        return interaction.update(await buildNotifPanel(interaction.user.id));
+      }
 
       if (customId.startsWith('select_blacklist_remove:')) {
         if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
@@ -10061,6 +10148,11 @@ client.on('messageCreate', async (message) => {
 
 client.once('clientReady', async () => {
   console.log(`Бот запущен как ${client.user.tag}`);
+  // notify() (бот и сайт) умеет дублировать уведомления в ЛС, если участник так настроил.
+  setDmSender(async (id, text) => {
+    const g = await client.guilds.fetch(process.env.GUILD_ID).catch(() => null);
+    if (g) await dmUser(g, id, text);
+  });
 
   // --- Сайт (вход через Discord) на том же домене/порту ---
   try {
@@ -10403,6 +10495,7 @@ client.once('clientReady', async () => {
         await badges.syncAllRoles(guild);
         // ежедневная сводка теперь по расписанию в 23:59 МСК (см. ниже)
         await sendWeeklyDigest(guild);
+        await sendPersonalWeeklyDigests(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);

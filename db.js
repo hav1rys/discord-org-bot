@@ -694,6 +694,9 @@ const SCHEMA = {
     columns: {
       discord_id: 'TEXT PRIMARY KEY',
       muted: 'TEXT', // список kind через запятую
+      dm_kinds: 'TEXT', // какие типы дополнительно присылать в ЛС Discord (через запятую)
+      dm_off: 'INTEGER DEFAULT 0', // 1 — не присылать никаких ЛС от бота (кроме входов с нового устройства)
+      weekly_report: 'INTEGER DEFAULT 0', // 1 — присылать личный еженедельный отчёт (по желанию)
     },
   },
 
