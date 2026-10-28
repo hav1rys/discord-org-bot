@@ -41,10 +41,12 @@ async function recordInvitation(inviterDiscordId, inviteeDiscordId, inviteeName,
   if (inviterDiscordId === inviteeDiscordId) return; // нельзя пригласить самого себя
   if (await hasExistingInvitationRecord(inviteeDiscordId)) return;
 
+  // Приглашение засчитывается сразу после принятия человека в организацию.
+  const nowIso = new Date().toISOString();
   await db.run(
-    `INSERT INTO invitations (inviter_discord_id, invitee_discord_id, invitee_name, invitee_static, joined_at, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-    [inviterDiscordId, inviteeDiscordId, inviteeName, inviteeStatic, joinedAt, new Date().toISOString()],
+    `INSERT INTO invitations (inviter_discord_id, invitee_discord_id, invitee_name, invitee_static, joined_at, status, resolved_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?)`,
+    [inviterDiscordId, inviteeDiscordId, inviteeName, inviteeStatic, joinedAt, nowIso, nowIso],
   );
 }
 
@@ -59,14 +61,11 @@ async function resolveOnLeave(discordId) {
   await db.run('UPDATE invitations SET status = ?, resolved_at = ? WHERE id = ?', [newStatus, new Date().toISOString(), invite.id]);
 }
 
-// Периодическая проверка: те, кто пробыл нужный срок и всё ещё состоит в
-// организации, засчитываются автоматически (не дожидаясь увольнения).
+// Страховка для старых записей со статусом pending (до перехода на мгновенное
+// подтверждение): все, кто ещё в организации, засчитываются.
 async function promotePendingToConfirmed() {
   const pending = await db.all(`SELECT * FROM invitations WHERE status = 'pending'`);
-  const now = Date.now();
   for (const invite of pending) {
-    const elapsed = now - new Date(invite.joined_at).getTime();
-    if (elapsed < MIN_MS) continue;
     const stillHere = await db.get('SELECT id FROM participants WHERE discord_id = ?', [invite.invitee_discord_id]);
     if (!stillHere) continue; // если уже вышел — статус решает resolveOnLeave
     await db.run('UPDATE invitations SET status = ?, resolved_at = ? WHERE id = ?', ['confirmed', new Date().toISOString(), invite.id]);

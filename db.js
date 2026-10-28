@@ -395,6 +395,8 @@ const SCHEMA = {
       status: "TEXT DEFAULT 'active'", // active | ended | cancelled
       required_role_id: 'TEXT', // если задано — участвовать может только эта роль (и роли выше по иерархии)
       min_role_id: 'TEXT', // если задано — участвовать может эта роль ранга и ВЫШЕ по иерархии ROLE_IDS
+      blocked_role_id: 'TEXT', // если задано — обладатель этой роли участвовать не может, пока роль не снимут
+      min_participants: 'INTEGER', // минимум участников: если к концу меньше — розыгрыш отменяется
       min_contracts_week: 'INTEGER', // если задано — участвовать может тот, у кого >= N выполненных контрактов на этой неделе
       weight_by_contracts: 'INTEGER', // 1 — шанс победы взвешивается по контрактам за неделю (бонус-билеты за активность)
       recurring_rule_id: 'INTEGER', // если создан из шаблона повтора — ссылка на giveaway_recurring_rules.id
@@ -415,6 +417,8 @@ const SCHEMA = {
       duration_ms: 'INTEGER', // сколько длится каждый запуск
       weekday: 'INTEGER', // 0=вс..6=сб — в какой день недели запускать
       required_role_id: 'TEXT',
+      blocked_role_id: 'TEXT',
+      min_participants: 'INTEGER',
       host_id: 'TEXT',
       status: "TEXT DEFAULT 'active'", // active | paused
       last_run_date: 'TEXT', // ГГГГ-ММ-ДД — чтобы не запустить дважды за один день
@@ -596,6 +600,8 @@ const SCHEMA = {
       channel_id: 'TEXT',
       duration_ms: 'INTEGER',
       required_role_id: 'TEXT',
+      blocked_role_id: 'TEXT',
+      min_participants: 'INTEGER',
       min_role_id: 'TEXT',
       prize_tiers: 'TEXT',
       start_at: 'TEXT',
@@ -740,6 +746,25 @@ const SCHEMA = {
     },
     indexes: [['target_id']],
   },
+  // Фотохостинг сайта: файлы лежат в data/uploads/photos/<code>.<ext>
+  photos: {
+    columns: {
+      id: 'INTEGER PRIMARY KEY AUTOINCREMENT',
+      code: 'TEXT UNIQUE', // короткий id в ссылке /i/<code>.<ext>
+      owner_id: 'TEXT', // discord id; пусто — загрузка без входа
+      ext: 'TEXT',
+      mime: 'TEXT',
+      orig_name: 'TEXT',
+      size: 'INTEGER',
+      ip: 'TEXT',
+      del_token: 'TEXT', // секрет для удаления без входа
+      expires_at: 'TEXT', // после этой даты файл удаляется автоматически
+      views: 'INTEGER DEFAULT 0',
+      created_at: 'TEXT',
+    },
+    indexes: [['owner_id'], ['created_at']],
+  },
+
 
   // История смены НИКА на сервере (не путать с data_change_requests — там
   // заявки на смену Имени Фамилии по паспорту). Пишется из guildMemberUpdate;
@@ -753,6 +778,7 @@ const SCHEMA = {
       new_nick: 'TEXT',
       changed_by: 'TEXT', // discord id того, кто поменял (по журналу Discord), либо 'unknown'
       at: 'TEXT',
+      note: 'TEXT', // «Вступление в организацию» / «Возврат в организацию»
     },
     indexes: [['discord_id']],
   },
@@ -869,6 +895,8 @@ const SCHEMA = {
       winners_count: 'INTEGER',
       duration: 'TEXT',
       required_role_id: 'TEXT',
+      blocked_role_id: 'TEXT',
+      min_participants: 'INTEGER',
       min_role_id: 'TEXT',
       prize_tiers: 'TEXT',
       created_at: 'TEXT',

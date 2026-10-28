@@ -13,11 +13,19 @@ function parseDuration(input) {
   return amount * multipliers[unit];
 }
 
-async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null, minRoleId = null, prizeTiers = null) {
+// Обратное к parseDuration: миллисекунды -> «2d», «12h», «30m».
+function formatDuration(ms) {
+  const n = Number(ms) || 0;
+  const units = [['w', 7 * 24 * 3600e3], ['d', 24 * 3600e3], ['h', 3600e3], ['m', 60e3], ['s', 1e3]];
+  for (const [u, v] of units) if (n >= v && n % v === 0) return `${n / v}${u}`;
+  return `${Math.max(1, Math.round(n / 60e3))}m`;
+}
+
+async function createGiveaway(channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId = null, recurringRuleId = null, minRoleId = null, prizeTiers = null, blockedRoleId = null, minParticipants = null) {
   const result = await db.run(
-    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, min_role_id, recurring_rule_id, prize_tiers, created_at)
-     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
-    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, minRoleId, recurringRuleId, prizeTiers || null, new Date().toISOString()],
+    `INSERT INTO giveaways (channel_id, message_id, prize, winners_count, host_id, ends_at, status, required_role_id, min_role_id, recurring_rule_id, prize_tiers, blocked_role_id, min_participants, created_at)
+     VALUES (?, NULL, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+    [channelId, prize, winnersCount, hostId, endsAtIso, requiredRoleId, minRoleId, recurringRuleId, prizeTiers || null, blockedRoleId || null, minParticipants || null, new Date().toISOString()],
   );
   return result.lastID;
 }
@@ -48,6 +56,11 @@ function meetsMinRole(member, minRoleId) {
   const minIdx = config.ROLE_IDS.indexOf(minRoleId);
   if (minIdx === -1) return true;
   return config.ROLE_IDS.some((r, i) => i <= minIdx && member.roles.cache.has(r));
+}
+
+// «Запрещённая роль»: если она есть у участника — участвовать нельзя, пока роль не снимут.
+function isBlockedByRole(member, blockedRoleId) {
+  return !!(blockedRoleId && member && member.roles && member.roles.cache.has(blockedRoleId));
 }
 
 async function setMessageId(giveawayId, messageId) {
@@ -146,11 +159,11 @@ async function contractWeights(entries) {
 
 // ---------- Повторяющиеся розыгрыши ----------
 
-async function createRecurringRule(channelId, prize, winnersCount, durationMs, weekday, hostId, requiredRoleId = null) {
+async function createRecurringRule(channelId, prize, winnersCount, durationMs, weekday, hostId, requiredRoleId = null, blockedRoleId = null, minParticipants = null) {
   const result = await db.run(
-    `INSERT INTO giveaway_recurring_rules (channel_id, prize, winners_count, duration_ms, weekday, required_role_id, host_id, status, last_run_date, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?)`,
-    [channelId, prize, winnersCount, durationMs, weekday, requiredRoleId, hostId, new Date().toISOString()],
+    `INSERT INTO giveaway_recurring_rules (channel_id, prize, winners_count, duration_ms, weekday, required_role_id, host_id, status, last_run_date, blocked_role_id, min_participants, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL, ?, ?, ?)`,
+    [channelId, prize, winnersCount, durationMs, weekday, requiredRoleId, hostId, blockedRoleId || null, minParticipants || null, new Date().toISOString()],
   );
   return result.lastID;
 }
@@ -201,6 +214,8 @@ module.exports = {
   parsePrizeTiers,
   prizeForPlace,
   meetsMinRole,
+  isBlockedByRole,
+  formatDuration,
   setMessageId,
   getGiveaway,
   getActiveExpired,

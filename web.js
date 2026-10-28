@@ -123,6 +123,27 @@ const accessCache = new Map(); // discordId -> { at, data }
 // параллельные запросы других людей эта подмена не затрагивает; результат
 // НИКОГДА не кладём в accessCache, чтобы включённый/выключенный режим не «протёк».
 const viewAsALS = new AsyncLocalStorage();
+
+// ---------- Версии сайта (старая v1 / новая v2) ----------
+// Контекст запроса: { skin: 'v1'|'v2', prefix: '' | '/NEWSITE' | '/OLDSITE', path, search }.
+const skinALS = new AsyncLocalStorage();
+function skinCtx() { return skinALS.getStore() || { skin: 'v1', prefix: '', path: '/', search: '' }; }
+// Скрытые сегменты путей. Новая версия: /NEWSITE (меняется в панели → Админ),
+// старая (когда основной станет новая): /OLDSITE.
+function skinSegments() {
+  const clean = (s, d) => String(s || d).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || d;
+  return { v2: clean(SITE.v2_path, 'NEWSITE'), v1: 'OLDSITE' };
+}
+// Ссылки, которые должны остаться «как есть» (OAuth-колбэк Discord, файлы, PWA).
+const SKIN_KEEP = /^\/(?:auth\/|cimg\/|asset\/|i\/|manifest\.webmanifest|sw\.js|healthz)/i;
+function prefixSkinUrl(url, prefix) {
+  if (!prefix || !/^\/(?!\/)/.test(url) || SKIN_KEEP.test(url)) return url;
+  if (url === prefix || url.startsWith(prefix + '/') || url.startsWith(prefix + '?')) return url;
+  return prefix + (url === '/' ? '' : url);
+}
+function rewriteSkinLinks(htmlStr, prefix) {
+  return htmlStr.replace(/(\s(?:href|action|formaction)=)(["'])(\/(?!\/)[^"']*)\2/g, (m, attr, q, url) => `${attr}${q}${prefixSkinUrl(url, prefix)}${q}`);
+}
 const VIEW_AS_LEVELS = ['guest', 'member', 'hr', 'deputy', 'owner'];
 
 async function accessFor(client, discordId) {
@@ -706,7 +727,7 @@ const CLIENT_SCRIPT = `
         ['Аудит','/audit'],['Лидерборды','/leaderboards'],['Здоровье системы','/health'],['Инструменты','/tools'],
         ['Панель','/panel'],['Панель — Заявки','/panel?tab=apps'],['Панель — Очереди','/panel?tab=queues'],
         ['Панель — Контракты (проверка)','/panel?tab=contracts_check'],['Панель — Формы','/panel?tab=forms'],
-        ['Панель — Доступы','/panel?tab=grants'],['Панель — Аккаунты','/panel?tab=accounts'],
+        ['Панель — Доступы','/panel?tab=grants'],['Панель — Аккаунты','/panel?tab=accounts'],['Фотохостинг','/photo'],
         ['Сообщить о баге','/bug'],['Скачать мои данные','/me/export.json']
       ];
       var ov=null,inp=null,lst=null,sel=0,items=[];
@@ -732,7 +753,7 @@ const CLIENT_SCRIPT = `
         Array.prototype.forEach.call(lst.querySelectorAll('.palrow'),function(r){ r.onclick=function(){ go(+r.dataset.i); }; });
       }
       function mark(){ Array.prototype.forEach.call(lst.querySelectorAll('.palrow'),function(r,i){ r.style.background=i===sel?'var(--panel2)':''; }); var a=lst.querySelector('.palrow[data-i="'+sel+'"]'); if(a)a.scrollIntoView({block:'nearest'}); }
-      function go(i){ var p=items[i]; if(p){ location.href=p[1]; } }
+      function go(i){ var p=items[i]; if(p){ location.href=(window.FC_PREFIX||'')+p[1]; } }
       function keys(e){
         if(e.key==='Escape'){close();return;}
         if(e.key==='ArrowDown'){e.preventDefault();sel=Math.min(sel+1,items.length-1);mark();}
@@ -1096,7 +1117,349 @@ function bannerHtml() {
   return `<div id="sitebanner" class="sitebanner" data-h="${h}">${mdToHtml(SITE.banner_text)}<span class="x" title="скрыть">✕</span></div>`;
 }
 
+// ============ Фотохостинг ============
+const PHOTO_MAX = 10 * 1024 * 1024; // 10 МБ на файл
+const _photoRate = new Map(); // ключ (user/ip) -> [метки времени за последний час]
+function photoRateOk(key, limit) {
+  const now = Date.now();
+  const arr = (_photoRate.get(key) || []).filter((t) => now - t < 3600e3);
+  if (arr.length >= limit) { _photoRate.set(key, arr); return false; }
+  arr.push(now); _photoRate.set(key, arr);
+  return true;
+}
+function readRaw(req, max) {
+  return new Promise((resolve) => {
+    const chunks = []; let size = 0; let aborted = false;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > max) { aborted = true; req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(aborted ? null : Buffer.concat(chunks)));
+    req.on('error', () => resolve(null));
+  });
+}
+// Формат определяем по первым байтам, а не по имени/заголовку: SVG и прочее не принимаем.
+function sniffImage(b) {
+  if (!b || b.length < 12) return null;
+  if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return { ext: 'jpg', mime: 'image/jpeg' };
+  if (b.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return { ext: 'png', mime: 'image/png' };
+  if (b.slice(0, 4).toString('latin1') === 'GIF8') return { ext: 'gif', mime: 'image/gif' };
+  if (b.slice(0, 4).toString('latin1') === 'RIFF' && b.slice(8, 12).toString('latin1') === 'WEBP') return { ext: 'webp', mime: 'image/webp' };
+  return null;
+}
+function photosDir() {
+  const d = _pathMod.join(uploadsDir(), 'photos');
+  try { _fsMod.mkdirSync(d, { recursive: true }); } catch (_) {}
+  return d;
+}
+function photoUrl(p) { return `${baseUrl()}/i/${p.code}.${p.ext}`; }
+// Срок хранения (в днях): гость — до 7, вошедший — до 30 (меняется в панели → Админ).
+function photoMaxDays(isUser) {
+  const v = parseInt(isUser ? SITE.photo_ttl_user : SITE.photo_ttl_guest, 10);
+  return Math.min(3650, Math.max(1, Number.isFinite(v) && v > 0 ? v : (isUser ? 30 : 7)));
+}
+function photoTtlOptions(isUser) {
+  const max = photoMaxDays(isUser);
+  const set = new Set([1, 3, 7, 14, 30, 90, 365].filter((d) => d <= max));
+  set.add(max);
+  return [...set].sort((a, b) => a - b);
+}
+// Удаляет просроченные файлы (вызывается из обработчика запросов не чаще раза в 10 минут).
+let _photoSweepAt = 0;
+async function sweepPhotos() {
+  _photoSweepAt = Date.now();
+  const rows = await db.all('SELECT id, code, ext FROM photos WHERE expires_at IS NOT NULL AND expires_at <= ? LIMIT 500', [new Date().toISOString()]).catch(() => []);
+  for (const r of rows) {
+    await _fsMod.promises.unlink(_pathMod.join(photosDir(), `${r.code}.${r.ext}`)).catch(() => {});
+    await db.run('DELETE FROM photos WHERE id = ?', [r.id]).catch(() => {});
+  }
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' Б';
+  if (n < 1048576) return (n / 1024).toFixed(0) + ' КБ';
+  return (n / 1048576).toFixed(1) + ' МБ';
+}
+
+async function photoBody(user, pageNum) {
+  const guestsOk = SITE.photo_guests !== '0';
+  const csrf = user ? csrfToken(user) : '';
+  let gallery = '';
+  if (user) {
+    const PER = 24;
+    const total = (await db.get('SELECT COUNT(*) c FROM photos WHERE owner_id = ?', [user.id]).catch(() => null) || { c: 0 }).c;
+    const rows = await db.all('SELECT * FROM photos WHERE owner_id = ? ORDER BY id DESC LIMIT ? OFFSET ?', [user.id, PER, pageNum * PER]).catch(() => []);
+    const cards = rows.map((p) => `<div class="ph-card" data-code="${esc(p.code)}">
+        <a href="${esc(photoUrl(p))}" target="_blank" rel="noopener"><img loading="lazy" src="/i/${esc(p.code)}.${esc(p.ext)}" alt=""></a>
+        <div class="ph-meta"><span class="mini">${esc(fmtBytes(p.size))} · до ${p.expires_at ? fmt(p.expires_at) : '—'}</span>
+          <div class="ph-acts">
+            <button type="button" class="btn ghost sm" data-copy="${esc(photoUrl(p))}">Ссылка</button>
+            <button type="button" class="btn ghost sm" data-copy="[img]${esc(photoUrl(p))}[/img]">BB</button>
+            <button type="button" class="btn ghost sm" style="background:var(--bad);color:#fff!important" data-del="${esc(p.code)}">✕</button>
+          </div></div></div>`).join('');
+    gallery = `<div class="card"><h2>Мои загрузки${total ? ` (${total})` : ''}</h2>
+      ${cards ? `<div class="ph-grid" id="phGallery">${cards}</div>` : '<p class="mini">Пока ничего не загружено.</p>'}
+      ${pager('/photo', pageNum, total)}</div>`;
+  }
+  return `<h1>📷 Фотохостинг</h1>
+  <p class="muted" style="margin-bottom:14px">Загрузите картинку и получите прямую ссылку — для Discord, форума, объявлений. JPG, PNG, GIF, WEBP до 10 МБ. Файлы хранятся ограниченное время и затем удаляются сами: без входа — до ${photoMaxDays(false)} дн., после входа — до ${photoMaxDays(true)} дн.${user ? ' Ваши прошлые загрузки — внизу страницы.' : ' Войдите, чтобы видеть свои прошлые загрузки.'}</p>
+  ${(!user && !guestsOk) ? '<div class="card">Загрузка доступна после входа на сайт. <a class="btn sm" href="/login">Войти</a></div>' : `
+  <div class="card" style="padding:12px 18px"><label class="bar" style="gap:10px;margin:0;flex-wrap:wrap">Хранить
+    <select id="phTtl" style="max-width:160px">${photoTtlOptions(!!user).map((d, i, a) => `<option value="${d}" ${i === a.length - 1 ? 'selected' : ''}>${d} ${d === 1 ? 'день' : (d < 5 ? 'дня' : 'дней')}</option>`).join('')}</select>
+    <span class="mini">потом файл удалится автоматически</span></label></div>
+  <div class="card ph-drop" id="phDrop" tabindex="0">
+    <div style="font-size:34px">📤</div>
+    <div><b>Перетащите файлы сюда</b>, нажмите, чтобы выбрать, или вставьте из буфера (Ctrl+V)</div>
+    <input type="file" id="phFile" accept="image/jpeg,image/png,image/gif,image/webp" multiple hidden>
+  </div>
+  <div id="phResults"></div>`}
+  ${gallery}
+  <style>
+    .ph-drop{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;padding:34px 20px;border:2px dashed var(--line);cursor:pointer;transition:border-color .15s,background .15s}
+    .ph-drop:hover,.ph-drop.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--panel))}
+    .ph-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+    .ph-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+    .ph-card img{display:block;width:100%;height:140px;object-fit:cover;background:var(--bg)}
+    .ph-meta{padding:8px 10px}.ph-acts{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+    .ph-res{display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;align-items:start}
+    .ph-res img{width:120px;height:90px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
+    .ph-row{display:flex;gap:6px;align-items:center;margin:4px 0}.ph-row span{width:92px;flex:0 0 92px;font-size:12.5px;color:var(--muted)}
+    .ph-row input{flex:1;min-width:0;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+    .ph-bar{height:6px;border-radius:99px;background:var(--panel2);overflow:hidden}.ph-bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s}
+    @media(max-width:560px){.ph-res{grid-template-columns:1fr}}
+  </style>
+  <script>(function(){
+    var CSRF=${JSON.stringify(csrf)}, MAX=${PHOTO_MAX}, LOGGED=${user ? 'true' : 'false'};
+    var drop=document.getElementById('phDrop'), inp=document.getElementById('phFile'), out=document.getElementById('phResults');
+    function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+    function copy(t,btn){ var done=function(){var o=btn.textContent;btn.textContent='✓';setTimeout(function(){btn.textContent=o;},900);};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(done);}else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');}catch(e){}a.remove();done();} }
+    document.addEventListener('click',function(e){
+      var c=e.target.closest&&e.target.closest('[data-copy]'); if(c){copy(c.getAttribute('data-copy'),c);return;}
+      var d=e.target.closest&&e.target.closest('[data-del]'); if(d){ if(!confirm('Удалить картинку? Ссылка перестанет работать.'))return; del(d.getAttribute('data-del'),d.getAttribute('data-token')||'',function(){var card=d.closest('.ph-card')||d.closest('.ph-res');if(card)card.remove();}); }
+    });
+    function del(code,token,ok){ fetch('/photo/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'code='+encodeURIComponent(code)+'&token='+encodeURIComponent(token)+'&_csrf='+encodeURIComponent(CSRF)})
+      .then(function(r){return r.json();}).then(function(j){ if(j.ok)ok(); else alert(j.err||'Не удалось удалить'); }).catch(function(){alert('Ошибка сети');}); }
+    function addRow(label,val){ return '<div class="ph-row"><span>'+label+'</span><input readonly value="'+esc(val)+'" onclick="this.select()"><button type="button" class="btn ghost sm" data-copy="'+esc(val)+'">Копировать</button></div>'; }
+    function upload(file){
+      var box=document.createElement('div'); box.className='card ph-res';
+      box.innerHTML='<div style="width:120px;height:90px;border-radius:10px;background:var(--panel2)"></div><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+(file.size/1024).toFixed(0)+' КБ</span><div class="ph-bar" style="margin-top:8px"><i></i></div><div class="mini st" style="margin-top:6px">Загрузка…</div></div>';
+      out.prepend(box);
+      var st=box.querySelector('.st'), bar=box.querySelector('.ph-bar i');
+      if(file.size>MAX){ st.textContent='⛔ Больше 10 МБ'; return; }
+      var x=new XMLHttpRequest(); x.open('POST','/photo/upload'); x.setRequestHeader('X-Filename',encodeURIComponent(file.name||'image')); x.setRequestHeader('X-Csrf',CSRF); var ts=document.getElementById('phTtl'); if(ts)x.setRequestHeader('X-Ttl',ts.value);
+      x.upload.onprogress=function(e){ if(e.lengthComputable)bar.style.width=Math.round(e.loaded/e.total*100)+'%'; };
+      x.onerror=function(){ st.textContent='⛔ Ошибка сети'; };
+      x.onload=function(){ var j={}; try{j=JSON.parse(x.responseText);}catch(e){}
+        if(!j.ok){ st.textContent='⛔ '+(j.err||'Не удалось загрузить'); return; }
+        box.innerHTML='<img src="'+esc(j.url)+'" alt=""><div><b>'+esc(file.name||'изображение')+'</b> <span class="mini">'+esc(j.size)+' · хранится до '+esc(j.until)+'</span>'
+          +addRow('Прямая ссылка',j.url)+addRow('BB-код','[img]'+j.url+'[/img]')+addRow('HTML','<img src="'+j.url+'" alt="">')+addRow('Markdown','!['+'](' + j.url + ')')
+          +'<div class="ph-acts" style="margin-top:8px"><a class="btn ghost sm" href="'+esc(j.url)+'" target="_blank" rel="noopener">Открыть</a><button type="button" class="btn ghost sm" style="background:var(--bad);color:#fff!important" data-del="'+esc(j.code)+'" data-token="'+esc(j.token||'')+'">Удалить</button></div></div>';
+      };
+      x.send(file);
+    }
+    function addFiles(list){ Array.prototype.forEach.call(list||[],function(f){ if(/^image\\/(jpeg|png|gif|webp)$/.test(f.type))upload(f); else { var b=document.createElement('div'); b.className='card'; b.textContent='⛔ '+(f.name||'файл')+': поддерживаются JPG, PNG, GIF, WEBP'; out.prepend(b); } }); }
+    if(drop){
+      drop.addEventListener('click',function(){inp.click();});
+      drop.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();inp.click();}});
+      inp.addEventListener('change',function(){addFiles(inp.files);inp.value='';});
+      ['dragenter','dragover'].forEach(function(n){drop.addEventListener(n,function(e){e.preventDefault();drop.classList.add('over');});});
+      ['dragleave','drop'].forEach(function(n){drop.addEventListener(n,function(e){e.preventDefault();drop.classList.remove('over');});});
+      drop.addEventListener('drop',function(e){addFiles(e.dataTransfer&&e.dataTransfer.files);});
+      document.addEventListener('paste',function(e){var items=(e.clipboardData&&e.clipboardData.files)||[]; if(items.length)addFiles(items);});
+    }
+  })();</script>`;
+}
+
+// ============ Новая версия сайта (v2): боковое меню + новая шапка ============
+// Кэш счётчиков для бейджей в меню (обновляется не чаще раза в 30 сек).
+let _navCounts = { at: 0, apps: 0, contracts: 0, queues: 0 };
+async function refreshNavCounts() {
+  if (Date.now() - _navCounts.at < 30000) return;
+  const c = async (sql) => { const r = await db.get(sql).catch(() => null); return r ? r.c : 0; };
+  const pend = "status='pending'";
+  const q = (await c(`SELECT COUNT(*) c FROM kicks WHERE ${pend}`)) + (await c(`SELECT COUNT(*) c FROM vacations WHERE ${pend}`))
+    + (await c(`SELECT COUNT(*) c FROM passport_requests WHERE ${pend}`)) + (await c(`SELECT COUNT(*) c FROM data_change_requests WHERE ${pend}`))
+    + (await c(`SELECT COUNT(*) c FROM hr_applications WHERE ${pend}`)) + (await c(`SELECT COUNT(*) c FROM appeals WHERE ${pend}`))
+    + (await c(`SELECT COUNT(*) c FROM codeword_submissions WHERE ${pend}`));
+  _navCounts = {
+    at: Date.now(),
+    apps: await c(`SELECT COUNT(*) c FROM applications WHERE ${pend}`),
+    contracts: await c(`SELECT COUNT(*) c FROM contracts WHERE ${pend}`),
+    queues: q,
+  };
+}
+
+const V2_STYLE = `
+body.v2{background:var(--bg)}
+.v2 .shell{display:flex;min-height:100vh}
+.v2 .sb{width:248px;flex:0 0 248px;position:sticky;top:0;height:100vh;overflow-y:auto;background:var(--panel);border-right:1px solid var(--line);padding:16px 12px 20px;display:flex;flex-direction:column;gap:2px;z-index:60}
+.v2 .sb .brand{display:flex;align-items:center;gap:8px;padding:6px 10px 14px;font-size:17px}
+.v2 .sb h4{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:16px 10px 4px;font-weight:700}
+.v2 .sb a.nv,.v2 .pnl-nav a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;color:var(--muted);font-weight:600;font-size:14px}
+.v2 .sb a.nv:hover,.v2 .pnl-nav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+.v2 .sb a.nv.on,.v2 .pnl-nav a.on{background:color-mix(in srgb,var(--accent) 20%,transparent);color:var(--text)}
+.v2 .sb a.nv .ic{width:20px;text-align:center}
+.v2 .nv .ct,.v2 .pnl-nav .ct{margin-left:auto;background:var(--bad);color:#fff;border-radius:999px;font-size:11px;padding:0 7px;line-height:18px;font-weight:700}
+.v2 .sb .sbfoot{margin-top:auto;padding:14px 10px 0;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+.v2 .mainc{flex:1;min-width:0;display:flex;flex-direction:column}
+.v2 .tb{position:sticky;top:0;z-index:40;display:flex;align-items:center;gap:10px;padding:10px 24px;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
+.v2 .tb .sp{flex:1}
+.v2 .tb .brand{font-size:17px}
+.v2 .tb .gnav{display:flex;gap:4px;flex-wrap:wrap}
+.v2 .tb .gnav a{color:var(--muted);font-weight:600;font-size:14px;padding:6px 10px;border-radius:8px}
+.v2 .tb .gnav a:hover{background:var(--panel2);color:var(--text);text-decoration:none}
+.v2 .tb .r{display:flex;align-items:center;gap:8px}
+.v2 .tb .photobtn{display:inline-flex;align-items:center;gap:6px;background:var(--panel2);border:1px solid var(--line);color:var(--text)!important;padding:7px 13px;border-radius:10px;font-weight:700;font-size:13.5px}
+.v2 .tb .photobtn:hover{border-color:var(--accent);text-decoration:none}
+.v2 #sbtoggle{display:none;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:6px 10px;font-size:16px;cursor:pointer}
+.v2 .sbov{display:none}
+.v2 .wrap{max-width:1000px;padding:26px 28px 70px;width:100%}
+.v2 .wrap.wide{max-width:1280px}
+.v2 .card{border-radius:16px;box-shadow:0 8px 24px -18px rgba(0,0,0,.6)}
+.v2 h1{font-size:28px;letter-spacing:-.3px;margin-bottom:14px}
+.v2 .btn{border-radius:10px;transition:filter .15s,transform .08s}
+.v2 .btn:active{transform:translateY(1px)}
+.v2 table tr:hover td{background:color-mix(in srgb,var(--panel2) 55%,transparent)}
+.v2 .pnl{display:grid;grid-template-columns:232px minmax(0,1fr);gap:22px;align-items:start}
+.v2 .pnl-nav{position:sticky;top:76px;display:flex;flex-direction:column;gap:2px;background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:10px;max-height:calc(100vh - 96px);overflow:auto}
+.v2 .pnl-nav h4{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:12px 10px 4px;font-weight:700}
+.v2 .pnl-nav h4:first-child{margin-top:4px}
+.v2 .pnl-body>h1{display:flex;align-items:center;gap:10px}
+.v2 .pnl-body .card:first-child{margin-top:0}
+@media(max-width:980px){.v2 .pnl{grid-template-columns:1fr}.v2 .pnl-nav{position:static;flex-direction:row;flex-wrap:wrap;max-height:none}.v2 .pnl-nav h4{display:none}}
+@media(max-width:860px){
+  .v2 .sb{position:fixed;left:-270px;top:0;transition:left .2s;box-shadow:0 0 40px rgba(0,0,0,.5)}
+  .v2 .sb.open{left:0}
+  .v2 .sbov.open{display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:55}
+  .v2 #sbtoggle{display:inline-block}
+  .v2 .wrap{padding:18px 14px 60px}
+  .v2 .tb{padding:8px 12px}
+}
+`;
+
+// Меню новой версии. Доски убраны. Фотохостинг у вошедшего — в левом меню.
+function v2NavGroups(level, panelGrant) {
+  const L = LEVELS[level] || 0;
+  const g = [];
+  if (SITE.nav && SITE.nav.trim()) {
+    const items = SITE.nav.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((a) => a[0] && a[1])
+      .filter(([, url, tier]) => {
+        if (/^\/boards?(\/|$)/.test(url)) return false;
+        const t = (tier || 'all').toLowerCase();
+        if (t === 'hr') return L >= LEVELS.hr;
+        if (t === 'member') return L >= LEVELS.member;
+        return true;
+      }).map(([txt, url]) => ({ href: url, label: txt, icon: '•' }));
+    items.push({ href: '/photo', label: 'Фотохостинг', icon: '📷' });
+    if (panelGrant && L < LEVELS.hr && !items.some((i) => i.href === '/panel')) items.push({ href: '/panel', label: 'Панель', icon: '🛠' });
+    g.push({ title: 'Меню', items });
+  } else {
+    const main = [{ href: '/me', label: 'Мой профиль', icon: '🏠' }];
+    if (L < LEVELS.member) main.push({ href: '/apply', label: 'Подать заявку', icon: '✍️' });
+    if (L >= LEVELS.member) main.push({ href: '/people', label: 'Участники', icon: '👥' }, { href: '/giveaways', label: 'Розыгрыши', icon: '🎉' }, { href: '/text/rules', label: 'Правила', icon: '📖' });
+    main.push({ href: '/faq', label: 'FAQ', icon: '❓' });
+    if (L >= LEVELS.member) main.push({ href: '/commands', label: 'Команды', icon: '⌨️' });
+    main.push({ href: '/photo', label: 'Фотохостинг', icon: '📷' });
+    g.push({ title: 'Главное', items: main });
+    if (L >= LEVELS.hr || panelGrant) {
+      const mng = [];
+      if (L >= LEVELS.hr) mng.push({ href: '/dashboard', label: 'Дашборд', icon: '📊' }, { href: '/tickets', label: 'Тикеты', icon: '🎫' },
+        { href: '/panel?tab=apps', label: 'Заявки', icon: '📥', count: _navCounts.apps },
+        { href: '/panel?tab=queues', label: 'Очереди', icon: '🗂', count: _navCounts.queues },
+        { href: '/panel?tab=contracts_check', label: 'Контракты', icon: '🧾', count: _navCounts.contracts });
+      mng.push({ href: '/panel', label: 'Панель', icon: '🛠' });
+      if (L >= LEVELS.deputy) mng.push({ href: '/audit', label: 'Аудит', icon: '📜' });
+      if (L >= LEVELS.owner) mng.push({ href: '/tools', label: 'Инструменты', icon: '🧰' }, { href: '/health', label: 'Здоровье системы', icon: '💚' });
+      g.push({ title: 'Руководство', items: mng });
+    }
+  }
+  const pages = (SITE._navPages || []).map((pg) => ({ href: '/p/' + (pg.slug || '').trim(), label: (pg.title || pg.slug || '').trim(), icon: '📄' })).filter((i) => i.href !== '/p/');
+  if (pages.length) g.push({ title: 'Страницы', items: pages });
+  return g;
+}
+
+function v2NavHtml(groups, ctx) {
+  // Подсветка: точное совпадение путь+tab важнее совпадения только по пути.
+  const params = new URLSearchParams((ctx.search || '').replace(/^\?/, ''));
+  const curTab = params.get('tab') || '';
+  let best = null; let bestScore = 0;
+  for (const gr of groups) for (const it of gr.items) {
+    const [p, qsPart] = it.href.split('?');
+    if (p !== ctx.path) continue;
+    const t = new URLSearchParams(qsPart || '').get('tab') || '';
+    const score = t ? (t === curTab ? 3 : 0) : (curTab ? 1 : 2);
+    if (score > bestScore) { best = it; bestScore = score; }
+  }
+  return groups.map((gr) => `<h4>${esc(gr.title)}</h4>` + gr.items.map((it) =>
+    `<a class="nv${it === best ? ' on' : ''}" href="${esc(it.href)}"><span class="ic">${it.icon || '•'}</span><span>${esc(it.label)}</span>${it.count ? `<span class="ct">${it.count > 99 ? '99+' : it.count}</span>` : ''}</a>`).join('')).join('');
+}
+
+function layoutV2(opts) {
+  const ctx = skinCtx();
+  const override = themeOverrideCss();
+  const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())}`;
+  const favicon = SITE.logo && /^(https?:|data:image\/)/.test(SITE.logo) ? esc(SITE.logo) : '';
+  const customCss = SITE.css ? `<style>${String(SITE.css)
+    .replace(/@import\b[^;]*;?/gi, '')
+    .replace(/url\(\s*(['"]?)\s*javascript:/gi, 'url($1')
+    .replace(/expression\s*\(/gi, 'x(')
+    .replace(/<\//g, '<\\/').slice(0, 20000)}</style>` : '';
+  const user = opts.user;
+  const level = opts.level || 'guest';
+  const brand = `<a class="brand" href="/">${brandHtml()}</a>`;
+  let sidebar = '';
+  let header;
+  if (user) {
+    const groups = v2NavGroups(level, opts.panelGrant);
+    const csrf = (() => { try { return csrfField(user); } catch (_) { return ''; } })();
+    sidebar = `<aside class="sb" id="sb">${brand}${v2NavHtml(groups, ctx)}
+      <div class="sbfoot"><div><b>${esc(user.username || user.id)}</b></div><div>${esc(level)}</div>
+        <form method="POST" action="/logout" style="margin-top:8px">${csrf}<button class="btn ghost sm" type="submit">Выйти</button></form></div></aside>
+      <div class="sbov" id="sbov" onclick="document.getElementById('sb').classList.remove('open');this.classList.remove('open')"></div>`;
+    const bell = `<a href="/notifications" class="tglbtn" style="text-decoration:none" title="Уведомления">🔔${opts.notif ? `<b style="color:var(--bad)"> ${opts.notif}</b>` : ''}</a>`;
+    const bug = `<a href="/bug" class="tglbtn" style="text-decoration:none" title="Сообщить о баге">🐞</a>`;
+    header = `<header class="tb">
+      <button id="sbtoggle" type="button" aria-label="Меню" onclick="document.getElementById('sb').classList.toggle('open');document.getElementById('sbov').classList.toggle('open')">☰</button>
+      <div class="sp"></div>
+      <div class="r">${viewAsControl(user)}${bug}${bell}${themeToggle()}</div>
+    </header>`;
+  } else {
+    const gnav = [['/apply', 'Подать заявку'], ['/faq', 'FAQ'], ...(SITE._navPages || []).map((pg) => ['/p/' + pg.slug, pg.title || pg.slug])]
+      .map(([h, t]) => `<a href="${esc(h)}">${esc(t)}</a>`).join('');
+    header = `<header class="tb">
+      ${brand}
+      <nav class="gnav">${gnav}</nav>
+      <div class="sp"></div>
+      <div class="r">${themeToggle()}<a class="photobtn" href="/photo">📷 Фотохостинг</a><a class="btn sm" href="/login">Войти</a></div>
+    </header>`;
+  }
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+${ctx.prefix ? '<meta name="robots" content="noindex,nofollow">' : ''}
+<title>${esc(opts.title)}</title>
+<link rel="manifest" href="/manifest.webmanifest">
+${favicon ? `<link rel="icon" href="${favicon}">` : ''}
+<meta name="theme-color" content="${(SITE.color && SITE.color.bg) || '#0f1013'}">
+<style>${STYLE}${override}${V2_STYLE}</style>${customCss}<script>window.FC_PREFIX=${JSON.stringify(ctx.prefix || '')};</script><script>${CLIENT_SCRIPT}</script></head><body class="v2">
+<div class="shell">
+${sidebar}
+<div class="mainc">
+${header}
+${user && user._viewAsLevel ? `<div style="background:var(--warn);color:#1a1a1a;text-align:center;padding:7px 12px;font-weight:700;font-size:13.5px">👁 Вы смотрите сайт как «${esc(VIEW_AS_LABELS[user._viewAsLevel] || user._viewAsLevel)}» · <a href="/viewas?level=" style="color:#1a1a1a;text-decoration:underline">вернуться к своему виду</a></div>` : ''}
+${bannerHtml()}
+<div class="wrap${opts.wide ? ' wide' : ''}">${opts.body}
+<div class="foot">${foot}</div>
+</div>
+</div>
+</div>
+<button id="totop" type="button" title="Наверх" aria-label="Наверх">↑</button>
+</body></html>`;
+}
+
 function layout(opts) {
+  if (skinCtx().skin === 'v2') return layoutV2(opts);
   const override = themeOverrideCss();
   const foot = SITE.footer ? esc(SITE.footer) : `${esc(siteBrand())} · сайт работает на том же сервере, что и Discord-бот`;
   const favicon = SITE.logo && /^(https?:|data:image\/)/.test(SITE.logo) ? esc(SITE.logo) : '';
@@ -1937,6 +2300,29 @@ async function panelBody(client, acc, user, tab, pageNum, qtable, sp) {
     canOwner ? '<a href="/health">💚 Здоровье системы</a>' : '',
   ].filter(Boolean).join(' · ');
   const extraLinksHtml = extraLinks ? `<div class="mini" style="margin:4px 0 10px">${extraLinks}</div>` : '';
+  if (skinCtx().skin === 'v2') {
+    // Новая версия: разделы панели сгруппированы по смыслу, у очередей — счётчики.
+    const pc = async (sql) => { const r = await db.get(sql).catch(() => null); return r ? r.c : 0; };
+    const counts = {
+      apps: _navCounts.apps, contracts_check: _navCounts.contracts, queues: _navCounts.queues,
+      forms: await pc("SELECT COUNT(*) c FROM form_submissions WHERE status='pending'"),
+    };
+    const GROUPS = [
+      ['Обзор', ['overview', 'sla']],
+      ['Заявки и проверка', ['apps', 'queues', 'forms', 'contracts_check', 'role_check']],
+      ['Люди', ['members', 'contracts', 'invites', 'hr_payouts', 'blacklist', 'accounts']],
+      ['Контент и события', ['giveaways', 'texts', 'faq_manage', 'reasons', 'broadcast', 'landing', 'pages']],
+      ['Система', ['settings', 'perms', 'admin', 'grants', 'data']],
+    ];
+    const label = Object.fromEntries(PANEL_TABS);
+    const navHtml = GROUPS.map(([title, ids]) => {
+      const links = ids.filter((id) => label[id] && canTab(id)).map((id) =>
+        `<a class="${id === tab ? 'on' : ''}" href="/panel?tab=${id}">${esc(label[id])}${counts[id] ? `<span class="ct">${counts[id] > 99 ? '99+' : counts[id]}</span>` : ''}</a>`).join('');
+      return links ? `<h4>${esc(title)}</h4>${links}` : '';
+    }).join('');
+    return `<div class="pnl"><nav class="pnl-nav">${navHtml}${extraLinksHtml ? `<h4>Ещё</h4><div class="mini" style="padding:2px 10px">${extraLinks.replace(/ · /g, '<br>')}</div>` : ''}</nav>
+      <div class="pnl-body"><h1>${esc(label[tab] || 'Панель управления')}</h1>${grantNote}${body}</div></div>`;
+  }
   return `<h1>Панель управления</h1>
     ${grantNote}
     <div class="tabs">${tabsHtml}</div>
@@ -2078,6 +2464,21 @@ async function panelGiveaways(client, acc, user) {
           <form method="POST" action="/panel/giveaway/cancel" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${g.id}"><button class="btn ghost sm" type="submit">Отменить</button></form>
           <form method="POST" action="/panel/giveaway/entry_add" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${g.id}"><input name="did" placeholder="ID" pattern="[0-9]+" style="max-width:130px"><button class="btn ghost sm" type="submit">+уч.</button></form>
           <form method="POST" action="/panel/giveaway/entry_remove" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${g.id}"><input name="did" placeholder="ID" pattern="[0-9]+" style="max-width:130px"><button class="btn ghost sm" type="submit">−уч.</button></form>
+          <details style="margin-top:6px"><summary class="mini" style="cursor:pointer">✏️ изменить условия</summary>
+            <form method="POST" action="/panel/giveaway/edit" class="form" style="margin-top:6px">${csrfField(user)}<input type="hidden" name="id" value="${g.id}">
+              <label>Приз<input name="prize" required maxlength="200" value="${esc(g.prize)}"></label>
+              <label>Число победителей<input name="winners" type="number" min="1" max="50" value="${g.winners_count}" required></label>
+              <label>Продлить на (30m, 1h, 2d; пусто — не менять)<input name="extend" maxlength="10"></label>
+              <label>ID обязательной роли (пусто — убрать условие)<input name="role_id" pattern="[0-9]*" maxlength="25" value="${esc(g.required_role_id || '')}"></label>
+              <label>ID минимальной роли (пусто — убрать)<input name="min_role_id" pattern="[0-9]*" maxlength="25" value="${esc(g.min_role_id || '')}"></label>
+              <label>ID запрещённой роли (пусто — убрать)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25" value="${esc(g.blocked_role_id || '')}"></label>
+              <label>Минимум участников (пусто — без минимума)<input name="min_participants" type="number" min="1" max="1000" value="${g.min_participants || ''}"></label>
+              <label>Мин. контрактов за неделю (пусто — без условия)<input name="min_contracts_week" type="number" min="1" max="99" value="${g.min_contracts_week || ''}"></label>
+              <label class="chk"><input type="checkbox" name="weight_by_contracts" value="1" ${g.weight_by_contracts ? 'checked' : ''}><span>Бонус-билеты за активность</span></label>
+              <label>Призовые места («место | приз» по строкам)<textarea name="prize_tiers" rows="3" maxlength="800">${esc(g.prize_tiers || '')}</textarea></label>
+              <button class="btn sm" type="submit">Сохранить изменения</button>
+            </form>
+          </details>
         </td>
       </tr>`);
     }
@@ -2102,6 +2503,19 @@ async function panelGiveaways(client, acc, user) {
       <td style="white-space:nowrap">
         <form method="POST" action="/panel/giveaway/recur_toggle" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" type="submit">${r.status === 'active' ? 'пауза' : 'возобновить'}</button></form>
         <form method="POST" action="/panel/giveaway/recur_delete" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${r.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
+        <details style="margin-top:6px"><summary class="mini" style="cursor:pointer">✏️ изменить правило</summary>
+          <form method="POST" action="/panel/giveaway/recur_edit" class="form" style="margin-top:6px">${csrfField(user)}<input type="hidden" name="id" value="${r.id}">
+            <label>Приз<input name="prize" required maxlength="200" value="${esc(r.prize)}"></label>
+            <label>Число победителей<input name="winners" type="number" min="1" max="50" value="${r.winners_count}" required></label>
+            <label>Длительность каждого запуска (30m, 1h, 2d)<input name="duration" required maxlength="10" value="${esc(giveaways.formatDuration(r.duration_ms))}"></label>
+            <label>День недели<select name="weekday">${WD.map((n, i) => `<option value="${i}" ${i === r.weekday ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+            <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25" value="${esc(r.channel_id)}"></label>
+            <label>ID обязательной роли (пусто — убрать)<input name="role_id" pattern="[0-9]*" maxlength="25" value="${esc(r.required_role_id || '')}"></label>
+            <label>ID запрещённой роли (пусто — убрать)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25" value="${esc(r.blocked_role_id || '')}"></label>
+            <label>Минимум участников (пусто — без минимума)<input name="min_participants" type="number" min="1" max="1000" value="${r.min_participants || ''}"></label>
+            <button class="btn sm" type="submit">Сохранить правило</button>
+          </form>
+        </details>
       </td></tr>`).join('');
     const recurCard = `<div class="card"><h2>Повторяющиеся розыгрыши</h2>
       <form method="POST" action="/panel/giveaway/recur_create" class="form">${csrfField(user)}
@@ -2111,6 +2525,9 @@ async function panelGiveaways(client, acc, user) {
         <label>День недели<select name="weekday">${WD.map((n, i) => `<option value="${i}">${n}</option>`).join('')}</select></label>
         <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
         <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>ID запрещённой роли (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Минимум участников (необязательно)<input name="min_participants" type="number" min="1" max="1000"></label>
+        <p class="mini">Повторяющиеся розыгрыши запускаются в 12:00 МСК.</p>
         <button class="btn" type="submit">Создать правило</button>
       </form>
       <div class="tablewrap" style="margin-top:10px"><table><tr><th>Приз</th><th>День</th><th>Побед.</th><th>Статус</th><th></th></tr>${recurRows || '<tr><td colspan="5">—</td></tr>'}</table></div>
@@ -2119,7 +2536,7 @@ async function panelGiveaways(client, acc, user) {
     const tplRows = tpls.map((t) => `<tr>
       <td><b>${esc(t.name)}</b><div class="mini">${esc(t.prize)} · ${t.winners_count} побед. · ${esc(t.duration || '—')}</div></td>
       <td style="white-space:nowrap">
-        <button class="btn ghost sm" type="button" onclick='fcGwTpl(${JSON.stringify({ prize: t.prize || '', winners: t.winners_count || 1, duration: t.duration || '', role_id: t.required_role_id || '', min_role_id: t.min_role_id || '', prize_tiers: t.prize_tiers || '' })})'>заполнить форму</button>
+        <button class="btn ghost sm" type="button" onclick='fcGwTpl(${JSON.stringify({ prize: t.prize || '', winners: t.winners_count || 1, duration: t.duration || '', role_id: t.required_role_id || '', min_role_id: t.min_role_id || '', blocked_role_id: t.blocked_role_id || '', min_participants: t.min_participants || '', prize_tiers: t.prize_tiers || '' })})'>заполнить форму</button>
         <form method="POST" action="/panel/giveaway/tpl_del" style="display:inline">${csrfField(user)}<input type="hidden" name="id" value="${t.id}"><button class="btn ghost sm" style="background:var(--bad)" type="submit">✕</button></form>
       </td></tr>`).join('');
     const tplCard = `<div class="card"><h2>Шаблоны розыгрышей</h2>
@@ -2131,6 +2548,8 @@ async function panelGiveaways(client, acc, user) {
         <label>Длительность (30m, 1h, 2d)<input name="duration" maxlength="10"></label>
         <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
         <label>ID минимальной роли (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>ID запрещённой роли — её обладатели не участвуют, пока роль не снимут (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Минимум участников (если меньше — розыгрыш отменится)<input name="min_participants" type="number" min="1" max="1000"></label>
         <label>Призовые места (необязательно)<textarea name="prize_tiers" rows="2" maxlength="800"></textarea></label>
         <button class="btn sm" type="submit">Сохранить шаблон</button>
       </form>
@@ -2146,6 +2565,8 @@ async function panelGiveaways(client, acc, user) {
         <label>ID канала для публикации<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
         <label>ID обязательной роли — только эта роль (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
         <label>ID минимальной роли — этот ранг и ВЫШЕ (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>ID запрещённой роли — её обладатели не участвуют, пока роль не снимут (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Минимум участников (если меньше — розыгрыш отменится)<input name="min_participants" type="number" min="1" max="1000"></label>
         <label>Мин. выполненных контрактов за эту неделю (необязательно)<input name="min_contracts_week" type="number" min="0" max="99"></label>
         <label class="chk"><input type="checkbox" name="weight_by_contracts" value="1"><span>Бонус-билеты за активность: шанс победы растёт с числом контрактов за неделю (1 + контракты, максимум ×10)</span></label>
         <label>Призовые места (необязательно) — строка «место | приз», напр. «1 | Машина», «2-3 | 500к»<textarea name="prize_tiers" rows="3" maxlength="800" placeholder="1 | Главный приз&#10;2-3 | Утешительный приз"></textarea></label>
@@ -2166,6 +2587,8 @@ async function panelGiveaways(client, acc, user) {
         <label>ID канала<input name="channel_id" required pattern="[0-9]+" maxlength="25"></label>
         <label>ID обязательной роли (необязательно)<input name="role_id" pattern="[0-9]*" maxlength="25"></label>
         <label>ID минимальной роли (необязательно)<input name="min_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>ID запрещённой роли — её обладатели не участвуют, пока роль не снимут (необязательно)<input name="blocked_role_id" pattern="[0-9]*" maxlength="25"></label>
+        <label>Минимум участников (если меньше — розыгрыш отменится)<input name="min_participants" type="number" min="1" max="1000"></label>
         <label>Призовые места (необязательно) — строка «место | приз»<textarea name="prize_tiers" rows="3" maxlength="800" placeholder="1 | Главный приз&#10;2-3 | Утешительный приз"></textarea></label>
         <button class="btn" type="submit">Запланировать</button>
       </form>
@@ -3126,6 +3549,8 @@ async function peopleBody(client, acc, query, pageNum, user) {
             <select name="act">
               <option value="vacation">🏖️ Выдать отпуск</option>
               <option value="dm">✉️ Отправить ЛС</option>
+              <option value="hr_assign">⭐ Назначить HR-Менеджером</option>
+              <option value="hr_remove">➖ Снять с HR-Менеджера</option>
               <option value="rank_recalc">🔁 Пересчитать ранги (всем)</option>
             </select>
             <input name="deadline" placeholder="срок: 7d или дата">
@@ -3169,10 +3594,31 @@ async function profileBody(client, viewer, acc, targetId) {
     : '';
 
   if (!p) {
+    // Логи человека хранятся и после увольнения — руководство видит архив.
+    let archive = '';
+    if (acc && acc.rank >= LEVELS.hr) {
+      const evs = await history.getHistory(targetId).catch(() => []);
+      const nk = await db.all('SELECT * FROM nickname_history WHERE discord_id = ? ORDER BY id DESC LIMIT 30', [targetId]).catch(() => []);
+      const st = await db.all('SELECT * FROM status_events WHERE discord_id = ? ORDER BY at DESC LIMIT 30', [targetId]).catch(() => []);
+      const cs = await db.get("SELECT COUNT(*) c, SUM(CASE WHEN status='fulfilled' THEN 1 ELSE 0 END) f FROM contracts WHERE discord_id = ?", [targetId]).catch(() => null);
+      const evRows = evs.map((e) => `<tr><td class="muted">${fmt(e.at)}</td><td>${e.event === 'joined' ? '✅ вступил(а)' : '🚫 покинул(а)'}</td><td>${esc(e.name || '—')} · № ${esc(e.static || '—')}</td><td class="mini">${esc(e.note || '')}</td></tr>`).join('');
+      const nkRows = nk.map((n) => `<tr><td class="muted">${fmt(n.at)}</td><td>${esc(n.old_nick || '—')}</td><td>${esc(n.new_nick || '—')}${n.note ? ` <span class="badge">${esc(n.note)}</span>` : ''}</td></tr>`).join('');
+      const stRows = st.map((s) => `<tr><td class="muted">${fmt(s.at)}</td><td>${esc(s.type)} · ${esc(s.action)}</td><td>${esc(s.name || '—')} · № ${esc(s.static || '—')}</td><td class="mini">${esc(s.reason || '')}</td></tr>`).join('');
+      archive = `<div class="card"><h2>Архив (человек уже не в организации)</h2>
+        <p class="mini">Контрактов в базе: ${cs ? cs.c : 0}, выполнено: ${cs && cs.f ? cs.f : 0}</p>
+        <h3 style="font-size:14px">Вступления и увольнения</h3>
+        <div class="tablewrap"><table><tr><th>Когда</th><th>Событие</th><th>Паспорт</th><th>Примечание</th></tr>${evRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
+        <h3 style="font-size:14px">История ников</h3>
+        <div class="tablewrap"><table><tr><th>Когда</th><th>Было</th><th>Стало</th></tr>${nkRows || '<tr><td colspan="3">—</td></tr>'}</table></div>
+        <h3 style="font-size:14px">Отпуска и AFK</h3>
+        <div class="tablewrap"><table><tr><th>Когда</th><th>Тип</th><th>Паспорт</th><th>Причина</th></tr>${stRows || '<tr><td colspan="4">—</td></tr>'}</table></div>
+      </div>`;
+    }
     return `
     <div class="phead"><img class="avatar" width="72" height="72" src="${esc(av)}" alt=""><h1>${esc(targetId)}</h1></div>
     ${blBox}
     <div class="card">Этот пользователь не состоит в организации.</div>
+    ${archive}
     <p><a href="/people">← к списку участников</a></p>`;
   }
 
@@ -3245,7 +3691,19 @@ async function profileBody(client, viewer, acc, targetId) {
         <label>Имя Фамилия<input name="name" required maxlength="60"></label>
         <label>№ Паспорта<input name="static" required pattern="[0-9]+" maxlength="12"></label>
         <button class="btn sm" type="submit">Добавить</button></form>`);
+      const isHrNow = passports.some((pp) => pp.role_id === config.ROLE_HR);
+      blocks.push(`<form method="POST" action="/u/hr" class="form" onsubmit="return confirm('${isHrNow ? 'Снять с роли HR-Менеджера?' : 'Назначить HR-Менеджером?'}')">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
+        <h3>HR-Менеджер</h3>
+        <input type="hidden" name="make" value="${isHrNow ? '0' : '1'}">
+        <p class="mini">${isHrNow ? 'Сейчас — HR-Менеджер.' : 'Сейчас — не HR-Менеджер.'} Меняется ранг паспорта и роль в Discord.</p>
+        <button class="btn sm" ${isHrNow ? 'style="background:var(--bad)"' : ''} type="submit">${isHrNow ? 'Снять с HR' : 'Назначить HR-Менеджером'}</button></form>`);
       if (passports.length > 1) {
+        const extraOpts = passports.slice(1).map((pp) => `<option value="${esc(pp.static)}">${esc(pp.name)} — № ${esc(pp.static)}</option>`).join('');
+        blocks.push(`<form method="POST" action="/u/passport_primary" class="form" onsubmit="return confirm('Поменять местами основной и выбранный паспорт?')">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
+          <h3>Сделать паспорт основным</h3>
+          <p class="mini">Сейчас основной: ${esc(passports[0].name)} — № ${esc(passports[0].static)}. Он станет дополнительным.</p>
+          <label>Новый основной<select name="static">${extraOpts}</select></label>
+          <button class="btn sm" type="submit">Поменять местами</button></form>`);
         blocks.push(`<form method="POST" action="/u/passport_remove" class="form" onsubmit="return confirm('Удалить этот паспорт?')">${csrfField(viewer)}<input type="hidden" name="target" value="${esc(targetId)}">
           <h3>Удалить паспорт</h3>
           <label>Паспорт<select name="static">${passOpts}</select></label>
@@ -3298,7 +3756,7 @@ async function profileBody(client, viewer, acc, targetId) {
     actions = `<div class="card"><h2>Действия</h2><div class="actions">${blocks.join('')}</div></div>`;
   }
 
-  const nickRows = nicks.map((n) => `<tr><td class="muted">${fmt(n.at)}</td><td>${esc(n.old_nick || '—')}</td><td>${esc(n.new_nick || '—')}</td><td class="muted">${n.changed_by && n.changed_by !== 'unknown' ? personLink(client, n.changed_by) : '—'}</td></tr>`).join('');
+  const nickRows = nicks.map((n) => `<tr><td class="muted">${fmt(n.at)}</td><td>${esc(n.old_nick || '—')}</td><td>${esc(n.new_nick || '—')}${n.note ? ` <span class="badge">${esc(n.note)}</span>` : ''}</td><td class="muted">${n.changed_by && /^\d{5,25}$/.test(n.changed_by) ? personLink(client, n.changed_by) : '—'}</td></tr>`).join('');
   const chRows = contractHist.map((c) => `<tr>
     <td class="muted">${fmt(c.submitted_at || c.reviewed_at)}</td>
     <td><span class="badge ${c.status === 'fulfilled' ? 'ok' : c.status === 'unfulfilled' ? 'bad' : 'warn'}">${esc(ruStatus(c.status))}</span></td>
@@ -4689,8 +5147,40 @@ async function panelAdmin(client, user) {
         </form></td></tr>`;
     }).join('') || '<tr><td colspan="3">—</td></tr>';
   }
-
   return `
+  <div class="card" style="border-color:var(--accent)">
+    <h2>🆕 Версии сайта</h2>
+    ${(() => {
+      const sg = skinSegments();
+      const v2on = SITE.v2_enabled !== '0';
+      const mainV2 = SITE.main_version === 'v2';
+      const base = baseUrl();
+      return `<p class="mini">Сейчас основная: <b>${mainV2 ? 'новая версия' : 'старая версия'}</b>.<br>
+        Новая версия (${v2on ? '<span style="color:var(--ok)">включена</span>' : '<span style="color:var(--warn)">выключена</span>'}) открывается только по скрытой ссылке — нигде на сайте её нет: <code>${esc(base)}/${esc(sg.v2)}</code><br>
+        ${mainV2 ? `Старая версия теперь доступна по <code>${esc(base)}/${esc(sg.v1)}</code> (запомните это — через неё можно всё вернуть).` : 'Данные у обеих версий общие: заявки, участники, контракты — всё одно и то же, отличается только оформление.'}</p>
+      <form method="POST" action="/admin/versions" class="form">${csrfField(user)}
+        <label>Скрытый путь новой версии (латиница, цифры, - и _)<input name="v2_path" value="${esc(sg.v2)}" maxlength="40" pattern="[A-Za-z0-9_-]+"></label>
+        <div class="bar" style="flex-wrap:wrap;gap:6px">
+          <button class="btn sm" name="act" value="save_path" type="submit">Сохранить путь</button>
+          ${mainV2
+            ? '<button class="btn sm" style="background:var(--warn);color:#111!important" name="act" value="main_v1" type="submit" onclick="return confirm(\'Вернуть старую версию основной?\')">↩ Вернуть старую основной</button>'
+            : '<button class="btn sm" name="act" value="main_v2" type="submit" onclick="return confirm(\'Сделать новую версию основной для всех?\')">⭐ Сделать новую основной</button>'}
+          ${v2on
+            ? '<button class="btn ghost sm" name="act" value="v2_off" type="submit" onclick="return confirm(\'Отключить новую версию? Её ссылка перестанет открываться.\')">Отключить новую</button>'
+            : '<button class="btn ghost sm" name="act" value="v2_on" type="submit">Включить новую</button>'}
+        </div>
+      </form>`;
+    })()}
+  </div>
+  <div class="card">
+    <h2>📷 Фотообменник</h2>
+    <form method="POST" action="/admin/versions" class="form">${csrfField(user)}
+      <label>Хранение без входа, дней<input name="ttl_guest" type="number" min="1" max="3650" value="${photoMaxDays(false)}"></label>
+      <label>Хранение после входа, дней<input name="ttl_user" type="number" min="1" max="3650" value="${photoMaxDays(true)}"></label>
+      <label class="chk"><input type="checkbox" name="guests" value="1" ${SITE.photo_guests === '0' ? '' : 'checked'}><span>Разрешить загрузку без входа</span></label>
+      <button class="btn sm" name="act" value="photo_save" type="submit">Сохранить</button>
+    </form>
+  </div>
   <div class="card" style="border-color:${config.ENABLE_PRESENCE ? 'var(--ok)' : 'var(--warn)'}">
     <h2>Онлайн-статус участников</h2>
     ${config.ENABLE_PRESENCE
@@ -6256,6 +6746,7 @@ async function giveawayPageBody(client, user, gid, acc) {
       if (await giveaways.isBlacklisted(user.id)) note = '⛔ Вы в ЧС розыгрышей.';
       else if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) note = `⛔ Нужна роль ${roleTag(client, gv.required_role_id)}.`;
       else if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) note = `⛔ Нужен ранг не ниже ${roleTag(client, gv.min_role_id)}.`;
+      else if (giveaways.isBlockedByRole(m, gv.blocked_role_id)) note = `⛔ Роль ${roleTag(client, gv.blocked_role_id)} не участвует, пока её не снимут.`;
       else if (gv.min_contracts_week) {
         const wr = contracts.getWeekRange(0);
         const cw = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [user.id, wr.start.toISOString(), wr.end.toISOString()]).then((x) => (x ? x.c : 0)).catch(() => 0);
@@ -6723,7 +7214,15 @@ async function panelRoleCheck(client, user, pageNum = 0) {
     if ((m.nickname || '') !== wantNick) problems.push(`ник: «${m.nickname || m.user.username}» → «${wantNick}»`);
     if (ident.roleId) {
       const hasRight = m.roles.cache.has(ident.roleId);
-      const extraRank = (config.ROLE_IDS || []).filter((r) => r !== ident.roleId && m.roles.cache.has(r));
+      let extraRank = (config.ROLE_IDS || []).filter((r) => r !== ident.roleId && m.roles.cache.has(r));
+      // HR-Менеджер, одобренный по заявке, раньше получал только Discord-роль — это не «лишняя»
+      // роль, а ранг, не закреплённый в паспорте; «Починить» закрепит его (adoptDiscordHr).
+      const hrIdx = (config.ROLE_IDS || []).indexOf(config.ROLE_HR);
+      const curIdx = (config.ROLE_IDS || []).indexOf(ident.roleId);
+      if (extraRank.includes(config.ROLE_HR) && (curIdx === -1 || curIdx > hrIdx)) {
+        extraRank = extraRank.filter((r) => r !== config.ROLE_HR);
+        problems.push('роль HR-Менеджера выдана, но ранг паспорта ниже — нажмите «Починить», чтобы закрепить HR');
+      }
       if (!hasRight) problems.push(`нет роли ранга ${roleName(client, ident.roleId)}`);
       if (extraRank.length) problems.push(`лишние роли ранга: ${extraRank.map((r) => roleName(client, r)).join(', ')}`);
     }
@@ -7651,7 +8150,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   }
 
   // ===== розыгрыши (owner) =====
-  if (pathName === '/panel/giveaway/create' || pathName === '/panel/giveaway/end' || pathName === '/panel/giveaway/cancel') {
+  if (pathName === '/panel/giveaway/create' || pathName === '/panel/giveaway/end' || pathName === '/panel/giveaway/cancel' || pathName === '/panel/giveaway/edit') {
     if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/giveaway/create') {
       const prize = (body.get('prize') || '').trim().slice(0, 200);
@@ -7660,17 +8159,19 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const channelId = (body.get('channel_id') || '').trim();
       const roleId = (body.get('role_id') || '').trim() || null;
       const minRoleId = (body.get('min_role_id') || '').trim() || null;
+      const blockedRoleId = (body.get('blocked_role_id') || '').trim() || null;
+      const minPart = Math.max(0, parseInt(body.get('min_participants'), 10) || 0) || null;
       const prizeTiersRaw = (body.get('prize_tiers') || '').trim().slice(0, 800);
       const prizeTiers = giveaways.parsePrizeTiers(prizeTiersRaw).length ? prizeTiersRaw : null;
       if (!prize || winners < 1 || !durMs || !/^[0-9]+$/.test(channelId)) return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля формы (приз, победители, длительность, ID канала).' });
       const minCw = Math.max(0, parseInt(body.get('min_contracts_week'), 10) || 0);
       const weightByC = body.get('weight_by_contracts') === '1' ? 1 : 0;
       const endsAt = new Date(Date.now() + durMs);
-      const gid = await giveaways.createGiveaway(channelId, prize, winners, user.id, endsAt.toISOString(), roleId, null, minRoleId, prizeTiers);
+      const gid = await giveaways.createGiveaway(channelId, prize, winners, user.id, endsAt.toISOString(), roleId, null, minRoleId, prizeTiers, blockedRoleId, minPart);
       if (minCw > 0 || weightByC) await db.run('UPDATE giveaways SET min_contracts_week = ?, weight_by_contracts = ? WHERE id = ?', [minCw || null, weightByC || null, gid]).catch(() => {});
       const tiersDesc = giveaways.parsePrizeTiers(prizeTiers).map((t) => `\n${t.from === t.to ? t.from : t.from + '–' + t.to} место — **${t.text}**`).join('');
       const embed = new EmbedBuilder().setColor(0x57f287).setTitle(`🎉 ${prize}`)
-        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}${minRoleId ? `\nУсловие: роль <@&${minRoleId}> и выше` : ''}${minCw ? `\nУсловие: ≥ ${minCw} выполненных контрактов за эту неделю` : ''}${weightByC ? `\n🎟️ Бонус-билеты: шанс победы растёт с числом контрактов за неделю` : ''}${tiersDesc}`)
+        .setDescription(`Нажмите на кнопку ниже, чтобы участвовать!\nОрганизатор: <@${user.id}>${roleId ? `\nУсловие: только роль <@&${roleId}>` : ''}${minRoleId ? `\nУсловие: роль <@&${minRoleId}> и выше` : ''}${blockedRoleId ? `\nНе участвуют: роль <@&${blockedRoleId}>` : ''}${minPart ? `\nМинимум участников: ${minPart}` : ''}${minCw ? `\nУсловие: ≥ ${minCw} выполненных контрактов за эту неделю` : ''}${weightByC ? `\n🎟️ Бонус-билеты: шанс победы растёт с числом контрактов за неделю` : ''}${tiersDesc}`)
         .addFields(
           { name: 'Победителей', value: String(winners), inline: true },
           { name: 'Участников', value: '0', inline: true },
@@ -7691,6 +8192,39 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const gid = parseInt(body.get('id'), 10) || 0;
     const gv = await giveaways.getGiveaway(gid);
     if (!gv || gv.status !== 'active') return '/panel?tab=giveaways&' + qs({ err: 'Розыгрыш не найден или уже завершён.' });
+    if (pathName === '/panel/giveaway/edit') {
+      const back = '/panel?tab=giveaways&';
+      const prize = (body.get('prize') || '').trim().slice(0, 200);
+      const winners = parseInt(body.get('winners'), 10) || 0;
+      if (!prize || winners < 1) return back + qs({ err: 'Нужны приз и число победителей.' });
+      // Пустое поле роли = убрать условие; непустое должно быть корректным ID.
+      const roleField = (k) => {
+        const v = (body.get(k) || '').trim();
+        if (!v) return { v: null };
+        return /^[0-9]{5,25}$/.test(v) ? { v } : { bad: true };
+      };
+      const fRole = roleField('role_id'); const fMin = roleField('min_role_id'); const fBlock = roleField('blocked_role_id');
+      if (fRole.bad || fMin.bad || fBlock.bad) return back + qs({ err: 'ID роли должен состоять из цифр (или оставьте поле пустым).' });
+      const extendRaw = (body.get('extend') || '').trim();
+      let endsAt = new Date(gv.ends_at);
+      if (extendRaw) {
+        const addMs = giveaways.parseDuration(extendRaw);
+        if (!addMs) return back + qs({ err: 'Неверная длительность продления (например 30m, 2h, 1d).' });
+        endsAt = new Date(Math.max(endsAt.getTime(), Date.now()) + addMs);
+      }
+      const minPart = Math.max(0, parseInt(body.get('min_participants'), 10) || 0) || null;
+      const minCw = Math.max(0, parseInt(body.get('min_contracts_week'), 10) || 0) || null;
+      const weight = body.get('weight_by_contracts') === '1' ? 1 : null;
+      const tiersRaw = (body.get('prize_tiers') || '').trim().slice(0, 800);
+      const tiers = giveaways.parsePrizeTiers(tiersRaw).length ? tiersRaw : null;
+      await db.run(
+        'UPDATE giveaways SET prize = ?, winners_count = ?, ends_at = ?, required_role_id = ?, min_role_id = ?, blocked_role_id = ?, min_participants = ?, min_contracts_week = ?, weight_by_contracts = ?, prize_tiers = ? WHERE id = ?',
+        [prize, winners, endsAt.toISOString(), fRole.v, fMin.v, fBlock.v, minPart, minCw, weight, tiers, gid],
+      );
+      try { await hook('refreshGiveawayMessage')(g, gid); } catch (_) {}
+      await webAudit(client, user, 'Розыгрыш изменён (сайт)', `#${gid} «${prize}», победителей ${winners}, до ${dates.formatDateTime(endsAt)}`);
+      return back + qs({ ok: 'Розыгрыш обновлён, сообщение в Discord перерисовано.' });
+    }
     if (pathName === '/panel/giveaway/end') {
       await db.run('UPDATE giveaways SET ends_at = ? WHERE id = ?', [new Date(Date.now() - 1000).toISOString(), gid]);
       await webAudit(client, user, 'Досрочное завершение розыгрыша (сайт)', `#${gid} «${gv.prize}» — итоги подведёт бот в течение минуты`);
@@ -7703,6 +8237,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
           const ch = await g.channels.fetch(gv.channel_id);
           const msg = await ch.messages.fetch(gv.message_id);
           await msg.edit({
+            content: '❌ **РОЗЫГРЫШ ОТМЕНЁН** ❌',
             embeds: [new EmbedBuilder().setColor(0xed4245).setTitle(`🎉 ${gv.prize}`).setDescription('❌ Розыгрыш отменён.')],
             components: [new ActionRowBuilder().addComponents(
               new ButtonBuilder().setCustomId(`giveaway_enter:${gid}`).setLabel('🎉 Участвовать').setStyle(ButtonStyle.Success).setDisabled(true),
@@ -7910,6 +8445,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const name = (body.get('name') || '').trim().replace(/[_\s]+/g, ' ').trim();
       if (!name) return back + '?' + qs({ err: 'Пустое имя.' });
       await passportsLib.updatePassportFields(target, stat, { name });
+      await passportsLib.syncReportNames(target, stat, name);
       await hook('syncEffectiveIdentity')(g, target);
       await hook('syncProfileChannelName')(g, target, stat);
       await hook('safeUpdateMembersList')(g);
@@ -7931,6 +8467,23 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await pushNotify(target, 'passport', `Добавлен паспорт: ${name} (№ ${stat})`, '/me').catch(() => {});
       await webAudit(client, user, 'Добавлен паспорт (сайт)', `<@${target}>: ${name} № ${stat}`);
       return back + '?' + qs({ ok: 'Паспорт добавлен.' });
+    }
+    if (pathName === '/u/hr') {
+      if (acc.rank < LEVELS.deputy) return back + '?' + qs({ err: 'Назначает HR Зам. Владелец и выше.' });
+      if (target === OWNER_ID && user.id !== OWNER_ID) return back + '?' + qs({ err: 'С этим участником нельзя взаимодействовать.' });
+      const make = body.get('make') === '1';
+      let changed;
+      try { changed = await hook('setHrRole')(g, target, make); } catch (e) { return back + '?' + qs({ err: e.message }); }
+      if (changed) await pushNotify(target, 'rank', make ? 'Вы назначены HR-Менеджером' : 'Вы сняты с роли HR-Менеджера', '/me').catch(() => {});
+      await webAudit(client, user, make ? 'HR-Менеджер назначен (сайт)' : 'HR-Менеджер снят (сайт)', `<@${target}>`);
+      return back + '?' + qs({ ok: changed ? (make ? 'Назначен HR-Менеджером.' : 'Снят с HR-Менеджера.') : 'Без изменений — уже в нужном состоянии.' });
+    }
+    if (pathName === '/u/passport_primary') {
+      if (acc.rank < LEVELS.deputy) return back + '?' + qs({ err: 'Недостаточно прав.' });
+      const stat = (body.get('static') || '').trim();
+      try { await hook('swapPrimaryPassport')(g, target, stat); } catch (e) { return back + '?' + qs({ err: e.message }); }
+      await webAudit(client, user, 'Основной паспорт изменён (сайт)', `<@${target}> → № ${stat}`);
+      return back + '?' + qs({ ok: 'Основной и дополнительный паспорт поменяны местами.' });
     }
     if (pathName === '/u/passport_remove') {
       if (acc.rank < LEVELS.deputy) return back + '?' + qs({ err: 'Недостаточно прав.' });
@@ -8126,13 +8679,17 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const m = await g.members.fetch(app.discord_id);
       await m.roles.add([config.ROLE_APPLY, config.ROLE_ORGANIZATION].filter(Boolean));
     } catch (_) {}
-    await hook('syncEffectiveIdentity')(g, app.discord_id);
+    await hook('syncEffectiveIdentity')(g, app.discord_id, { logNick: user.id });
+    await passportsLib.syncReportNames(app.discord_id, stat, name, true).catch(() => {});
     try { await history.logJoined(app.discord_id, stat, name, `Принята заявка #${id} (сайт)`); } catch (_) {}
     let channelUrl = null;
     try { channelUrl = await hook('createProfileThread')(g, app.discord_id, name, stat); } catch (_) {}
     if (app.invited_by && !(await invitations.hasExistingInvitationRecord(app.discord_id))) {
       const inv = await invitations.resolveInviter(app.invited_by);
-      if (inv) await invitations.recordInvitation(inv.discord_id, app.discord_id, name, stat, now).catch(() => {});
+      if (inv) {
+        await invitations.recordInvitation(inv.discord_id, app.discord_id, name, stat, now).catch(() => {});
+        try { await hook('safeUpdateInvitations')(g); } catch (_) {}
+      }
     }
     await hook('safeUpdateMembersList')(g);
     // полная синхронизация Discord-стороны: карточка «Принято», все ЛС (правила,
@@ -8180,13 +8737,16 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await dmTo(client, rec.discord_id, `✅ Ваш новый паспорт ${rec.name} (№ ${rec.static}) добавлен.`);
     } else if (qkey === 'data_change') {
       await passportsLib.updatePassportFields(rec.discord_id, rec.target_static, { name: rec.new_name });
+      await passportsLib.syncReportNames(rec.discord_id, rec.target_static, rec.new_name);
       await db.run("UPDATE data_change_requests SET status='accepted' WHERE id=?", [id]);
       await hook('syncEffectiveIdentity')(g, rec.discord_id);
       await hook('syncProfileChannelName')(g, rec.discord_id, rec.target_static);
       await hook('safeUpdateMembersList')(g);
       await dmTo(client, rec.discord_id, `✅ Имя по паспорту № ${rec.target_static} изменено на «${rec.new_name}».`);
     } else if (qkey === 'hr_app') {
-      try { const m = await g.members.fetch(rec.discord_id); await m.roles.add(config.ROLE_HR); } catch (_) {}
+      try { await hook('setHrRole')(g, rec.discord_id, true); } catch (_) {
+        try { const m = await g.members.fetch(rec.discord_id); await m.roles.add(config.ROLE_HR); } catch (_2) {}
+      }
       await db.run("UPDATE hr_applications SET status='accepted' WHERE id=?", [id]);
       await dmTo(client, rec.discord_id, '✅ Ваша заявка в HR одобрена — выдана роль HR-Менеджера.');
     } else if (qkey === 'appeal') {
@@ -8516,6 +9076,19 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       await webAudit(client, user, 'Пересчёт рангов (сайт)', `инициировано, выбрано ${ids.length}`);
       return '/people?' + qs({ ok: 'Пересчёт рангов запущен.' });
     }
+    if (act === 'hr_assign' || act === 'hr_remove') {
+      let n = 0; let skipped = 0;
+      for (const did of ids) {
+        if (did === OWNER_ID && user.id !== OWNER_ID) { skipped++; continue; }
+        try {
+          const ch = await hook('setHrRole')(g, did, act === 'hr_assign');
+          if (ch) { n++; await pushNotify(did, 'rank', act === 'hr_assign' ? 'Вы назначены HR-Менеджером' : 'Вы сняты с роли HR-Менеджера', '/me').catch(() => {}); }
+          else skipped++;
+        } catch (_) { skipped++; }
+      }
+      await webAudit(client, user, act === 'hr_assign' ? 'HR-Менеджер назначен (сайт)' : 'HR-Менеджер снят (сайт)', `${n} чел., без изменений: ${skipped}`);
+      return '/people?' + qs({ ok: `${act === 'hr_assign' ? 'Назначено' : 'Снято'}: ${n}${skipped ? `, без изменений: ${skipped}` : ''}.` });
+    }
     if (act === 'vacation') {
       const deadline = dates.parseDeadline(body.get('deadline') || '');
       if (!deadline) return '/people?' + qs({ err: 'Неверная дата отпуска.' });
@@ -8586,6 +9159,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       try { m = await g.members.fetch(user.id); } catch (_) { return `/g/${gid}?` + qs({ err: 'Вас нет на Discord-сервере.' }); }
       if (gv.required_role_id && !m.roles.cache.has(gv.required_role_id)) return `/g/${gid}?` + qs({ err: 'Нужна нужная роль.' });
       if (gv.min_role_id && !giveaways.meetsMinRole(m, gv.min_role_id)) return `/g/${gid}?` + qs({ err: 'Ранг ниже минимального.' });
+      if (giveaways.isBlockedByRole(m, gv.blocked_role_id)) return `/g/${gid}?` + qs({ err: 'Ваша роль не допускается к этому розыгрышу, пока её не снимут.' });
       if (gv.min_contracts_week) {
         const r = contracts.getWeekRange(0);
         const cw = await db.get("SELECT COUNT(*) c FROM contracts WHERE discord_id = ? AND status='fulfilled' AND submitted_at BETWEEN ? AND ?", [user.id, r.start.toISOString(), r.end.toISOString()]).then((x) => (x ? x.c : 0)).catch(() => 0);
@@ -8658,9 +9232,14 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const channelId = (body.get('channel_id') || '').trim();
     const roleId = (body.get('role_id') || '').trim() || null;
     const minRoleId = (body.get('min_role_id') || '').trim() || null;
+    const blockedRoleId = (body.get('blocked_role_id') || '').trim() || null;
+    const minPart = Math.max(0, parseInt(body.get('min_participants'), 10) || 0) || null;
     const ptRaw = (body.get('prize_tiers') || '').trim().slice(0, 800);
     const prizeTiers = giveaways.parsePrizeTiers(ptRaw).length ? ptRaw : null;
-    const startAt = dates.parseDeadline(body.get('start_at') || '') || (function () {
+    // Если указана только дата (без времени) — розыгрыш стартует в 12:00 МСК этого дня.
+    const startRaw = (body.get('start_at') || '').trim();
+    const dateOnly = dates.parseDateOnly(startRaw);
+    const startAt = (dateOnly ? new Date(dateOnly.getTime() + 12 * 3600e3) : null) || dates.parseDeadline(startRaw) || (function () {
       const d = new Date(body.get('start_at'));
       return Number.isNaN(d.getTime()) ? null : d;
     })();
@@ -8668,9 +9247,9 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля (приз, победители, длительность, ID канала, дата старта).' });
     }
     await db.run(
-      `INSERT INTO scheduled_giveaways (prize, winners_count, channel_id, duration_ms, required_role_id, min_role_id, prize_tiers, start_at, host_id, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-      [prize, winners, channelId, durMs, roleId, minRoleId, prizeTiers, startAt.toISOString(), user.id, new Date().toISOString()],
+      `INSERT INTO scheduled_giveaways (prize, winners_count, channel_id, duration_ms, required_role_id, min_role_id, prize_tiers, start_at, host_id, status, blocked_role_id, min_participants, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+      [prize, winners, channelId, durMs, roleId, minRoleId, prizeTiers, startAt.toISOString(), user.id, blockedRoleId, minPart, new Date().toISOString()],
     );
     await webAudit(client, user, 'Запланирован розыгрыш (сайт)', `«${prize}» на ${dates.formatDateTime(startAt)}`);
     return '/panel?tab=giveaways&' + qs({ ok: 'Розыгрыш запланирован.' });
@@ -8691,10 +9270,11 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
     const prize = (body.get('prize') || '').trim().slice(0, 200);
     if (!name || !prize) return '/panel?tab=giveaways&' + qs({ err: 'Нужны название и приз.' });
     await db.run(
-      'INSERT INTO giveaway_templates (name, prize, winners_count, duration, required_role_id, min_role_id, prize_tiers, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO giveaway_templates (name, prize, winners_count, duration, required_role_id, min_role_id, prize_tiers, blocked_role_id, min_participants, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [name, prize, parseInt(body.get('winners'), 10) || 1, (body.get('duration') || '').trim().slice(0, 10),
        (body.get('role_id') || '').trim() || null, (body.get('min_role_id') || '').trim() || null,
-       (body.get('prize_tiers') || '').trim().slice(0, 800) || null, new Date().toISOString()],
+       (body.get('prize_tiers') || '').trim().slice(0, 800) || null,
+       (body.get('blocked_role_id') || '').trim() || null, Math.max(0, parseInt(body.get('min_participants'), 10) || 0) || null, new Date().toISOString()],
     );
     return '/panel?tab=giveaways&' + qs({ ok: 'Шаблон сохранён.' });
   }
@@ -9004,7 +9584,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       const m = await g.members.fetch(did);
       await m.roles.add([roleId, config.ROLE_ORGANIZATION].filter(Boolean));
     } catch (_) {}
-    await hook('syncEffectiveIdentity')(g, did);
+    await hook('syncEffectiveIdentity')(g, did, { logNick: user.id });
     try { await history.logJoined(did, stat, name, 'Добавлен вручную через сайт'); } catch (_) {}
     try { await hook('createProfileThread')(g, did, name, stat); } catch (_) {}
     await hook('safeUpdateMembersList')(g);
@@ -9013,7 +9593,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   }
 
   // ===== повторяющиеся розыгрыши (Владелец) =====
-  if (pathName === '/panel/giveaway/recur_create' || pathName === '/panel/giveaway/recur_toggle' || pathName === '/panel/giveaway/recur_delete') {
+  if (pathName === '/panel/giveaway/recur_create' || pathName === '/panel/giveaway/recur_edit' || pathName === '/panel/giveaway/recur_toggle' || pathName === '/panel/giveaway/recur_delete') {
     if (!(await panelTabAllowed(client, user, acc, 'giveaways', LEVELS.owner))) return '/panel?tab=giveaways&' + qs({ err: 'Недостаточно прав.' });
     if (pathName === '/panel/giveaway/recur_create') {
       const prize = (body.get('prize') || '').trim().slice(0, 200);
@@ -9025,13 +9605,38 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       if (!prize || winners < 1 || !durMs || !(weekday >= 0 && weekday <= 6) || !/^[0-9]+$/.test(channelId)) {
         return '/panel?tab=giveaways&' + qs({ err: 'Проверьте поля правила.' });
       }
-      await giveaways.createRecurringRule(channelId, prize, winners, durMs, weekday, user.id, roleId);
+      await giveaways.createRecurringRule(channelId, prize, winners, durMs, weekday, user.id, roleId, (body.get('blocked_role_id') || '').trim() || null, Math.max(0, parseInt(body.get('min_participants'), 10) || 0) || null);
       await webAudit(client, user, 'Создано правило повторяющегося розыгрыша (сайт)', `«${prize}» по дням недели #${weekday}`);
       return '/panel?tab=giveaways&' + qs({ ok: 'Правило создано.' });
     }
     const rid = parseInt(body.get('id'), 10) || 0;
     const rule = await giveaways.getRecurringRule(rid).catch(() => null);
     if (!rule) return '/panel?tab=giveaways&' + qs({ err: 'Правило не найдено.' });
+    if (pathName === '/panel/giveaway/recur_edit') {
+      const back = '/panel?tab=giveaways&';
+      const prize = (body.get('prize') || '').trim().slice(0, 200);
+      const winners = parseInt(body.get('winners'), 10) || 0;
+      const durMs = giveaways.parseDuration((body.get('duration') || '').trim());
+      const weekday = parseInt(body.get('weekday'), 10);
+      const channelId = (body.get('channel_id') || '').trim();
+      if (!prize || winners < 1 || !durMs || !(weekday >= 0 && weekday <= 6) || !/^[0-9]+$/.test(channelId)) {
+        return back + qs({ err: 'Проверьте поля правила (приз, победители, длительность, день, ID канала).' });
+      }
+      const roleField = (k) => {
+        const v = (body.get(k) || '').trim();
+        if (!v) return { v: null };
+        return /^[0-9]{5,25}$/.test(v) ? { v } : { bad: true };
+      };
+      const fRole = roleField('role_id'); const fBlock = roleField('blocked_role_id');
+      if (fRole.bad || fBlock.bad) return back + qs({ err: 'ID роли должен состоять из цифр (или оставьте поле пустым).' });
+      const minPart = Math.max(0, parseInt(body.get('min_participants'), 10) || 0) || null;
+      await db.run(
+        'UPDATE giveaway_recurring_rules SET prize = ?, winners_count = ?, duration_ms = ?, weekday = ?, channel_id = ?, required_role_id = ?, blocked_role_id = ?, min_participants = ? WHERE id = ?',
+        [prize, winners, durMs, weekday, channelId, fRole.v, fBlock.v, minPart, rid],
+      );
+      await webAudit(client, user, 'Правило повторяющегося розыгрыша изменено (сайт)', `#${rid} «${prize}», день #${weekday}`);
+      return back + qs({ ok: 'Правило обновлено — применится к следующему запуску.' });
+    }
     if (pathName === '/panel/giveaway/recur_delete') {
       await db.run('DELETE FROM giveaway_recurring_rules WHERE id = ?', [rid]);
       await webAudit(client, user, 'Удалено правило повторяющегося розыгрыша (сайт)', `#${rid}`);
@@ -9175,6 +9780,40 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
   // ===== админ-панель havirys: бренд / тема / Discord =====
   if (pathName.startsWith('/admin/')) {
     if (user.id !== OWNER_ID) return '/panel?' + qs({ err: 'Только для владельца-аккаунта (havirys).' });
+
+    if (pathName === '/admin/versions') {
+      const act = body.get('act') || '';
+      const back = '/panel?tab=admin&';
+      const RESERVED = ['v1', 'v2', 'admin', 'panel', 'me', 'login', 'logout', 'people', 'photo', 'i', 'auth', 'cimg', 'asset', 'p', 'g', 'u', 'api', 'faq', 'apply', 'ticket', 'tickets', 'text', 'audit', 'tools', 'health', 'oldsite'];
+      if (act === 'save_path') {
+        const p = (body.get('v2_path') || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40);
+        if (!p || RESERVED.includes(p.toLowerCase())) return back + qs({ err: 'Путь пустой или занят служебным разделом сайта.' });
+        await db.setSetting('site.v2_path', p);
+        await loadSite(true);
+        await webAuditMeta(client, user, 'Путь новой версии сайта изменён', `/${p}`);
+        return back + qs({ ok: `Теперь новая версия открывается по /${p}.` });
+      }
+      if (act === 'main_v2' || act === 'main_v1') {
+        await db.setSetting('site.main_version', act === 'main_v2' ? 'v2' : '');
+        await loadSite(true);
+        await webAuditMeta(client, user, 'Основная версия сайта изменена', act === 'main_v2' ? 'новая' : 'старая');
+        return (act === 'main_v2' ? '/' + skinSegments().v1 : '') + '/panel?tab=admin&' + qs({ ok: act === 'main_v2' ? 'Новая версия теперь основная. Старая доступна по скрытой ссылке.' : 'Основной снова старая версия.' });
+      }
+      if (act === 'v2_on' || act === 'v2_off') {
+        await db.setSetting('site.v2_enabled', act === 'v2_off' ? '0' : '');
+        await loadSite(true);
+        return back + qs({ ok: act === 'v2_off' ? 'Новая версия отключена.' : 'Новая версия включена.' });
+      }
+      if (act === 'photo_save') {
+        const clampDays = (v) => String(Math.min(3650, Math.max(1, parseInt(v, 10) || 1)));
+        await db.setSetting('site.photo_ttl_guest', clampDays(body.get('ttl_guest')));
+        await db.setSetting('site.photo_ttl_user', clampDays(body.get('ttl_user')));
+        await db.setSetting('site.photo_guests', body.get('guests') === '1' ? '' : '0');
+        await loadSite(true);
+        return back + qs({ ok: 'Настройки фотообмена сохранены.' });
+      }
+      return back + qs({ err: 'Неизвестное действие.' });
+    }
 
     if (pathName === '/admin/site') {
       const lim = { brand: 60, invite: 200, hero_title: 120, hero_text: 600, footer: 300 };
@@ -9604,7 +10243,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
       ids = (await db.all('SELECT discord_id FROM participants')).map((r) => r.discord_id);
     }
     let n = 0;
-    for (const did of ids) { await hook('syncEffectiveIdentity')(g, did); n++; }
+    for (const did of ids) { await hook('adoptDiscordHr')(g, did); await hook('syncEffectiveIdentity')(g, did); n++; }
     await hook('safeUpdateMembersList')(g);
     await webAudit(client, user, 'Сверка ролей — пересинхронизация (сайт)', `${n} участник(ов)`);
     return '/panel?tab=role_check&' + qs({ ok: `Пересинхронизировано: ${n}.` });
@@ -9635,7 +10274,7 @@ async function handlePost(client, pathName, user, body, acc, cookieHeader) {
         [did, tag, name, stat, parseInt(r.lvl, 10) || 1, roleId, new Date().toISOString()],
       );
       try { const m = await g.members.fetch(did); await m.roles.add([roleId, config.ROLE_ORGANIZATION].filter(Boolean)); } catch (_) {}
-      await hook('syncEffectiveIdentity')(g, did);
+      await hook('syncEffectiveIdentity')(g, did, { logNick: user.id });
       try { await history.logJoined(did, stat, name, 'Импорт CSV через сайт'); } catch (_) {}
       ok++;
     }
@@ -9695,13 +10334,46 @@ function start(client, hooks = {}) {
 
   const server = http.createServer(async (req, res) => {
     const _reqStart = Date.now();
-    const done = (code, headers, body) => { res.writeHead(code, headers); res.end(body); };
+    let _skinPrefix = ''; // '/NEWSITE' или '/OLDSITE' — если страница открыта по скрытой ссылке
+    const done = (code, headers, body) => {
+      if (_skinPrefix) {
+        const ct = String(headers['Content-Type'] || '');
+        if (typeof body === 'string' && ct.startsWith('text/html')) body = rewriteSkinLinks(body, _skinPrefix);
+        if (headers.Location && /^\/(?!\/)/.test(headers.Location)) headers = { ...headers, Location: prefixSkinUrl(headers.Location, _skinPrefix) };
+        headers = { ...headers, 'X-Robots-Tag': 'noindex, nofollow' };
+      }
+      res.writeHead(code, headers); res.end(body);
+    };
     const html = (code, body, extra = {}) => done(code, { 'Content-Type': 'text/html; charset=utf-8', ...extra }, body);
     const redirect = (loc, extra = {}) => done(302, { Location: loc, ...extra }, '');
 
     try {
       const u = new URL(req.url, baseUrl());
-      const path = u.pathname;
+      await loadSite();
+      // Две версии сайта: старая (v1) и новая (v2). Новая открывается по скрытой
+      // ссылке (/NEWSITE, путь настраивается), нигде не анонсируется. Какая из
+      // версий «основная» (без префикса) — настройка site.main_version.
+      const segs = skinSegments();
+      let path = u.pathname;
+      let skin = SITE.main_version === 'v2' ? 'v2' : 'v1';
+      const segM = /^\/([^/]+)(\/.*)?$/.exec(path);
+      if (segM) {
+        const lower = segM[1].toLowerCase();
+        if (lower === segs.v2.toLowerCase() || lower === segs.v1.toLowerCase()) {
+          skin = lower === segs.v2.toLowerCase() ? 'v2' : 'v1';
+          _skinPrefix = '/' + (skin === 'v2' ? segs.v2 : segs.v1);
+          path = segM[2] || '/';
+        }
+      }
+      if (_skinPrefix && skin === 'v2' && SITE.v2_enabled === '0') {
+        return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Not found');
+      }
+      skinALS.enterWith({ skin, prefix: _skinPrefix, path, search: u.search });
+      if (Date.now() - _photoSweepAt > 600000) sweepPhotos().catch(() => {}); // убираем просроченные фото
+      // Доски в новой версии убраны.
+      if (skin === 'v2' && (path === '/boards' || path.startsWith('/board/'))) {
+        return html(404, layout({ title: 'Раздел убран', user: null, level: 'guest', body: '<h1>Раздел «Доски» убран в новой версии сайта</h1><a class="btn" href="/">На главную</a>' }));
+      }
       let user = readSession(req.headers.cookie);
       if (user && !(await sessionFresh(user))) user = null; // «выйти со всех устройств»
       // Локальный аккаунт (логин/пароль, без Discord). Если havirys привязал его
@@ -9731,6 +10403,7 @@ function start(client, hooks = {}) {
       const pageNum = Math.max(0, parseInt(u.searchParams.get('page') || '0', 10) || 0);
       const flash = flashBanner(u);
       const clientIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString().split(',')[0].trim();
+      if (user && skin === 'v2') await refreshNavCounts();
       const notif = user ? await unreadCount(user.id).catch(() => 0) : 0;
       const panelGrant = user ? (await getPanelGrants(client, user.id)).size > 0 : false;
       const L = (o) => layout({ notif, panelGrant, ...o }); // layout с колокольчиком
@@ -9781,6 +10454,74 @@ function start(client, hooks = {}) {
       if (path === '/sw.js') {
         return done(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
           "self.addEventListener('install',function(){self.skipWaiting()});self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});self.addEventListener('fetch',function(){});");
+      }
+
+      // ----- Фотохостинг -----
+      if (path === '/photo' && req.method === 'GET') {
+        let plevel = 'guest';
+        if (user) plevel = (await accessFor(client, user.id)).level;
+        return html(200, L({ title: 'Фотохостинг', user, level: plevel, wide: true, body: flash + await photoBody(user, pageNum) }));
+      }
+
+      if (path === '/photo/upload' && req.method === 'POST') {
+        const pj = (code, obj) => done(code, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
+        if (!user && SITE.photo_guests === '0') return pj(403, { ok: false, err: 'Загрузка доступна после входа на сайт.' });
+        if (user && !csrfOk(user, req.headers['x-csrf'])) return pj(403, { ok: false, err: 'Сессия устарела — обновите страницу.' });
+        if (!photoRateOk(user ? 'u:' + user.id : 'ip:' + clientIp, user ? 80 : 12)) return pj(429, { ok: false, err: 'Слишком много загрузок за час — попробуйте позже.' });
+        const buf = await readRaw(req, PHOTO_MAX);
+        if (!buf) return pj(413, { ok: false, err: 'Файл больше 10 МБ.' });
+        const kind = sniffImage(buf);
+        if (!kind) return pj(400, { ok: false, err: 'Поддерживаются только JPG, PNG, GIF и WEBP.' });
+        let origName = 'image';
+        try { origName = decodeURIComponent(String(req.headers['x-filename'] || 'image')).replace(/[^\p{L}\p{N}._ -]/gu, '').slice(0, 80) || 'image'; } catch (_) {}
+        const pcode = crypto.randomBytes(6).toString('base64url').replace(/[-_]/g, 'x');
+        const token = crypto.randomBytes(12).toString('base64url');
+        const maxDays = photoMaxDays(!!user);
+        let ttlDays = parseInt(req.headers['x-ttl'], 10);
+        if (!(ttlDays >= 1)) ttlDays = maxDays;
+        ttlDays = Math.min(ttlDays, maxDays);
+        const expiresAt = new Date(Date.now() + ttlDays * 86400e3).toISOString();
+        try {
+          await _fsMod.promises.writeFile(_pathMod.join(photosDir(), `${pcode}.${kind.ext}`), buf);
+          await db.run(
+            'INSERT INTO photos (code, owner_id, ext, mime, orig_name, size, ip, del_token, expires_at, views, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
+            [pcode, user ? user.id : '', kind.ext, kind.mime, origName, buf.length, clientIp, token, expiresAt, new Date().toISOString()],
+          );
+        } catch (e) {
+          console.error('[web] photo upload:', e.message);
+          return pj(500, { ok: false, err: 'Не удалось сохранить файл.' });
+        }
+        return pj(200, { ok: true, code: pcode, url: `${baseUrl()}/i/${pcode}.${kind.ext}`, size: fmtBytes(buf.length), token, until: fmt(expiresAt) });
+      }
+
+      if (path === '/photo/delete' && req.method === 'POST') {
+        const pj = (code, obj) => done(code, { 'Content-Type': 'application/json; charset=utf-8' }, JSON.stringify(obj));
+        const b = await readBody(req);
+        const row = await db.get('SELECT * FROM photos WHERE code = ?', [(b.get('code') || '').trim()]).catch(() => null);
+        if (!row) return pj(404, { ok: false, err: 'Картинка не найдена.' });
+        const byToken = row.del_token && (b.get('token') || '') === row.del_token;
+        const byOwner = user && csrfOk(user, b.get('_csrf')) && (row.owner_id === user.id || user.id === OWNER_ID);
+        if (!byToken && !byOwner) return pj(403, { ok: false, err: 'Нет прав на удаление.' });
+        await _fsMod.promises.unlink(_pathMod.join(photosDir(), `${row.code}.${row.ext}`)).catch(() => {});
+        await db.run('DELETE FROM photos WHERE id = ?', [row.id]);
+        return pj(200, { ok: true });
+      }
+
+      {
+        const pm = /^\/i\/([A-Za-z0-9]{6,16})\.(jpg|png|gif|webp)$/.exec(path);
+        if (pm && (req.method === 'GET' || req.method === 'HEAD')) {
+          const row = await db.get('SELECT code, ext, mime, expires_at FROM photos WHERE code = ?', [pm[1]]).catch(() => null);
+          if (row && row.expires_at && row.expires_at <= new Date().toISOString()) { sweepPhotos().catch(() => {}); return done(410, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Срок хранения файла истёк'); }
+          if (!row || row.ext !== pm[2]) return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Not found');
+          let data;
+          try { data = await _fsMod.promises.readFile(_pathMod.join(photosDir(), `${row.code}.${row.ext}`)); } catch (_) { return done(404, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Not found'); }
+          db.run('UPDATE photos SET views = COALESCE(views, 0) + 1 WHERE code = ?', [row.code]).catch(() => {});
+          return done(200, {
+            'Content-Type': row.mime, 'Content-Length': data.length, 'Cache-Control': 'public, max-age=86400',
+            'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox",
+            'Cross-Origin-Resource-Policy': 'cross-origin',
+          }, req.method === 'HEAD' ? '' : data);
+        }
       }
 
       // ----- POST: все действия записи -----
@@ -9870,7 +10611,13 @@ function start(client, hooks = {}) {
             [localId, login, now, now, login, email, rec.hash, rec.salt],
           );
           const cookie = await issueWebSession(req, client, localId);
-          return redirect('/me', { 'Set-Cookie': cookie });
+          {
+            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
+            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
+            const sg = skinSegments();
+            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
+            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
+          }
         }
 
         if (path === '/login/local') {
@@ -9882,7 +10629,13 @@ function start(client, hooks = {}) {
             return redirect('/login/local?' + qs({ err: 'Неверный логин или пароль.' }));
           }
           const cookie = await issueWebSession(req, client, row.discord_id);
-          return redirect('/me', { 'Set-Cookie': cookie });
+          {
+            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
+            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
+            const sg = skinSegments();
+            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
+            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
+          }
         }
 
         // /forgot
@@ -10032,7 +10785,7 @@ function start(client, hooks = {}) {
           if (!process.env.CLIENT_ID) return html(500, L({ title: 'Ошибка', body: '<h1>CLIENT_ID не задан</h1>' }));
           const params = new URLSearchParams({ client_id: process.env.CLIENT_ID, redirect_uri: redirectUri(), response_type: 'code', scope: 'identify' });
           if (u.searchParams.get('go') === 'link') params.set('state', 'link');
-          return redirect(`${DISCORD_API}/oauth2/authorize?${params.toString()}`);
+          return redirect(`${DISCORD_API}/oauth2/authorize?${params.toString()}`, _skinPrefix ? { 'Set-Cookie': `fc_skin=${_skinPrefix.slice(1)}; Path=/; Max-Age=900; HttpOnly; Secure; SameSite=Lax` } : {});
         }
         if (user) return redirect('/me');
         return html(200, L({ title: 'Вход', user: null, level: 'guest', body: flash + `
@@ -10138,7 +10891,13 @@ function start(client, hooks = {}) {
         await db.run('UPDATE magic_links SET used_at = ? WHERE token = ?', [new Date().toISOString(), token]).catch(() => {});
         try {
           const cookie = await issueWebSession(req, client, row.discord_id);
-          return redirect('/me', { 'Set-Cookie': cookie });
+          {
+            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
+            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
+            const sg = skinSegments();
+            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
+            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
+          }
         } catch (err) {
           console.error('[web] magic-link вход:', err.message);
           return html(500, L({ title: 'Ошибка входа', body: '<h1>Не удалось войти по ссылке</h1><a class="btn" href="/login">Войти через Discord</a>' }));
@@ -10230,7 +10989,13 @@ function start(client, hooks = {}) {
             await dmTo(client, me.id, `🔐 Новый вход на сайт «${siteBrand()}»\nУстройство: ${short}\nIP: ${ip || '—'}\nВремя: ${new Date().toLocaleString('ru-RU')}\n\nЕсли это не вы — зайдите в «Мой профиль» → «Активные сессии» и нажмите «Выйти со всех устройств».`).catch(() => {});
           }
           const cookie = `fc_sess=${makeSession({ id: me.id, username: uname, avatar: me.avatar || '', sv: svRow ? (svRow.sess_ver || 0) : 0, sid })}; Path=/; Max-Age=${SESSION_DAYS * 24 * 3600}; HttpOnly; Secure; SameSite=Lax`;
-          return redirect('/me', { 'Set-Cookie': cookie });
+          {
+            // Вернуть человека в ту версию сайта, откуда он нажал «Войти».
+            const sk = /(?:^|;\s*)fc_skin=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || '');
+            const sg = skinSegments();
+            const back = sk && (sk[1].toLowerCase() === sg.v2.toLowerCase() ? '/' + sg.v2 : sk[1].toLowerCase() === sg.v1.toLowerCase() ? '/' + sg.v1 : '');
+            return redirect((back || '') + '/me', { 'Set-Cookie': [cookie, 'fc_skin=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax'] });
+          }
         } catch (err) {
           console.error('[web] OAuth ошибка:', err.message);
           return html(502, L({ title: 'Ошибка входа', body: `<h1>Не удалось войти через Discord</h1><p class="muted">${esc(err.message)}</p><a class="btn" href="/">На главную</a>` }));

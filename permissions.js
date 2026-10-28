@@ -84,6 +84,11 @@ function mentionManagementRoles() {
   return ordered.map((r) => `<@&${r}>`).join(' ');
 }
 
+// Упоминания ролей для заявок на увольнение: их рассматривает Зам. Владелец и выше.
+function mentionDeputyRoles() {
+  return [config.ROLE_OWNER, config.ROLE_DEPUTY].filter(Boolean).map((r) => `<@&${r}>`).join(' ');
+}
+
 // Управлять гайдами FAQ может только владелец бота или роль Владельца
 function canManageFaq(member) {
   if (!member) return false;
@@ -123,6 +128,7 @@ module.exports = {
   canReview,
   canManageFaq,
   mentionManagementRoles,
+  mentionDeputyRoles,
   isProtectedTarget,
   getRankIndex,
   getActorRankIndex,

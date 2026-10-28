@@ -189,7 +189,7 @@ const COMMAND_CATEGORIES = [
   },
   {
     title: '🎉 Розыгрыши',
-    commands: ['розыгрыш_старт', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_участники_экспорт', 'розыгрыш_история', 'розыгрыш_добавить_участника', 'розыгрыш_удалить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить', 'розыгрыш_повтор_возобновить', 'розыгрыш_чс_добавить', 'розыгрыш_чс_убрать', 'розыгрыш_чс_список'],
+    commands: ['розыгрыш_старт', 'розыгрыш_изменить', 'розыгрыш_повтор_изменить', 'розыгрыш_завершить', 'розыгрыш_отменить', 'розыгрыш_реролл', 'розыгрыш_участники', 'розыгрыш_участники_экспорт', 'розыгрыш_история', 'розыгрыш_добавить_участника', 'розыгрыш_удалить_участника', 'розыгрыш_повтор_создать', 'розыгрыш_повтор_список', 'розыгрыш_повтор_отменить', 'розыгрыш_повтор_возобновить', 'розыгрыш_чс_добавить', 'розыгрыш_чс_убрать', 'розыгрыш_чс_список'],
   },
   {
     title: '📢 Тексты и рассылки',
@@ -246,6 +246,7 @@ const COMMAND_DEFAULT_TIERS = {
   // --- Владелец и выше ---
   розыгрыш_старт: 'owner', розыгрыш_завершить: 'owner', розыгрыш_отменить: 'owner', розыгрыш_реролл: 'owner',
   розыгрыш_участники: 'owner', розыгрыш_добавить_участника: 'owner', розыгрыш_повтор_создать: 'owner',
+  розыгрыш_изменить: 'owner', розыгрыш_повтор_изменить: 'owner',
   розыгрыш_повтор_список: 'owner', розыгрыш_повтор_отменить: 'owner', розыгрыш_повтор_возобновить: 'owner',
   розыгрыш_удалить_участника: 'owner', розыгрыш_история: 'owner',
   правила: 'owner', правила_обновить: 'owner', правила_разослать: 'owner', агитация: 'owner', агитация_обновить: 'owner',
@@ -623,8 +624,8 @@ async function buildProfileEmbeds(guild, discordId) {
   const nickRows = await db.all('SELECT * FROM nickname_history WHERE discord_id = ? ORDER BY id DESC LIMIT 10', [discordId]);
   if (nickRows.length > 0) {
     const lines = nickRows.map((n) => {
-      const who = n.changed_by && n.changed_by !== 'unknown' ? `<@${n.changed_by}>` : 'кто-то';
-      return `«${n.old_nick || '—'}» → «${n.new_nick || '—'}» — ${who}, ${formatDateOnly(new Date(n.at))}`;
+      const who = n.changed_by && /^\d{5,25}$/.test(n.changed_by) ? `<@${n.changed_by}>` : 'кто-то';
+      return `«${n.old_nick || '—'}» → «${n.new_nick || '—'}» — ${n.note ? n.note + ', ' : ''}${who}, ${formatDateOnly(new Date(n.at))}`;
     });
     mainEmbed.addFields({ name: 'Смена ника (сервер)', value: lines.join('\n').slice(0, 1024) });
   }
@@ -975,43 +976,6 @@ async function sendWeeklyDigest(guild) {
   await db.setSetting('weekly_digest_last_sent', new Date().toISOString());
 }
 
-// Личный еженедельный отчёт каждому участнику в ЛС: контракты, приглашения,
-// стрик за прошлую полную неделю. Один раз в неделю (метка last_weekly_digest).
-async function sendPersonalWeeklyDigests(guild) {
-  const lastSent = await db.getSetting('personal_digest_last_sent');
-  if (lastSent && Date.now() - new Date(lastSent).getTime() < 6.5 * 24 * 60 * 60 * 1000) return;
-  const range = contracts.getWeekRange(1); // прошлая полная неделя
-  const weekTag = range.start.toISOString().slice(0, 10);
-  const label = contracts.formatWeekLabel(range);
-  const parts = await db.all('SELECT discord_id, name, last_weekly_digest FROM participants').catch(() => []);
-  let sent = 0;
-  for (const p of parts) {
-    if (p.last_weekly_digest === weekTag) continue;
-    if (await isMuted(p.discord_id, 'weekly_digest')) continue; // участник отключил отчёт
-    try {
-      const w = await contracts.getUserWeekStats(p.discord_id, range).catch(() => ({ fulfilled: [], unfulfilled: [] }));
-      const inv = await db.get(
-        "SELECT COUNT(*) c FROM invitations WHERE inviter_discord_id = ? AND status='confirmed' AND joined_at BETWEEN ? AND ?",
-        [p.discord_id, range.start.toISOString(), range.end.toISOString()],
-      ).catch(() => null);
-      let streak = 0;
-      try { streak = (await badges.compute(p.discord_id)).streak || 0; } catch (_) {}
-      const f = w.fulfilled.length; const uf = w.unfulfilled.length;
-      await dmUser(guild, p.discord_id,
-        `📊 Ваш отчёт за ${label}\n`
-        + `Контракты: ✅ ${f} / ❌ ${uf}\n`
-        + `Подтверждённых приглашений: ${inv ? inv.c : 0}\n`
-        + `Недельный стрик: ${streak} ${streak === 1 ? 'неделя' : 'нед.'}${streak >= 2 ? ' 🔥' : ''}\n`
-        + `${f === 0 && uf === 0 ? 'На прошлой неделе контрактов не было — самое время начать!' : 'Так держать!'}`);
-      await db.run('UPDATE participants SET last_weekly_digest = ? WHERE discord_id = ?', [weekTag, p.discord_id]).catch(() => {});
-      sent++;
-      await new Promise((r) => setTimeout(r, 600));
-    } catch (_) { /* участник закрыл ЛС и т.п. */ }
-  }
-  await db.setSetting('personal_digest_last_sent', new Date().toISOString());
-  if (sent) console.log(`Личный еженедельный отчёт отправлен ${sent} участникам.`);
-}
-
 async function checkStuckContracts(guild) {
   const cutoff = new Date(Date.now() - config.STUCK_CONTRACT_HOURS * 60 * 60 * 1000).toISOString();
 
@@ -1315,15 +1279,32 @@ function getDirSize(dirPath) {
   return total;
 }
 
-async function syncEffectiveIdentity(guild, discordId) {
+// opts.logNick = id того, кто принял/добавил человека: тогда в историю ников
+// пишется запись о вступлении (или о возврате после увольнения) — даже если
+// итоговый ник совпал со старым.
+async function syncEffectiveIdentity(guild, discordId, opts = {}) {
   const identity = await passportsLib.computeEffectiveIdentity(discordId);
   if (!identity) return;
 
+  const newNick = `${identity.name} | ${identity.static}`;
+  let oldNick = null;
   try {
     const member = await guild.members.fetch(discordId);
-    await member.setNickname(`${identity.name} | ${identity.static}`);
+    oldNick = member.nickname || null;
+    await member.setNickname(newNick);
   } catch (err) {
     console.error(`Не удалось изменить ник для ${discordId}:`, err.message);
+  }
+  if (opts.logNick) {
+    try {
+      const wasLeft = await db.get("SELECT id FROM membership_events WHERE discord_id = ? AND event = 'left' LIMIT 1", [discordId]);
+      await db.run(
+        'INSERT INTO nickname_history (discord_id, old_nick, new_nick, changed_by, at, note) VALUES (?, ?, ?, ?, ?, ?)',
+        [discordId, oldNick, newNick, String(opts.logNick), new Date().toISOString(), wasLeft ? 'Возврат в организацию' : 'Вступление в организацию'],
+      );
+    } catch (err) {
+      console.error('Не удалось записать историю ника при вступлении:', err.message);
+    }
   }
 
   // Общая роль организации — есть у любого действующего участника (у кого
@@ -1819,7 +1800,9 @@ const commands = [
     .addStringOption((opt) => opt.setName('длительность').setDescription('Например: 30m, 2h, 1d, 1w').setRequired(true))
     .addIntegerOption((opt) => opt.setName('победителей').setDescription('Сколько победителей').setRequired(true).setMinValue(1))
     .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправить (по умолчанию — этот канал)').setRequired(false))
-    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать (по умолчанию — кто угодно)').setRequired(false)),
+    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать (по умолчанию — кто угодно)').setRequired(false))
+    .addRoleOption((opt) => opt.setName('запрещённая_роль').setDescription('Обладатели этой роли НЕ участвуют, пока роль не снимут').setRequired(false))
+    .addIntegerOption((opt) => opt.setName('мин_участников').setDescription('Минимум участников: если меньше — розыгрыш отменится').setRequired(false).setMinValue(1)),
   new SlashCommandBuilder()
     .setName('розыгрыш_добавить_участника')
     .setDescription('Вручную добавить человека в розыгрыш')
@@ -1843,7 +1826,55 @@ const commands = [
       ),
     )
     .addChannelOption((opt) => opt.setName('канал').setDescription('Куда отправлять (по умолчанию — этот канал)').setRequired(false))
-    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать (по умолчанию — кто угодно)').setRequired(false)),
+    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать (по умолчанию — кто угодно)').setRequired(false))
+    .addRoleOption((opt) => opt.setName('запрещённая_роль').setDescription('Обладатели этой роли НЕ участвуют, пока роль не снимут').setRequired(false))
+    .addIntegerOption((opt) => opt.setName('мин_участников').setDescription('Минимум участников: если меньше — розыгрыш отменится').setRequired(false).setMinValue(1)),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_изменить')
+    .setDescription('Изменить идущий или ещё не запущенный (запланированный) розыгрыш')
+    .addStringOption((opt) => opt.setName('розыгрыш').setDescription('Какой розыгрыш').setRequired(true).setAutocomplete(true))
+    .addStringOption((opt) => opt.setName('приз').setDescription('Новый приз').setRequired(false))
+    .addIntegerOption((opt) => opt.setName('победителей').setDescription('Новое число победителей').setRequired(false).setMinValue(1))
+    .addStringOption((opt) => opt.setName('продлить').setDescription('Идущий: продлить на 30m, 2h, 1d').setRequired(false))
+    .addStringOption((opt) => opt.setName('длительность').setDescription('Запланированный: новая длительность (30m, 2h, 1d)').setRequired(false))
+    .addStringOption((opt) => opt.setName('старт').setDescription('Запланированный: новый старт (ДД.ММ.ГГГГ — в 12:00, или дата-время)').setRequired(false))
+    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать').setRequired(false))
+    .addRoleOption((opt) => opt.setName('мин_роль').setDescription('Эта роль и выше по рангу').setRequired(false))
+    .addRoleOption((opt) => opt.setName('запрещённая_роль').setDescription('Обладатели этой роли не участвуют').setRequired(false))
+    .addIntegerOption((opt) => opt.setName('мин_участников').setDescription('Минимум участников').setRequired(false).setMinValue(1))
+    .addStringOption((opt) => opt.setName('убрать').setDescription('Убрать пункт условия').setRequired(false).addChoices(
+      { name: 'Обязательную роль', value: 'условие' },
+      { name: 'Минимальную роль', value: 'мин_роль' },
+      { name: 'Запрещённую роль', value: 'запрещённая_роль' },
+      { name: 'Минимум участников', value: 'мин_участников' },
+    )),
+  new SlashCommandBuilder()
+    .setName('розыгрыш_повтор_изменить')
+    .setDescription('Изменить правило повторяющегося розыгрыша (применится к следующему запуску)')
+    .addStringOption((opt) => opt.setName('правило').setDescription('Какое правило').setRequired(true).setAutocomplete(true))
+    .addStringOption((opt) => opt.setName('приз').setDescription('Новый приз').setRequired(false))
+    .addIntegerOption((opt) => opt.setName('победителей').setDescription('Новое число победителей').setRequired(false).setMinValue(1))
+    .addStringOption((opt) => opt.setName('длительность').setDescription('Сколько длится каждый запуск: 30m, 2h, 1d, 1w').setRequired(false))
+    .addStringOption((opt) =>
+      opt.setName('день_недели').setDescription('Новый день запуска').setRequired(false).addChoices(
+        { name: 'Воскресенье', value: '0' },
+        { name: 'Понедельник', value: '1' },
+        { name: 'Вторник', value: '2' },
+        { name: 'Среда', value: '3' },
+        { name: 'Четверг', value: '4' },
+        { name: 'Пятница', value: '5' },
+        { name: 'Суббота', value: '6' },
+      ),
+    )
+    .addChannelOption((opt) => opt.setName('канал').setDescription('Новый канал').setRequired(false))
+    .addRoleOption((opt) => opt.setName('условие').setDescription('Только эта роль может участвовать').setRequired(false))
+    .addRoleOption((opt) => opt.setName('запрещённая_роль').setDescription('Обладатели этой роли не участвуют').setRequired(false))
+    .addIntegerOption((opt) => opt.setName('мин_участников').setDescription('Минимум участников').setRequired(false).setMinValue(1))
+    .addStringOption((opt) => opt.setName('убрать').setDescription('Убрать пункт условия').setRequired(false).addChoices(
+      { name: 'Обязательную роль', value: 'условие' },
+      { name: 'Запрещённую роль', value: 'запрещённая_роль' },
+      { name: 'Минимум участников', value: 'мин_участников' },
+    )),
   new SlashCommandBuilder()
     .setName('розыгрыш_повтор_список')
     .setDescription('Список настроенных повторяющихся розыгрышей'),
@@ -2171,7 +2202,11 @@ async function faqReorderPanel(category, focusId) {
 // /init_menus редактирует то же сообщение вместо отправки нового (п.1).
 function buildGiveawayEmbed(giveaway, entryCount, ended = false, winners = null) {
   const endsAtSec = Math.floor(new Date(giveaway.ends_at).getTime() / 1000);
-  const conditionLine = giveaway.required_role_id ? `\nУсловие: только роль <@&${giveaway.required_role_id}>` : '';
+  const conditionLine = (giveaway.required_role_id ? `\nУсловие: только роль <@&${giveaway.required_role_id}>` : '')
+    + (giveaway.min_role_id ? `\nУсловие: роль <@&${giveaway.min_role_id}> и выше` : '')
+    + (giveaway.min_contracts_week ? `\nУсловие: ≥ ${giveaway.min_contracts_week} выполненных контрактов за эту неделю` : '')
+    + (giveaway.blocked_role_id ? `\nНе участвуют: роль <@&${giveaway.blocked_role_id}>` : '')
+    + (giveaway.min_participants ? `\nМинимум участников: ${giveaway.min_participants}` : '');
   const embed = new EmbedBuilder()
     .setColor(ended ? 0x2b2d31 : 0x57f287)
     .setTitle(`🎉 ${giveaway.prize}`)
@@ -2212,7 +2247,26 @@ async function endGiveaway(guild, giveawayId, actor = null) {
   const giveaway = await giveaways.getGiveaway(giveawayId);
   if (!giveaway || giveaway.status !== 'active') return [];
 
-  const entries = await giveaways.getEntries(giveawayId);
+  let entries = await giveaways.getEntries(giveawayId);
+  // Роль-запрет: если участнику выдали запрещённую роль уже после входа — он выбывает.
+  if (giveaway.blocked_role_id) {
+    const kept = [];
+    for (const did of entries) {
+      const m = guild.members.cache.get(did) || await guild.members.fetch(did).catch(() => null);
+      if (giveaways.isBlockedByRole(m, giveaway.blocked_role_id)) await giveaways.removeEntry(giveawayId, did).catch(() => {});
+      else kept.push(did);
+    }
+    entries = kept;
+  }
+  // Минимум участников: не набрали — розыгрыш отменяется.
+  if (giveaway.min_participants && entries.length < giveaway.min_participants) {
+    await cancelGiveaway(guild, giveawayId, actor);
+    try {
+      const channel = await guild.channels.fetch(giveaway.channel_id);
+      await channel.send(`ℹ️ Розыгрыш «${giveaway.prize}» не состоялся: участников ${entries.length} из минимально необходимых ${giveaway.min_participants}.`);
+    } catch (_) {}
+    return [];
+  }
   const weights = giveaway.weight_by_contracts ? await giveaways.contractWeights(entries).catch(() => null) : null;
   const winners = giveaways.pickWinners(entries, giveaway.winners_count, weights);
   await giveaways.setStatus(giveawayId, 'ended');
@@ -2223,7 +2277,7 @@ async function endGiveaway(guild, giveawayId, actor = null) {
     const embed = buildGiveawayEmbed(giveaway, entries.length, true, winners);
     try {
       const msg = await channel.messages.fetch(giveaway.message_id);
-      await msg.edit({ embeds: [embed], components: buildGiveawayComponents(giveawayId, true) });
+      await msg.edit({ content: '🎉 **РОЗЫГРЫШ ЗАВЕРШЁН** 🎉', embeds: [embed], components: buildGiveawayComponents(giveawayId, true) });
     } catch (_) {}
 
     if (winners.length > 0) {
@@ -2275,7 +2329,7 @@ async function cancelGiveaway(guild, giveawayId, actor) {
       .setDescription('❌ Розыгрыш отменён.');
     try {
       const msg = await channel.messages.fetch(giveaway.message_id);
-      await msg.edit({ embeds: [embed], components: buildGiveawayComponents(giveawayId, true) });
+      await msg.edit({ content: '❌ **РОЗЫГРЫШ ОТМЕНЁН** ❌', embeds: [embed], components: buildGiveawayComponents(giveawayId, true) });
     } catch (_) {}
     await channel.send(`❌ Розыгрыш «${giveaway.prize}» отменён.`);
   } catch (err) {
@@ -2293,8 +2347,8 @@ async function cancelGiveaway(guild, giveawayId, actor) {
 async function startGiveawayFromRule(guild, rule) {
   const endsAt = new Date(Date.now() + rule.duration_ms);
   const channel = await guild.channels.fetch(rule.channel_id);
-  const giveawayId = await giveaways.createGiveaway(rule.channel_id, rule.prize, rule.winners_count, rule.host_id, endsAt.toISOString(), rule.required_role_id, rule.id);
-  const embed = buildGiveawayEmbed({ prize: rule.prize, winners_count: rule.winners_count, ends_at: endsAt.toISOString(), host_id: rule.host_id, required_role_id: rule.required_role_id }, 0);
+  const giveawayId = await giveaways.createGiveaway(rule.channel_id, rule.prize, rule.winners_count, rule.host_id, endsAt.toISOString(), rule.required_role_id, rule.id, null, null, rule.blocked_role_id || null, rule.min_participants || null);
+  const embed = buildGiveawayEmbed({ prize: rule.prize, winners_count: rule.winners_count, ends_at: endsAt.toISOString(), host_id: rule.host_id, required_role_id: rule.required_role_id, blocked_role_id: rule.blocked_role_id, min_participants: rule.min_participants }, 0);
   const sent = await channel.send({
     content: '🎉 **РОЗЫГРЫШ** 🎉\n||@everyone||',
     embeds: [embed],
@@ -2317,12 +2371,12 @@ async function fireScheduledGiveaways(guild) {
       const endsAt = new Date(Date.now() + (s.duration_ms || 3600000));
       const gid = await giveaways.createGiveaway(
         s.channel_id, s.prize, s.winners_count, s.host_id, endsAt.toISOString(),
-        s.required_role_id || null, null, s.min_role_id || null, s.prize_tiers || null,
+        s.required_role_id || null, null, s.min_role_id || null, s.prize_tiers || null, s.blocked_role_id || null, s.min_participants || null,
       );
       const channel = await guild.channels.fetch(s.channel_id);
       const embed = buildGiveawayEmbed({
         prize: s.prize, winners_count: s.winners_count, ends_at: endsAt.toISOString(),
-        host_id: s.host_id, required_role_id: s.required_role_id, prize_tiers: s.prize_tiers,
+        host_id: s.host_id, required_role_id: s.required_role_id, prize_tiers: s.prize_tiers, blocked_role_id: s.blocked_role_id, min_participants: s.min_participants,
       }, 0);
       const sent = await channel.send({
         content: '🎉 **РОЗЫГРЫШ** 🎉',
@@ -2354,6 +2408,7 @@ async function checkRecurringGiveaways(guild) {
 
   for (const rule of rules) {
     if (rule.weekday !== todayWeekday || rule.last_run_date === todayStr) continue;
+    if (dates.mskNow().getUTCHours() < 12) continue; // повторяющиеся розыгрыши стартуют в 12:00 МСК
     try {
       await startGiveawayFromRule(guild, rule);
       await giveaways.setRecurringRuleLastRun(rule.id, todayStr);
@@ -2745,6 +2800,11 @@ async function kickReviewEmbed(k) {
   if (!targetParticipant && k.name) {
     targetParticipant = await db.get('SELECT * FROM participants WHERE name = ?', [k.name]);
   }
+  if (targetParticipant && (!k.target_static || k.target_static === 'all')) {
+    // «Все паспорта» — перечисляем Имя Фамилия и № каждого паспорта
+    const plist = await passportsLib.getAllPassports(targetParticipant.discord_id);
+    if (plist.length) embed.addFields({ name: 'Паспорта (Имя Фамилия — №)', value: plist.map((p) => `${p.name} — № ${p.static}`).join('\n').slice(0, 1024) });
+  }
   if (targetParticipant) {
     const staticForJoin = (k.target_static && k.target_static !== 'all') ? k.target_static : targetParticipant.static;
     const joinedEvent = await history.getLastJoined(targetParticipant.discord_id, staticForJoin);
@@ -3032,6 +3092,67 @@ async function removeParticipant(guild, participant, reason) {
   await safeUpdateMembersList(guild);
 }
 
+// Назначить/снять HR-Менеджера. HR — ступень иерархии рангов, поэтому меняем
+// ранг самого паспорта (а не только Discord-роль): иначе синхронизация ролей
+// снимает её, а сверка ролей на сайте считает «лишней ролью ранга».
+// Возвращает true, если что-то изменилось.
+async function setHrRole(guild, discordId, makeHr) {
+  const passports = await passportsLib.getAllPassports(discordId);
+  if (!passports.length) throw new Error('У участника нет паспортов.');
+  const hrIdx = config.ROLE_IDS.indexOf(config.ROLE_HR);
+  let changed = false;
+  if (makeHr) {
+    const alreadyHigh = passports.some((p) => {
+      const i = config.ROLE_IDS.indexOf(p.role_id);
+      return i !== -1 && i <= hrIdx;
+    });
+    if (!alreadyHigh) {
+      await passportsLib.updatePassportFields(discordId, passports[0].static, { role_id: config.ROLE_HR });
+      changed = true;
+    }
+  } else {
+    const below = config.ROLE_IDS[hrIdx + 1] || config.ROLE_APPLY;
+    for (const p of passports) {
+      if (p.role_id === config.ROLE_HR) {
+        await passportsLib.updatePassportFields(discordId, p.static, { role_id: below });
+        changed = true;
+      }
+    }
+    // роль могла быть выдана в Discord вручную без ранга паспорта
+    try {
+      const member = await guild.members.fetch(discordId);
+      if (member.roles.cache.has(config.ROLE_HR)) { await member.roles.remove(config.ROLE_HR); changed = true; }
+    } catch (_) {}
+  }
+  await syncEffectiveIdentity(guild, discordId);
+  await safeUpdateMembersList(guild);
+  try { web.invalidateAccess(discordId); } catch (_) {}
+  return changed;
+}
+
+// Роль HR уже выдана в Discord (так было при одобрении заявки раньше), но ранг
+// паспорта ниже — закрепляем HR в паспорте, чтобы сверка не ругалась.
+async function adoptDiscordHr(guild, discordId) {
+  try {
+    const member = await guild.members.fetch(discordId);
+    if (!member.roles.cache.has(config.ROLE_HR)) return false;
+    const ident = await passportsLib.computeEffectiveIdentity(discordId);
+    if (!ident) return false;
+    const hrIdx = config.ROLE_IDS.indexOf(config.ROLE_HR);
+    const cur = config.ROLE_IDS.indexOf(ident.roleId);
+    if (cur !== -1 && cur <= hrIdx) return false;
+    return await setHrRole(guild, discordId, true);
+  } catch (_) { return false; }
+}
+
+// Меняет местами основной паспорт и дополнительный (участник получает
+// другой паспорт как основной). Ранги/отпуска/каналы паспортов едут вместе с ними.
+async function swapPrimaryPassport(guild, discordId, extraStatic) {
+  await passportsLib.swapPrimaryPassport(discordId, extraStatic);
+  await syncEffectiveIdentity(guild, discordId);
+  await safeUpdateMembersList(guild);
+}
+
 // targetStatic: конкретный № паспорта или 'all'. Если это последний паспорт
 // участника — всё равно полностью увольняем (п.6.2), иначе снимается
 // только один паспорт (п.6/6.1), а роли/аккаунт остаются (п.6.3 через
@@ -3090,6 +3211,7 @@ async function handleParticipantAction(interaction, guild, action, discordId, pa
             components: [row(
               new ButtonBuilder().setCustomId(`passport_add:${discordId}`).setLabel('➕ Добавить паспорт').setStyle(ButtonStyle.Success),
               new ButtonBuilder().setCustomId(`passport_remove:${discordId}`).setLabel('➖ Удалить паспорт').setStyle(ButtonStyle.Danger),
+              new ButtonBuilder().setCustomId(`passport_primary:${discordId}`).setLabel('🔄 Сменить основной').setStyle(ButtonStyle.Primary),
             )],
           });
         }
@@ -3467,10 +3589,22 @@ client.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      if (interaction.commandName === 'розыгрыш_повтор_отменить' || interaction.commandName === 'розыгрыш_повтор_возобновить') {
+      if (interaction.commandName === 'розыгрыш_изменить') {
         const focused = interaction.options.getFocused();
-        const wantStatus = interaction.commandName === 'розыгрыш_повтор_возобновить' ? 'paused' : 'active';
-        const rules = await db.all(`SELECT * FROM giveaway_recurring_rules WHERE status = ? AND prize LIKE ? ORDER BY id DESC LIMIT 25`, [wantStatus, `%${focused}%`]);
+        const act = await db.all("SELECT id, prize, ends_at FROM giveaways WHERE status = 'active' AND prize LIKE ? ORDER BY id DESC LIMIT 15", [`%${focused}%`]);
+        const sch = await db.all("SELECT id, prize, start_at FROM scheduled_giveaways WHERE status = 'pending' AND prize LIKE ? ORDER BY start_at ASC LIMIT 10", [`%${focused}%`]);
+        const choices = [
+          ...act.map((r) => ({ name: `Идёт #${r.id} — ${r.prize}`.slice(0, 100), value: `g:${r.id}` })),
+          ...sch.map((r) => ({ name: `Не запущен #${r.id} — ${r.prize} (старт ${formatDateTime(new Date(r.start_at))})`.slice(0, 100), value: `s:${r.id}` })),
+        ];
+        try { await interaction.respond(choices.slice(0, 25)); } catch (_) {}
+        return;
+      }
+
+      if (interaction.commandName === 'розыгрыш_повтор_отменить' || interaction.commandName === 'розыгрыш_повтор_возобновить' || interaction.commandName === 'розыгрыш_повтор_изменить') {
+        const focused = interaction.options.getFocused();
+        const wantStatus = interaction.commandName === 'розыгрыш_повтор_возобновить' ? 'paused' : (interaction.commandName === 'розыгрыш_повтор_изменить' ? null : 'active');
+        const rules = wantStatus ? await db.all(`SELECT * FROM giveaway_recurring_rules WHERE status = ? AND prize LIKE ? ORDER BY id DESC LIMIT 25`, [wantStatus, `%${focused}%`]) : await db.all(`SELECT * FROM giveaway_recurring_rules WHERE status IN ('active','paused') AND prize LIKE ? ORDER BY id DESC LIMIT 25`, [`%${focused}%`]);
         const choices = rules.map((r) => ({
           name: `#${r.id} — ${r.prize} (каждый(ую) ${giveaways.WEEKDAY_NAMES[r.weekday]})`.slice(0, 100),
           value: String(r.id),
@@ -4113,6 +4247,8 @@ client.on('interactionCreate', async (interaction) => {
         const winnersCount = interaction.options.getInteger('победителей');
         const targetChannel = interaction.options.getChannel('канал') || interaction.channel;
         const requiredRole = interaction.options.getRole('условие');
+        const blockedRole = interaction.options.getRole('запрещённая_роль');
+        const minParticipants = interaction.options.getInteger('мин_участников');
 
         const durationMs = giveaways.parseDuration(durationStr);
         if (!durationMs) {
@@ -4122,8 +4258,8 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
         const endsAt = new Date(Date.now() + durationMs);
 
-        const giveawayId = await giveaways.createGiveaway(targetChannel.id, prize, winnersCount, interaction.user.id, endsAt.toISOString(), requiredRole ? requiredRole.id : null);
-        const embed = buildGiveawayEmbed({ prize, winners_count: winnersCount, ends_at: endsAt.toISOString(), host_id: interaction.user.id, required_role_id: requiredRole ? requiredRole.id : null }, 0);
+        const giveawayId = await giveaways.createGiveaway(targetChannel.id, prize, winnersCount, interaction.user.id, endsAt.toISOString(), requiredRole ? requiredRole.id : null, null, null, null, blockedRole ? blockedRole.id : null, minParticipants || null);
+        const embed = buildGiveawayEmbed({ prize, winners_count: winnersCount, ends_at: endsAt.toISOString(), host_id: interaction.user.id, required_role_id: requiredRole ? requiredRole.id : null, blocked_role_id: blockedRole ? blockedRole.id : null, min_participants: minParticipants || null }, 0);
         const sent = await targetChannel.send({
           content: '🎉 **РОЗЫГРЫШ** 🎉\n||@everyone||',
           embeds: [embed],
@@ -4462,6 +4598,8 @@ client.on('interactionCreate', async (interaction) => {
         const weekday = parseInt(interaction.options.getString('день_недели'), 10);
         const targetChannel = interaction.options.getChannel('канал') || interaction.channel;
         const requiredRole = interaction.options.getRole('условие');
+        const blockedRole = interaction.options.getRole('запрещённая_роль');
+        const minParticipants = interaction.options.getInteger('мин_участников');
 
         const durationMs = giveaways.parseDuration(durationStr);
         if (!durationMs) {
@@ -4469,7 +4607,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const ruleId = await giveaways.createRecurringRule(targetChannel.id, prize, winnersCount, durationMs, weekday, interaction.user.id, requiredRole ? requiredRole.id : null);
+        const ruleId = await giveaways.createRecurringRule(targetChannel.id, prize, winnersCount, durationMs, weekday, interaction.user.id, requiredRole ? requiredRole.id : null, blockedRole ? blockedRole.id : null, minParticipants || null);
 
         await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш настроен', [
           { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
@@ -4538,6 +4676,132 @@ client.on('interactionCreate', async (interaction) => {
 
         await interaction.editReply({ embeds: [embed] });
         return;
+      }
+
+      if (cmd === 'розыгрыш_изменить') {
+        if (!(await checkCommandAccess('розыгрыш_изменить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const [kind, idStr] = String(interaction.options.getString('розыгрыш') || '').split(':');
+        const newPrize = interaction.options.getString('приз');
+        const newWinners = interaction.options.getInteger('победителей');
+        const extendStr = interaction.options.getString('продлить');
+        const durStr = interaction.options.getString('длительность');
+        const startStr = interaction.options.getString('старт');
+        const roleReq = interaction.options.getRole('условие');
+        const roleMin = interaction.options.getRole('мин_роль');
+        const roleBlock = interaction.options.getRole('запрещённая_роль');
+        const minPartOpt = interaction.options.getInteger('мин_участников');
+        const clear = interaction.options.getString('убрать');
+        const pick = (cur, val, key) => (clear === key ? null : (val || cur || null));
+        const changes = [];
+
+        if (kind === 'g') {
+          const gv = await giveaways.getGiveaway(idStr);
+          if (!gv || gv.status !== 'active') return interaction.editReply('⛔ Розыгрыш не найден или уже завершён.');
+          let endsAt = new Date(gv.ends_at);
+          if (extendStr) {
+            const ms = giveaways.parseDuration(extendStr);
+            if (!ms) return interaction.editReply('⛔ Неверный формат «продлить». Например: 30m, 2h, 1d.');
+            endsAt = new Date(Math.max(endsAt.getTime(), Date.now()) + ms);
+            changes.push(`конец: ${formatDateTime(endsAt)}`);
+          }
+          const upd = {
+            prize: newPrize || gv.prize,
+            winners_count: newWinners || gv.winners_count,
+            ends_at: endsAt.toISOString(),
+            required_role_id: pick(gv.required_role_id, roleReq && roleReq.id, 'условие'),
+            min_role_id: pick(gv.min_role_id, roleMin && roleMin.id, 'мин_роль'),
+            blocked_role_id: pick(gv.blocked_role_id, roleBlock && roleBlock.id, 'запрещённая_роль'),
+            min_participants: pick(gv.min_participants, minPartOpt, 'мин_участников'),
+          };
+          await db.run(
+            'UPDATE giveaways SET prize = ?, winners_count = ?, ends_at = ?, required_role_id = ?, min_role_id = ?, blocked_role_id = ?, min_participants = ? WHERE id = ?',
+            [upd.prize, upd.winners_count, upd.ends_at, upd.required_role_id, upd.min_role_id, upd.blocked_role_id, upd.min_participants, gv.id],
+          );
+          try {
+            const fresh = await giveaways.getGiveaway(gv.id);
+            const channel = await guild.channels.fetch(fresh.channel_id);
+            const msg = await channel.messages.fetch(fresh.message_id);
+            await msg.edit({ embeds: [buildGiveawayEmbed(fresh, await giveaways.countEntries(gv.id))] });
+          } catch (_) {}
+          await logAudit(guild, interaction.user, 'Розыгрыш изменён', [
+            { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Розыгрыш', value: `#${gv.id} ${upd.prize}`, inline: true },
+          ]);
+          return interaction.editReply(`✅ Розыгрыш #${gv.id} обновлён${changes.length ? ` (${changes.join('; ')})` : ''}, сообщение перерисовано. Участники сохранены.`);
+        }
+
+        if (kind === 's') {
+          const s = await db.get("SELECT * FROM scheduled_giveaways WHERE id = ? AND status = 'pending'", [idStr]);
+          if (!s) return interaction.editReply('⛔ Запланированный розыгрыш не найден или уже запущен.');
+          let startAt = new Date(s.start_at);
+          if (startStr) {
+            const dOnly = dates.parseDateOnly(startStr);
+            const parsed = dOnly ? new Date(dOnly.getTime() + 12 * 3600e3) : (dates.parseDeadline(startStr) || (() => { const d = new Date(startStr); return Number.isNaN(d.getTime()) ? null : d; })());
+            if (!parsed) return interaction.editReply('⛔ Неверная дата старта. Например: 01.09.2026 (в 12:00) или 2026-09-01T18:00.');
+            startAt = parsed;
+          }
+          let durMs = s.duration_ms;
+          if (durStr) {
+            durMs = giveaways.parseDuration(durStr);
+            if (!durMs) return interaction.editReply('⛔ Неверный формат «длительность». Например: 30m, 2h, 1d.');
+          }
+          await db.run(
+            'UPDATE scheduled_giveaways SET prize = ?, winners_count = ?, duration_ms = ?, start_at = ?, required_role_id = ?, min_role_id = ?, blocked_role_id = ?, min_participants = ? WHERE id = ?',
+            [newPrize || s.prize, newWinners || s.winners_count, durMs, startAt.toISOString(),
+              pick(s.required_role_id, roleReq && roleReq.id, 'условие'), pick(s.min_role_id, roleMin && roleMin.id, 'мин_роль'),
+              pick(s.blocked_role_id, roleBlock && roleBlock.id, 'запрещённая_роль'), pick(s.min_participants, minPartOpt, 'мин_участников'), s.id],
+          );
+          await logAudit(guild, interaction.user, 'Запланированный розыгрыш изменён', [
+            { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+            { name: 'Розыгрыш', value: `#${s.id} ${newPrize || s.prize}`, inline: true },
+            { name: 'Старт', value: formatDateTime(startAt), inline: true },
+          ]);
+          return interaction.editReply(`✅ Запланированный розыгрыш #${s.id} обновлён. Старт: ${formatDateTime(startAt)}.`);
+        }
+
+        return interaction.editReply('⛔ Выберите розыгрыш из списка подсказок.');
+      }
+
+      if (cmd === 'розыгрыш_повтор_изменить') {
+        if (!(await checkCommandAccess('розыгрыш_повтор_изменить', interaction.member))) {
+          return interaction.reply({ content: '⛔ У вас нет прав для использования этой команды.', flags: MessageFlags.Ephemeral });
+        }
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        const rule = await giveaways.getRecurringRule(interaction.options.getString('правило'));
+        if (!rule) return interaction.editReply('⛔ Правило не найдено.');
+        const clear = interaction.options.getString('убрать');
+        const pick = (cur, val, key) => (clear === key ? null : (val || cur || null));
+        const durStr = interaction.options.getString('длительность');
+        let durMs = rule.duration_ms;
+        if (durStr) {
+          durMs = giveaways.parseDuration(durStr);
+          if (!durMs) return interaction.editReply('⛔ Неверный формат длительности. Например: 30m, 2h, 1d, 1w.');
+        }
+        const wdStr = interaction.options.getString('день_недели');
+        const ch = interaction.options.getChannel('канал');
+        const roleReq = interaction.options.getRole('условие');
+        const roleBlock = interaction.options.getRole('запрещённая_роль');
+        const upd = {
+          prize: interaction.options.getString('приз') || rule.prize,
+          winners: interaction.options.getInteger('победителей') || rule.winners_count,
+          weekday: wdStr !== null && wdStr !== undefined ? parseInt(wdStr, 10) : rule.weekday,
+          channel: ch ? ch.id : rule.channel_id,
+        };
+        await db.run(
+          'UPDATE giveaway_recurring_rules SET prize = ?, winners_count = ?, duration_ms = ?, weekday = ?, channel_id = ?, required_role_id = ?, blocked_role_id = ?, min_participants = ? WHERE id = ?',
+          [upd.prize, upd.winners, durMs, upd.weekday, upd.channel,
+            pick(rule.required_role_id, roleReq && roleReq.id, 'условие'), pick(rule.blocked_role_id, roleBlock && roleBlock.id, 'запрещённая_роль'),
+            pick(rule.min_participants, interaction.options.getInteger('мин_участников'), 'мин_участников'), rule.id],
+        );
+        await logAudit(guild, interaction.user, 'Повторяющийся розыгрыш изменён', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Правило', value: `#${rule.id} ${upd.prize}`, inline: true },
+          { name: 'День недели', value: giveaways.WEEKDAY_NAMES[upd.weekday], inline: true },
+        ]);
+        return interaction.editReply(`✅ Правило #${rule.id} обновлено: «${upd.prize}», каждый(ую) ${giveaways.WEEKDAY_NAMES[upd.weekday]} в <#${upd.channel}>. Применится к следующему запуску.`);
       }
 
       if (cmd === 'розыгрыш_повтор_отменить') {
@@ -5064,7 +5328,7 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
         const lines = rows.map((n) => {
-          const who = n.changed_by && n.changed_by !== 'unknown' ? `<@${n.changed_by}>` : 'кто-то';
+          const who = n.changed_by && /^\d{5,25}$/.test(n.changed_by) ? `<@${n.changed_by}>` : 'кто-то';
           return `«${n.old_nick || '—'}» → «${n.new_nick || '—'}» — ${who}, ${formatDateTime(new Date(n.at))}`;
         });
         const embed = new EmbedBuilder()
@@ -6027,6 +6291,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав рассматривать заявки.');
         const claiming = id.startsWith('review_claim:');
         const [, type, rowId] = id.split(':');
+        if (type === 'kick' && !perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         const table = REVIEW_TABLES[type];
         if (!table) return safeReply(interaction, 'Неизвестная очередь.');
         const rec = await db.get(`SELECT * FROM ${table} WHERE id = ?`, [rowId]);
@@ -6460,7 +6725,20 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id === 'kick_submit') {
-        return interaction.showModal(buildKickApplicationModal('modal_kick', {}, true));
+        // Сначала выбор паспорта (или всех), и только потом форма.
+        const myPassports = await passportsLib.getAllPassports(interaction.user.id);
+        if (!myPassports.length) {
+          return interaction.showModal(buildKickApplicationModal('modal_kick', {}, true));
+        }
+        const scopeSelect = new StringSelectMenuBuilder()
+          .setCustomId('select_kick_self')
+          .setPlaceholder('Какой паспорт увольняем?')
+          .addOptions([
+            new StringSelectMenuOptionBuilder().setLabel('Все мои паспорта').setValue('all'),
+            ...myPassports.map((p) => new StringSelectMenuOptionBuilder().setLabel(`${p.name} (№ ${p.static})`.slice(0, 100)).setValue(p.static)),
+            new StringSelectMenuOptionBuilder().setLabel('Другой участник (ввести вручную)').setValue('other'),
+          ]);
+        return safeReply(interaction, { content: 'Выберите паспорт для увольнения или «Все мои паспорта»:', components: [row(scopeSelect)] });
       }
 
       if (id === 'vacation_apply') {
@@ -6562,6 +6840,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
 
         await passportsLib.updatePassportFields(reqRow.discord_id, reqRow.target_static, { name: reqRow.new_name });
+        await passportsLib.syncReportNames(reqRow.discord_id, reqRow.target_static, reqRow.new_name);
         await syncEffectiveIdentity(guild, reqRow.discord_id);
         await syncProfileChannelName(guild, reqRow.discord_id, reqRow.target_static);
         await safeUpdateMembersList(guild);
@@ -6607,10 +6886,15 @@ client.on('interactionCreate', async (interaction) => {
         if (!reqRow || reqRow.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
 
         try {
-          const member = await guild.members.fetch(reqRow.discord_id);
-          await member.roles.add(config.ROLE_HR);
+          await setHrRole(guild, reqRow.discord_id, true);
         } catch (err) {
-          return safeReply(interaction, '⛔ Не удалось выдать роль (проверьте права бота).');
+          // нет паспортов (не участник) — просто выдаём Discord-роль
+          try {
+            const member = await guild.members.fetch(reqRow.discord_id);
+            await member.roles.add(config.ROLE_HR);
+          } catch (_) {
+            return safeReply(interaction, '⛔ Не удалось выдать роль (проверьте права бота).');
+          }
         }
         try { web.invalidateAccess(reqRow.discord_id); } catch (_) {}
         await db.run('UPDATE hr_applications SET status = ? WHERE id = ?', ['accepted', reqId]);
@@ -6699,6 +6983,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
         const [, queue, rowId, tplId] = id.split(':');
         const fn = REJECT_APPLY[queue];
+        if (queue === 'kick' && !perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         if (!fn) return safeReply(interaction, '⛔ Неизвестная очередь.');
         const tpl = await db.get('SELECT text FROM reject_reason_templates WHERE id = ?', [tplId]);
         if (!tpl) return safeReply(interaction, '⛔ Шаблон не найден (мог быть удалён) — используйте «Своя причина».');
@@ -6745,6 +7030,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('kick_edit:')) {
+        if (!perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k) return safeReply(interaction, 'Заявка не найдена.');
@@ -6752,6 +7038,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('kick_confirm:')) {
+        if (!perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k) return safeReply(interaction, 'Заявка не найдена.');
@@ -6759,7 +7046,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (id.startsWith('kick_reject:')) {
-        if (!perms.canReview(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав.');
+        if (!perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k || k.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
@@ -6792,6 +7079,9 @@ client.on('interactionCreate', async (interaction) => {
         }
         if (!already && giveaway.min_role_id && !giveaways.meetsMinRole(interaction.member, giveaway.min_role_id)) {
           return safeReply(interaction, `⛔ Участвовать могут роли не ниже <@&${giveaway.min_role_id}>.`);
+        }
+        if (!already && giveaways.isBlockedByRole(interaction.member, giveaway.blocked_role_id)) {
+          return safeReply(interaction, `⛔ В этом розыгрыше не участвуют обладатели роли <@&${giveaway.blocked_role_id}> — пока роль не снимут.`);
         }
         if (!already && giveaway.min_contracts_week) {
           const wr = contracts.getWeekRange(0);
@@ -7412,6 +7702,20 @@ client.on('interactionCreate', async (interaction) => {
         return safeReply(interaction, { components: [row(select)] });
       }
 
+      if (id.startsWith('passport_primary:')) {
+        if (!perms.canManageMembersList(interaction.member)) {
+          return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        }
+        const discordId = id.split(':')[1];
+        const extras = await db.all('SELECT * FROM extra_passports WHERE discord_id = ? ORDER BY position', [discordId]);
+        if (extras.length === 0) return safeReply(interaction, 'У этого участника нет дополнительных паспортов.');
+        const select = new StringSelectMenuBuilder()
+          .setCustomId(`select_passport_primary:${discordId}`)
+          .setPlaceholder('Какой паспорт сделать основным?')
+          .addOptions(extras.map((e) => new StringSelectMenuOptionBuilder().setLabel(`${e.name} (№ ${e.static})`).setValue(e.static)));
+        return safeReply(interaction, { content: 'Выбранный паспорт станет основным, нынешний основной — дополнительным.', components: [row(select)] });
+      }
+
       if (id === 'blacklist_add' || id === 'blacklist_add_nodiscord') {
         if (!perms.canManageBlacklist(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для управления чёрным списком.');
         const variant = id === 'blacklist_add_nodiscord' ? 'nd' : 'd';
@@ -7554,6 +7858,22 @@ client.on('interactionCreate', async (interaction) => {
           { name: 'Кому', value: `<@${discordId}> | № ${staticValue}`, inline: true },
         ]);
         return safeReply(interaction, 'Паспорт удалён.');
+      }
+
+      if (customId.startsWith('select_passport_primary:')) {
+        if (!perms.canManageMembersList(interaction.member)) return safeReply(interaction, '⛔ У вас нет прав для взаимодействия со списком участников.');
+        const discordId = customId.split(':')[1];
+        const staticValue = interaction.values[0];
+        try {
+          await swapPrimaryPassport(guild, discordId, staticValue);
+        } catch (err) {
+          return safeReply(interaction, `⛔ ${err.message}`);
+        }
+        await logAudit(guild, interaction.user, 'Основной паспорт изменён', [
+          { name: 'Инициатор', value: `<@${interaction.user.id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'Кому', value: `<@${discordId}> | новый основной № ${staticValue}`, inline: true },
+        ]);
+        return safeReply(interaction, 'Основной паспорт изменён.');
       }
 
       if (customId.startsWith('select_contract_remove:')) {
@@ -7827,6 +8147,23 @@ client.on('interactionCreate', async (interaction) => {
         const passport = passports.find((p) => p.static === staticValue);
         if (!passport) return safeReply(interaction, 'Паспорт не найден.');
         return interaction.showModal(buildDataChangeModal(`modal_data_change:${staticValue}`, { new_name: passport.name }));
+      }
+
+      // Выбор паспорта в форме «Подать заявку на увольнение» → открываем форму
+      if (customId === 'select_kick_self') {
+        const scope = interaction.values[0];
+        if (scope === 'other') return interaction.showModal(buildKickApplicationModal('modal_kick', {}, true));
+        const myPassports = await passportsLib.getAllPassports(interaction.user.id);
+        const chosen = scope === 'all' ? myPassports : myPassports.filter((p) => p.static === scope);
+        if (!chosen.length) return safeReply(interaction, 'Паспорт не найден — возможно, он уже снят.');
+        const modal = new ModalBuilder().setCustomId(`modal_kick_self:${scope}`).setTitle('Заявка на увольнение');
+        chosen.slice(0, 4).forEach((p, i) => {
+          modal.addComponents(row(txt(null, `name_${i}`, `Имя Фамилия (№ ${p.static}), можно новое`.slice(0, 45), {
+            value: p.name, required: false, placeholder: 'Оставьте пустым, если без изменений', maxLength: 60,
+          })));
+        });
+        modal.addComponents(row(txt(null, 'reason', 'Причина', { required: false, paragraph: true, maxLength: 400 })));
+        return interaction.showModal(modal);
       }
 
       if (customId.startsWith('select_kick_scope:')) {
@@ -8190,6 +8527,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Отказ в заявке на увольнение — с причиной
       if (id.startsWith('modal_kick_reject:')) {
+        if (!perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         return applyKickRejection(interaction, guild, id.split(':')[1], get('reason'));
       }
 
@@ -8260,7 +8598,8 @@ client.on('interactionCreate', async (interaction) => {
           console.error('Не удалось выдать роль при принятии заявки:', err);
         }
 
-        await syncEffectiveIdentity(guild, app.discord_id);
+        await syncEffectiveIdentity(guild, app.discord_id, { logNick: interaction.user.id });
+        await passportsLib.syncReportNames(app.discord_id, fields.static, fields.name, true);
         await history.logJoined(app.discord_id, fields.static, fields.name, `Принята заявка #${appId}`);
         const profileChannelUrl = await createProfileThread(guild, app.discord_id, fields.name, fields.static);
 
@@ -8270,6 +8609,8 @@ client.on('interactionCreate', async (interaction) => {
           const inviter = await invitations.resolveInviter(fields.invited_by);
           if (inviter) {
             await invitations.recordInvitation(inviter.discord_id, app.discord_id, fields.name, fields.static, new Date().toISOString());
+            await invitationsDisplay.safeUpdateInvitations(guild);
+            await notify(inviter.discord_id, 'invite', `Приглашение засчитано: ${fields.name} принят(а) в организацию`, '/me').catch(() => {});
           }
         }
 
@@ -8299,6 +8640,54 @@ client.on('interactionCreate', async (interaction) => {
         return safeReply(interaction, 'Заявка принята, участник добавлен.');
       }
 
+      // Заявка на увольнение по своим паспортам (после выбора паспорта/«все»)
+      if (id.startsWith('modal_kick_self:')) {
+        const scope = id.split(':')[1];
+        const myPassports = await passportsLib.getAllPassports(interaction.user.id);
+        const chosen = scope === 'all' ? myPassports : myPassports.filter((p) => p.static === scope);
+        if (!chosen.length) return safeReply(interaction, 'Паспорт не найден — возможно, он уже снят.');
+        const entered = chosen.slice(0, 4).map((p, i) => {
+          let v = '';
+          try { v = normalizeName(get(`name_${i}`)); } catch (_) {}
+          return { p, newName: v && v !== p.name ? v : '' };
+        });
+        const renamed = entered.filter((e) => e.newName);
+        let reason = get('reason') || '';
+        if (renamed.length) {
+          reason = `${reason ? reason + '\n' : ''}Указано новое Имя Фамилия: ${renamed.map((e) => `${e.p.name} → ${e.newName} (№ ${e.p.static})`).join('; ')}`.slice(0, 1000);
+        }
+        const k = {
+          discord_id: interaction.user.id,
+          discord_tag: interaction.user.tag,
+          // для «всех» ищем участника по имени основного паспорта, поэтому имя берём из базы
+          name: scope === 'all' ? myPassports[0].name : (entered[0].newName || entered[0].p.name),
+          target_static: scope === 'all' ? 'all' : scope,
+          reason,
+          status: 'pending',
+          created_at: new Date().toISOString(),
+        };
+        const result = await db.run(
+          `INSERT INTO kicks (discord_id, discord_tag, name, target_static, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [k.discord_id, k.discord_tag, k.name, k.target_static, k.reason, k.status, k.created_at],
+        );
+        k.id = result.lastID;
+        const reviewChannel = await guild.channels.fetch(config.CHANNEL_KICK_REVIEW);
+        const sent = await reviewChannel.send({
+          content: perms.mentionDeputyRoles(),
+          embeds: [await kickReviewEmbed(k)],
+          components: kickReviewComponents(k),
+          ...mentionOpts,
+        });
+        await db.run('UPDATE kicks SET message_id = ? WHERE id = ?', [sent.id, k.id]);
+        await logAudit(guild, interaction.user, 'Новая заявка на увольнение', [
+          { name: 'Подал заявку', value: `<@${k.discord_id}> | ${interaction.user.tag}`, inline: true },
+          { name: 'На кого', value: `${k.name}${k.target_static !== 'all' ? ` (паспорт № ${k.target_static})` : ' (все паспорта)'}`, inline: true },
+          { name: '№ заявки', value: `#${k.id}`, inline: true },
+        ]);
+        await notify(interaction.user.id, 'kick', 'Заявка на увольнение подана — руководство её рассматривает', '/me').catch(() => {});
+        return safeReply(interaction, 'Заявка на увольнение отправлена на рассмотрение.');
+      }
+
       // Подача заявки на увольнение
       if (id === 'modal_kick') {
         const k = {
@@ -8318,7 +8707,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const reviewChannel = await guild.channels.fetch(config.CHANNEL_KICK_REVIEW);
         const sent = await reviewChannel.send({
-          content: perms.mentionManagementRoles(),
+          content: perms.mentionDeputyRoles(),
           embeds: [await kickReviewEmbed(k)],
           components: kickReviewComponents(k),
           ...mentionOpts,
@@ -8341,6 +8730,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // Редактирование заявки на увольнение
       if (id.startsWith('modal_kick_edit:')) {
+        if (!perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         const kickId = id.split(':')[1];
         await db.run('UPDATE kicks SET name = ?, target_static = ?, reason = ? WHERE id = ?', [normalizeName(get('name')), get('target_static') || 'all', get('reason') || '', kickId]);
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
@@ -8355,6 +8745,7 @@ client.on('interactionCreate', async (interaction) => {
       // Подтверждение увольнения через заявку
       if (id.startsWith('modal_kick_confirm:')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (!perms.isDeputyTier(interaction.member)) return safeReply(interaction, '⛔ Заявки на увольнение рассматривает Зам. Владелец и выше.');
         const kickId = id.split(':')[1];
         const k = await db.get('SELECT * FROM kicks WHERE id = ?', [kickId]);
         if (!k || k.status !== 'pending') return safeReply(interaction, 'Заявка уже обработана.');
@@ -8447,7 +8838,7 @@ client.on('interactionCreate', async (interaction) => {
             const member = await guild.members.fetch(fields.discord_id);
             await member.roles.add(config.ROLE_APPLY);
           } catch (_) {}
-          await syncEffectiveIdentity(guild, fields.discord_id);
+          await syncEffectiveIdentity(guild, fields.discord_id, { logNick: interaction.user.id });
           await history.logJoined(fields.discord_id, fields.static, fields.name, 'Добавлен(а) вручную');
           const profileChannelUrl = await createProfileThread(guild, fields.discord_id, fields.name, fields.static);
           if (profileChannelUrl) {
@@ -9684,6 +10075,18 @@ client.once('clientReady', async () => {
       createProfileThread,
       removeParticipant,
       kickPassportOrFull,
+      setHrRole,
+      refreshGiveawayMessage: async (guild, giveawayId) => {
+        const gv = await giveaways.getGiveaway(giveawayId);
+        if (!gv || gv.status !== 'active' || !gv.message_id) return;
+        const channel = await guild.channels.fetch(gv.channel_id);
+        const msg = await channel.messages.fetch(gv.message_id);
+        const count = await giveaways.countEntries(giveawayId);
+        await msg.edit({ embeds: [buildGiveawayEmbed(gv, count)] });
+      },
+      adoptDiscordHr,
+      swapPrimaryPassport,
+      safeUpdateInvitations: (g) => invitationsDisplay.safeUpdateInvitations(g),
       safeUpdateMembersList,
       getCurrentText,
       runWeeklyRankAdjustment,
@@ -9843,7 +10246,7 @@ client.once('clientReady', async () => {
           const member = await guild.members.fetch(discordId);
           await member.roles.add([config.ROLE_APPLY, config.ROLE_ORGANIZATION].filter(Boolean));
         } catch (_) {}
-        await syncEffectiveIdentity(guild, discordId);
+        await syncEffectiveIdentity(guild, discordId, { logNick: String(byId || "bot") });
         await history.logJoined(discordId, staticNum, name, `Добавлен напрямую через сайт`).catch(() => {});
         let url = null;
         try { url = await createProfileThread(guild, discordId, name, staticNum); } catch (_) {}
@@ -10007,7 +10410,6 @@ client.once('clientReady', async () => {
         await badges.syncAllRoles(guild);
         // ежедневная сводка теперь по расписанию в 23:59 МСК (см. ниже)
         await sendWeeklyDigest(guild);
-        await sendPersonalWeeklyDigests(guild);
       }
     } catch (err) {
       console.error('Ошибка периодической проверки приглашений/заявок:', err);

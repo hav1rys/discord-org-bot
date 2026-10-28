@@ -157,12 +157,56 @@ async function removePassportKeepAccount(discordId, targetStatic) {
   return { archivedChannelId: removed ? removed.profile_thread_id : null };
 }
 
+// Меняет местами основной паспорт (participants) и один из дополнительных:
+// имя, №, ранг, отпуск, AFK и канал-профиль «переезжают» вместе с паспортом.
+async function swapPrimaryPassport(discordId, extraStatic) {
+  const fields = 'name, static, role_id, vacation_until, afk_since, profile_thread_id';
+  const primary = await db.get(`SELECT ${fields} FROM participants WHERE discord_id = ?`, [discordId]);
+  const extra = await db.get(`SELECT id, ${fields} FROM extra_passports WHERE discord_id = ? AND static = ?`, [discordId, extraStatic]);
+  if (!primary || !extra) throw new Error('Дополнительный паспорт не найден.');
+  const vals = (r) => [r.name, r.static, r.role_id, r.vacation_until, r.afk_since, r.profile_thread_id];
+  await db.run(
+    'UPDATE participants SET name = ?, static = ?, role_id = ?, vacation_until = ?, afk_since = ?, profile_thread_id = ? WHERE discord_id = ?',
+    [...vals(extra), discordId],
+  );
+  await db.run(
+    'UPDATE extra_passports SET name = ?, static = ?, role_id = ?, vacation_until = ?, afk_since = ?, profile_thread_id = ? WHERE id = ?',
+    [...vals(primary), extra.id],
+  );
+}
+
+// Имена в отчётах (приглашения, принятые HR, кодовые слова) хранятся снимком
+// на момент записи. При смене имени / возврате с новым именем обновляем снимки,
+// чтобы отчёты показывали актуальное Имя Фамилия. replaceStatic=true — при
+// возврате с новым паспортом заменяем и № паспорта в этих записях.
+async function syncReportNames(discordId, staticValue, newName, replaceStatic = false) {
+  if (!discordId || !newName) return;
+  await db.run(
+    replaceStatic
+      ? 'UPDATE invitations SET invitee_name = ?, invitee_static = ? WHERE invitee_discord_id = ?'
+      : 'UPDATE invitations SET invitee_name = ? WHERE invitee_discord_id = ? AND invitee_static = ?',
+    replaceStatic ? [newName, staticValue, discordId] : [newName, discordId, staticValue],
+  ).catch(() => {});
+  await db.run(
+    replaceStatic
+      ? 'UPDATE acceptances SET applicant_name = ?, applicant_static = ? WHERE applicant_discord_id = ?'
+      : 'UPDATE acceptances SET applicant_name = ? WHERE applicant_discord_id = ? AND applicant_static = ?',
+    replaceStatic ? [newName, staticValue, discordId] : [newName, discordId, staticValue],
+  ).catch(() => {});
+  await db.run(
+    "UPDATE codeword_submissions SET name = ? WHERE discord_id = ? AND static = ? AND (counted IS NULL OR counted = 0)",
+    [newName, discordId, staticValue],
+  ).catch(() => {});
+}
+
 module.exports = {
   getAllPassports,
   isStaticTaken,
   addExtraPassport,
   removeExtraPassport,
   removePassportKeepAccount,
+  swapPrimaryPassport,
+  syncReportNames,
   updatePassportFields,
   setPassportChannel,
   rankIndexOf,
